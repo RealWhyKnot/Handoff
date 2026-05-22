@@ -7,4 +7,11 @@ import "github.com/RealWhyKnot/Handoff/internal/dispatch"
 // register functions here when introducing a new category.
 func RegisterAll(r *dispatch.Router) {
 	RegisterSys(r)
+	RegisterHw(r)
+	RegisterNet(r)
+	RegisterProc(r)
+	RegisterEvt(r)
+	RegisterDrv(r)
+	RegisterFs(r)
+	RegisterPico(r)
 }
