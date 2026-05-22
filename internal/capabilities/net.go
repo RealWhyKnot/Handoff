@@ -9,7 +9,7 @@ import (
 )
 
 // RegisterNet wires read-only net.* networking-inventory handlers.
-// Active probes (ping/trace/curl) are gated and live in net_probes.go.
+// Active probes (ping/trace/curl) are input-guarded in their own files.
 func RegisterNet(r *dispatch.Router) {
 	r.Register("net.adapters", netAdapters)
 	r.Register("net.routes", netRoutes)

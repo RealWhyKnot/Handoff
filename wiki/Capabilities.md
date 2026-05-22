@@ -1,7 +1,20 @@
 # Capabilities
 
-All 29 capabilities registered by `handoff new`. Commands marked **gated** are
-either disabled by default or restricted to specific inputs.
+All 33 capabilities registered by `handoff new`. Commands marked **risky** are
+blocked until the host approves the warning prompt for the current session.
+
+---
+
+## Risky Command Consent
+
+The first risky command in a session opens a yes/no warning popup on the host.
+The warning explains that choosing **Yes** allows risky commands for the
+remainder of that `handoff new` session without another prompt. Choosing **No**
+blocks risky commands for the remainder of the session.
+
+Risky commands include arbitrary PowerShell execution, filesystem writes and
+deletes, process termination, service control, and Pico state-changing commands.
+Readonly inventory commands do not prompt.
 
 ---
 
@@ -104,8 +117,28 @@ Performs a GET or HEAD request to a public URL and returns the response.
 All running processes: PID, name, executable path, command line, working-set
 size (MB), and creation time from WMI `Win32_Process`. No args.
 
+### `proc.kill`
+**Risky.** Terminates a process by PID.
+
+| Arg | Type | Notes |
+|---|---|---|
+| `pid` | int | Required. Process ID to terminate with `Stop-Process -Force`. |
+
+Returns: PID, process name, executable path when available, and `killed=true`.
+
 ### `svc.list`
 All Windows services: name, display name, status, and start type. No args.
+
+### `svc.control`
+**Risky.** Starts, stops, or restarts a Windows service.
+
+| Arg | Type | Notes |
+|---|---|---|
+| `name` | string | Required. Windows service name. |
+| `action` | string | Required. One of `start`, `stop`, or `restart`. |
+
+Returns: service name, display name, requested action, status before, and status
+after.
 
 ---
 
@@ -167,6 +200,8 @@ Reads a file and returns its content as base64 plus a SHA-256 hash.
 ## Filesystem (write)
 
 ### `fs.upload`
+**Risky.** Opens the host risky-command prompt before writing.
+
 Writes a file to the host from operator-supplied bytes (base64-encoded). Capped
 at the relay's per-command body limit (2 MiB in v0.1).
 
@@ -179,6 +214,27 @@ at the relay's per-command body limit (2 MiB in v0.1).
 
 - Refuses writes under `C:\Windows\System32\`, `C:\Windows\SysWow64\`,
   `C:\Program Files\`, and `C:\Program Files (x86)\`.
+
+### `fs.mkdir`
+**Risky.** Creates a directory on the host.
+
+| Arg | Type | Notes |
+|---|---|---|
+| `path` | string | Required. Directory path to create. Parent directories are created as needed. |
+
+Uses the same protected-location guard as `fs.upload`.
+
+### `fs.delete`
+**Risky.** Deletes a file or directory from the host.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `path` | string | required | Absolute path to delete. |
+| `recursive` | bool | `false` | Required for directories. |
+
+- Refuses relative paths.
+- Refuses drive roots, the current user's profile root, Windows roots, Program
+  Files roots, and the same protected system paths as `fs.upload`.
 
 ### `fs.download`
 Same as `fs.read` -- reads a file from the host and returns it to the operator.
@@ -208,9 +264,13 @@ Runs `picotool info -a -m -d -l` against a specific device.
 | `serial` | string | Optional. Picotool `--id` value to target a specific board. |
 
 ### `pico.bootsel`
+**Risky.**
+
 Reboots the attached Pico into BOOTSEL mode (`picotool reboot -f -u`). No args.
 
 ### `pico.flash`
+**Risky.**
+
 Flashes a UF2 file (`picotool load -fx`).
 
 | Arg | Type | Notes |
@@ -218,6 +278,8 @@ Flashes a UF2 file (`picotool load -fx`).
 | `uf2_path` | string | Required. Absolute path to the UF2 file on the host. |
 
 ### `pico.save`
+**Risky.**
+
 Saves the current Pico flash to a local file (`picotool save -a`).
 
 | Arg | Type | Notes |
@@ -225,6 +287,8 @@ Saves the current Pico flash to a local file (`picotool save -a`).
 | `out_path` | string | Required. Destination path for the saved binary. |
 
 ### `pico.reset`
+**Risky.**
+
 Reboots the attached Pico normally (`picotool reboot`). No args.
 
 ---
@@ -232,12 +296,9 @@ Reboots the attached Pico normally (`picotool reboot`). No args.
 ## PowerShell Exec
 
 ### `ps.exec`
-**Gated -- disabled by default.** Runs an arbitrary PowerShell script on the
-host and returns combined stdout.
-
-The host must opt in by setting `HANDOFF_ALLOW_PSEXEC=1` in the environment
-before running `handoff new`. If the env var is absent or not `1`, the command
-returns `ok: false` with a message saying so.
+**Risky.** Runs an arbitrary PowerShell script on the host and returns combined
+stdout. The first risky command in the session asks the host to approve risky
+commands for the remainder of the session.
 
 | Arg | Type | Notes |
 |---|---|---|

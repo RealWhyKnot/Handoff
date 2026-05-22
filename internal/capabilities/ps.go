@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -13,33 +12,24 @@ import (
 	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 )
 
-// RegisterPs wires ps.exec. The kind is disabled by default; the host
-// has to opt in by setting HANDOFF_ALLOW_PSEXEC=1 in the environment
-// before running `handoff new`. The handler is always registered so the
-// operator gets a clear "disabled" message rather than "unknown kind".
+// RegisterPs wires ps.exec. The first risky command in a session prompts the
+// host for consent; a yes allows risky commands until the session exits.
 //
-// When enabled, executions are rate-limited to 10 per rolling minute
-// per session to slow runaway loops.
+// Executions are rate-limited to 10 per rolling minute per session to slow
+// runaway loops.
 func RegisterPs(r *dispatch.Router) {
 	r.Register("ps.exec", psExec())
 }
 
 var (
-	psMu       sync.Mutex
-	psHistory  []time.Time
-	psLimit    = 10
-	psWindow   = time.Minute
+	psMu      sync.Mutex
+	psHistory []time.Time
+	psLimit   = 10
+	psWindow  = time.Minute
 )
 
 func psExec() dispatch.Handler {
 	return func(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
-		if os.Getenv("HANDOFF_ALLOW_PSEXEC") != "1" {
-			return map[string]interface{}{
-				"ok":     false,
-				"reason": "ps.exec is disabled; rerun handoff with HANDOFF_ALLOW_PSEXEC=1 to enable",
-			}, nil
-		}
-
 		var script string
 		if v, ok := args["script"]; ok {
 			_ = json.Unmarshal(v, &script)
@@ -50,6 +40,9 @@ func psExec() dispatch.Handler {
 		}
 		if len(script) > 16*1024 {
 			return nil, fmt.Errorf("ps.exec: script is %d bytes; cap is 16384", len(script))
+		}
+		if err := requireRiskConsent(ctx, "ps.exec", "Runs arbitrary PowerShell code on this computer. The script can read, change, or delete files and can start programs as the current user."); err != nil {
+			return nil, err
 		}
 
 		// Rate limit.

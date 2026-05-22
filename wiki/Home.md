@@ -1,7 +1,7 @@
 # Handoff
 
 Handoff lets a Windows user share a diagnostic session with a helper without
-opening firewall ports, installing agents on both sides, or handing over
+opening firewall ports, installing software on both sides, or handing over
 credentials.
 
 ```

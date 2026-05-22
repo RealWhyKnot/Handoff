@@ -25,7 +25,7 @@ session live -- share the view URL with your helper:
 
 press Ctrl+C to end the session at any time.
 
-ready -- 29 capabilities registered
+ready -- 33 capabilities registered
 ```
 
 Copy the URL and send it to your helper (chat, email, phone -- any channel
@@ -44,6 +44,12 @@ Each command the operator queues prints to your console:
 
 Every command is also appended to the audit log so you have a record of what
 ran. See [[Configuration]] for the log path.
+
+Risky commands, such as arbitrary PowerShell execution, filesystem writes or
+deletes, process termination, service control, and Pico flashing/reset actions,
+open a yes/no warning popup the first time they are requested. Choosing **Yes**
+allows risky commands for the remainder of the session without another prompt.
+Only approve this if you trust the person using the view URL.
 
 ## 4. End the Session
 

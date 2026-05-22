@@ -2,11 +2,16 @@
 
 Handoff is a Windows CLI tool for token-gated remote debug sessions. The host
 runs `handoff new`, which mints a one-time session on the relay and starts a
-local agent loop. The view URL is passed to an operator, who opens it in a
+local bridge loop. The view URL is passed to an operator, who opens it in a
 browser (or runs `handoff connect <url>`) to queue diagnostic commands.
 Commands run on the host and results stream back through the relay in real
 time -- no inbound firewall rules, no VPN, no shared credentials beyond the
 view token.
+
+Risky commands, such as arbitrary PowerShell execution, file deletion, process
+termination, service control, and Pico flashing/reset actions, require a host
+yes/no warning prompt. A yes allows risky commands for the remainder of that
+session; a no blocks them for that session.
 
 **Flow:** host runs `handoff new` and shares the printed URL -- operator opens
 the URL and queues commands -- host console shows each command and result --
@@ -16,8 +21,9 @@ host presses Ctrl+C or types `q` to end the session.
 
 Download the latest `handoff.exe` from
 [Releases](https://github.com/RealWhyKnot/Handoff/releases) and run it from a
-terminal. No installer. The default relay is `https://handoff.whyknot.dev`;
-set `HANDOFF_RELAY` to point at a different one.
+terminal. No installer. The default relay is
+[https://handoff.whyknot.dev/](https://handoff.whyknot.dev/); set
+`HANDOFF_RELAY` to point at a different one.
 
 ### Build from source
 

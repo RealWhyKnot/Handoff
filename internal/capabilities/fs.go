@@ -16,8 +16,8 @@ import (
 	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 )
 
-// RegisterFs wires fs.ls and fs.read. Write-side fs.upload / fs.download
-// are gated and live in fs_gated.go (deferred until v0.2).
+// RegisterFs wires fs.ls and fs.read. Mutating filesystem commands live in
+// fs_write.go and require session consent before changing the host.
 func RegisterFs(r *dispatch.Router) {
 	r.Register("fs.ls", fsLs)
 	r.Register("fs.read", fsRead)
@@ -44,10 +44,10 @@ func fsLs(ctx context.Context, args map[string]json.RawMessage) (interface{}, er
 			continue
 		}
 		row := map[string]interface{}{
-			"name": e.Name(),
-			"dir":  e.IsDir(),
-			"size": info.Size(),
-			"mode": info.Mode().String(),
+			"name":  e.Name(),
+			"dir":   e.IsDir(),
+			"size":  info.Size(),
+			"mode":  info.Mode().String(),
 			"mtime": info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
 		}
 		out = append(out, row)
@@ -110,10 +110,10 @@ func fsRead(ctx context.Context, args map[string]json.RawMessage) (interface{}, 
 	h.Write(buf)
 
 	return map[string]interface{}{
-		"path":     path,
-		"size":     info.Size(),
-		"sha256":   hex.EncodeToString(h.Sum(nil)),
-		"base64":   base64.StdEncoding.EncodeToString(buf),
-		"mtime":    info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+		"path":   path,
+		"size":   info.Size(),
+		"sha256": hex.EncodeToString(h.Sum(nil)),
+		"base64": base64.StdEncoding.EncodeToString(buf),
+		"mtime":  info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
 	}, nil
 }

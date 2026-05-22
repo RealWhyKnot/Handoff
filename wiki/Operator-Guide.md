@@ -12,7 +12,7 @@ https://handoff.whyknot.dev/v/n1_AbCdEfGhIjK
 
 Open it in any modern browser. You get the viewer UI: a command palette on the
 left and a results pane on the right. Commands queue immediately when you click
-them; results appear as the host's agent processes them.
+them; results appear as the host bridge processes them.
 
 ## Using the CLI Instead
 
@@ -39,6 +39,11 @@ immediately.
 
 Commands with required arguments (such as `net.ping`, which needs a `target`,
 or `fs.ls`, which needs a `path`) will show an input before queuing.
+
+Risky commands queue like any other command, but the host must approve the
+session warning popup before any risky command runs. A host approval allows
+risky commands for the remainder of that session; a host denial blocks them for
+the remainder of that session.
 
 For the full list of what each command returns, see [[Capabilities]].
 

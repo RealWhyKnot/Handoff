@@ -8,7 +8,6 @@ set before running `handoff new`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `HANDOFF_RELAY` | `https://handoff.whyknot.dev` | Relay base URL. Override to use a self-hosted relay. Include the scheme; do not include a trailing slash. |
-| `HANDOFF_ALLOW_PSEXEC` | (unset) | Set to `1` to enable the `ps.exec` capability. Any other value (or absent) leaves it disabled. |
 
 ## Audit Log
 
@@ -29,3 +28,13 @@ the log falls back to `%TEMP%\whyknot\handoff\audit\`.
 
 Each line is a JSON object with fields: `ts`, `sid`, `op`, `cap`, `args`,
 `consent`, `result`, `elapsed_ms`, and (when an error occurred) `detail`.
+
+## Risky Command Prompt
+
+Risky commands no longer use an environment-variable opt-in. The first risky
+command in a `handoff new` session opens a yes/no warning popup on the host.
+Choosing **Yes** allows risky commands for the remainder of that session.
+Choosing **No** blocks risky commands for the remainder of that session.
+
+Risky commands include arbitrary PowerShell execution, filesystem writes and
+deletes, process termination, service control, and Pico state-changing commands.

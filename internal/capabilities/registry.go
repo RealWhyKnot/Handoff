@@ -6,6 +6,7 @@ import "github.com/RealWhyKnot/Handoff/internal/dispatch"
 // RegisterAll wires every shipped capability into the router. Add new
 // register functions here when introducing a new category.
 func RegisterAll(r *dispatch.Router) {
+	resetRiskConsent()
 	RegisterSys(r)
 	RegisterHw(r)
 	RegisterNet(r)

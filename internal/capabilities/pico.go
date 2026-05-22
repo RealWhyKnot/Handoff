@@ -46,10 +46,10 @@ func picoList(ctx context.Context, _ map[string]json.RawMessage) (interface{}, e
 	out, errb, err := runPicotool(ctx, "info", "-a")
 	if err != nil {
 		return map[string]interface{}{
-			"ok":      false,
-			"reason":  err.Error(),
-			"stderr":  strings.TrimSpace(errb),
-			"stdout":  strings.TrimSpace(out),
+			"ok":     false,
+			"reason": err.Error(),
+			"stderr": strings.TrimSpace(errb),
+			"stdout": strings.TrimSpace(out),
 		}, nil
 	}
 	return map[string]interface{}{
@@ -76,6 +76,9 @@ func picoInfo(ctx context.Context, args map[string]json.RawMessage) (interface{}
 }
 
 func picoBootsel(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
+	if err := requireRiskConsent(ctx, "pico.bootsel", "Reboots an attached Pico into BOOTSEL mode. Connected software may lose its current device connection."); err != nil {
+		return nil, err
+	}
 	out, errb, err := runPicotool(ctx, "reboot", "-f", "-u")
 	if err != nil {
 		return map[string]interface{}{
@@ -96,6 +99,9 @@ func picoFlash(ctx context.Context, args map[string]json.RawMessage) (interface{
 	if uf2 == "" {
 		return nil, fmt.Errorf("pico.flash: 'uf2_path' is required")
 	}
+	if err := requireRiskConsent(ctx, "pico.flash", "Flashes firmware to an attached Pico from a UF2 file. Bad firmware can make the device stop working until it is reflashed."); err != nil {
+		return nil, err
+	}
 	out, errb, err := runPicotool(ctx, "load", "-fx", uf2)
 	if err != nil {
 		return map[string]interface{}{"ok": false, "reason": err.Error(), "stderr": strings.TrimSpace(errb), "stdout": strings.TrimSpace(out)}, nil
@@ -111,6 +117,9 @@ func picoSave(ctx context.Context, args map[string]json.RawMessage) (interface{}
 	if out == "" {
 		return nil, fmt.Errorf("pico.save: 'out_path' is required")
 	}
+	if err := requireRiskConsent(ctx, "pico.save", "Writes a Pico flash dump to a file on this computer. Existing files may be replaced by picotool behavior."); err != nil {
+		return nil, err
+	}
 	stdout, errb, err := runPicotool(ctx, "save", "-a", out)
 	if err != nil {
 		return map[string]interface{}{"ok": false, "reason": err.Error(), "stderr": strings.TrimSpace(errb), "stdout": strings.TrimSpace(stdout)}, nil
@@ -119,6 +128,9 @@ func picoSave(ctx context.Context, args map[string]json.RawMessage) (interface{}
 }
 
 func picoReset(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
+	if err := requireRiskConsent(ctx, "pico.reset", "Reboots an attached Pico. Connected software may lose its current device connection."); err != nil {
+		return nil, err
+	}
 	out, errb, err := runPicotool(ctx, "reboot")
 	if err != nil {
 		return map[string]interface{}{"ok": false, "reason": err.Error(), "stderr": strings.TrimSpace(errb), "stdout": strings.TrimSpace(out)}, nil
