@@ -10,10 +10,12 @@ func RegisterAll(r *dispatch.Router) {
 	RegisterHw(r)
 	RegisterNet(r)
 	RegisterNetProbes(r)
+	RegisterNetCurl(r)
 	RegisterProc(r)
 	RegisterEvt(r)
 	RegisterDrv(r)
 	RegisterFs(r)
+	RegisterFsWrite(r)
 	RegisterPico(r)
 	RegisterPs(r)
 }
