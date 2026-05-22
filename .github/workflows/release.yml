@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Fetch picotool
+        shell: pwsh
+        run: |
+          ./scripts/fetch-picotool.ps1
+
+      - name: Build with embedded picotool
+        shell: pwsh
+        run: |
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          $env:CGO_ENABLED = '0'
+          go build -trimpath -ldflags="-s -w" -tags embed_picotool -o handoff.exe .
+
+      - name: Build sidecar version manifest
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          $version = $tag.TrimStart('v')
+          $sha = (Get-FileHash -Algorithm SHA256 handoff.exe).Hash.ToLower()
+          $manifest = [ordered]@{
+            version = $version
+            sha256  = $sha
+            url     = "https://github.com/${{ github.repository }}/releases/download/$tag/handoff.exe"
+            notes   = "Release $tag"
+          }
+          $manifest | ConvertTo-Json -Compress | Out-File -FilePath handoff-version.json -Encoding ASCII
+          Get-Content handoff-version.json
+
+      - name: Code signing (disabled until cert is provisioned)
+        if: ${{ env.SIGNING_CERT_BASE64 != '' }}
+        env:
+          SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          # Activate by setting the SIGNING_CERT_BASE64 and SIGNING_CERT_PASSWORD
+          # repository secrets to a base64-encoded PFX and its password. The
+          # block stays inert until both are set.
+          $pfx = [Convert]::FromBase64String($env:SIGNING_CERT_BASE64)
+          $tmp = Join-Path $env:RUNNER_TEMP 'handoff-sign.pfx'
+          [IO.File]::WriteAllBytes($tmp, $pfx)
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object -Descending FullName | Select-Object -First 1
+          & $signtool.FullName sign /f $tmp /p $env:SIGNING_CERT_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 handoff.exe
+          Remove-Item $tmp -Force
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            handoff.exe
+            handoff-version.json
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}

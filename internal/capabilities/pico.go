@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/RealWhyKnot/Handoff/internal/dispatch"
+	"github.com/RealWhyKnot/Handoff/internal/picotool"
 )
 
 // RegisterPico wires the pico.* handlers. v0.1 shells out to the
@@ -25,15 +26,7 @@ func RegisterPico(r *dispatch.Router) {
 }
 
 func picotoolPath() (string, error) {
-	p, err := exec.LookPath("picotool")
-	if err == nil {
-		return p, nil
-	}
-	p, err = exec.LookPath("picotool.exe")
-	if err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("picotool not on PATH (install from raspberrypi/pico-sdk-tools or `winget install raspberrypi.picotool`)")
+	return picotool.Path()
 }
 
 func runPicotool(ctx context.Context, args ...string) (stdout, stderr string, err error) {
