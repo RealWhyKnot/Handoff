@@ -9,9 +9,11 @@ func RegisterAll(r *dispatch.Router) {
 	RegisterSys(r)
 	RegisterHw(r)
 	RegisterNet(r)
+	RegisterNetProbes(r)
 	RegisterProc(r)
 	RegisterEvt(r)
 	RegisterDrv(r)
 	RegisterFs(r)
 	RegisterPico(r)
+	RegisterPs(r)
 }
