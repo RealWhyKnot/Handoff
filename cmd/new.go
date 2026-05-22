@@ -81,7 +81,7 @@ func New(args []string) {
 	defer bridge.Close()
 
 	hostname, _ := os.Hostname()
-	if err := bridge.SendHello(ctx, hostname, Version); err != nil {
+	if err := bridge.SendHello(ctx, hostname, Version, router.Kinds()); err != nil {
 		fmt.Fprintln(os.Stderr, "hello failed:", err)
 		os.Exit(1)
 	}

@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -112,13 +113,17 @@ func Dial(ctx context.Context, baseURL, writeToken string) (*Bridge, error) {
 	return &Bridge{conn: conn}, nil
 }
 
-// SendHello announces this host's identity so the operator's viewer can
-// see who's on the other side.
-func (b *Bridge) SendHello(ctx context.Context, hostname, version string) error {
+// SendHello announces this host's identity and command surface so the
+// operator's viewer can match the command palette to this host.
+func (b *Bridge) SendHello(ctx context.Context, hostname, version string, capabilities []string) error {
+	caps := append([]string(nil), capabilities...)
+	sort.Strings(caps)
 	payload := map[string]interface{}{
-		"hostname": hostname,
-		"version":  version,
-		"os":       "windows",
+		"hostname":         hostname,
+		"version":          version,
+		"os":               "windows",
+		"protocol_version": 1,
+		"capabilities":     caps,
 	}
 	return b.send(ctx, "hello", payload)
 }

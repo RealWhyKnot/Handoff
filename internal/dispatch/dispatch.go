@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -33,12 +34,13 @@ func (r *Router) Register(kind string, h Handler) {
 	r.handlers[kind] = h
 }
 
-// Kinds returns the registered command kinds in no particular order.
+// Kinds returns the registered command kinds in stable lexical order.
 func (r *Router) Kinds() []string {
 	out := make([]string, 0, len(r.handlers))
 	for k := range r.handlers {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 
