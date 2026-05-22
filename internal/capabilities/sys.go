@@ -21,6 +21,8 @@ func RegisterSys(r *dispatch.Router) {
 	r.Register("sys.hotfixes", sysHotfixes)
 	r.Register("sys.reboot-required", sysRebootRequired)
 	r.Register("sys.env", sysEnv)
+	r.Register("sys.users", sysUsers)
+	r.Register("sys.timezone", sysTimezone)
 }
 
 func sysInfo(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
@@ -105,6 +107,63 @@ if ($scope -eq 'all' -or $scope -eq 'process') { Add-Scope 'process' 'Process' }
     entries = @($entries | Sort-Object scope, name)
 } | ConvertTo-Json -Compress -Depth 4
 `, psSingleQuote(scope), psSingleQuote(prefix))
+	return runPwshJSON(ctx, script)
+}
+
+func sysUsers(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
+	script := `
+$logon = Get-CimInstance Win32_LoggedOnUser -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        $acc = $_.Antecedent
+        if ($acc -match 'Domain="([^"]+)",Name="([^"]+)"') {
+            [pscustomobject]@{
+                domain = $matches[1]
+                name   = $matches[2]
+            }
+        }
+    } | Sort-Object -Property name -Unique
+
+$sessions = @()
+try {
+    $raw = (& query.exe session) 2>$null
+    if ($raw -and $LASTEXITCODE -eq 0) {
+        $idx = 0
+        foreach ($line in $raw) {
+            $idx++
+            if ($idx -eq 1) { continue }
+            if (-not $line.Trim()) { continue }
+            $sessions += [ordered]@{
+                raw = $line.Trim()
+            }
+        }
+    }
+} catch {}
+
+[ordered]@{
+    accounts = @($logon | Select-Object -First 50)
+    terminal_sessions = @($sessions | Select-Object -First 50)
+} | ConvertTo-Json -Compress -Depth 4
+`
+	return runPwshJSON(ctx, script)
+}
+
+func sysTimezone(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
+	script := `
+$tz = Get-TimeZone
+$now = Get-Date
+[ordered]@{
+    id            = $tz.Id
+    display_name  = $tz.DisplayName
+    standard_name = $tz.StandardName
+    base_utc_offset_minutes = [int]$tz.BaseUtcOffset.TotalMinutes
+    supports_dst  = $tz.SupportsDaylightSavingTime
+    is_dst_now    = $tz.IsDaylightSavingTime($now)
+    local_now     = $now.ToString("o")
+    utc_now       = $now.ToUniversalTime().ToString("o")
+    culture       = (Get-Culture).Name
+    ui_culture    = (Get-UICulture).Name
+} | ConvertTo-Json -Compress
+`
 	return runPwshJSON(ctx, script)
 }
 

@@ -19,6 +19,8 @@ func RegisterAll(r *dispatch.Router) {
 	RegisterFsWrite(r)
 	RegisterReg(r)
 	RegisterTask(r)
+	RegisterSec(r)
+	RegisterApp(r)
 	RegisterPico(r)
 	RegisterPs(r)
 }

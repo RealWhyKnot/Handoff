@@ -390,6 +390,158 @@ func TestEvtProvidersRejectsOverLongPrefix(t *testing.T) {
 	}
 }
 
+func TestFsHeadRejectsRelativePath(t *testing.T) {
+	_, err := fsHead(context.Background(), rawArgs(t, map[string]interface{}{
+		"path": "relative",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("fsHead err = %v, want absolute-path validation", err)
+	}
+}
+
+func TestFsTailRejectsRelativePath(t *testing.T) {
+	_, err := fsTail(context.Background(), rawArgs(t, map[string]interface{}{
+		"path": "relative",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("fsTail err = %v, want absolute-path validation", err)
+	}
+}
+
+func TestFsHeadReturnsLineWindow(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "log.txt")
+	var sb strings.Builder
+	for i := 0; i < 200; i++ {
+		sb.WriteString("line-")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString("\n")
+	}
+	if err := os.WriteFile(target, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := fsHead(context.Background(), rawArgs(t, map[string]interface{}{
+		"path":  target,
+		"lines": 10,
+	}))
+	if err != nil {
+		t.Fatalf("fsHead err = %v", err)
+	}
+	payload := res.(map[string]interface{})
+	lines := payload["lines"].([]string)
+	if len(lines) != 10 || lines[0] != "line-0" || lines[9] != "line-9" {
+		t.Fatalf("fsHead lines = %#v", lines)
+	}
+}
+
+func TestFsTailReturnsTrailingLines(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "log.txt")
+	var sb strings.Builder
+	for i := 0; i < 200; i++ {
+		sb.WriteString("line-")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString("\n")
+	}
+	if err := os.WriteFile(target, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := fsTail(context.Background(), rawArgs(t, map[string]interface{}{
+		"path":  target,
+		"lines": 5,
+	}))
+	if err != nil {
+		t.Fatalf("fsTail err = %v", err)
+	}
+	payload := res.(map[string]interface{})
+	lines := payload["lines"].([]string)
+	if len(lines) != 5 || lines[0] != "line-195" || lines[4] != "line-199" {
+		t.Fatalf("fsTail lines = %#v", lines)
+	}
+}
+
+func TestFsStatReturnsFileMetadata(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "thing.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := fsStat(context.Background(), rawArgs(t, map[string]interface{}{
+		"path": target,
+	}))
+	if err != nil {
+		t.Fatalf("fsStat err = %v", err)
+	}
+	payload := res.(map[string]interface{})
+	if payload["name"].(string) != "thing.txt" {
+		t.Fatalf("name = %v", payload["name"])
+	}
+	if payload["is_dir"].(bool) {
+		t.Fatalf("is_dir should be false")
+	}
+	if payload["size"].(int64) != 5 {
+		t.Fatalf("size = %v", payload["size"])
+	}
+}
+
+func TestFsTreeReturnsEntriesWithCap(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 10; i++ {
+		sub := filepath.Join(dir, "sub-"+strconv.Itoa(i))
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for j := 0; j < 5; j++ {
+			if err := os.WriteFile(filepath.Join(sub, "f-"+strconv.Itoa(j)+".txt"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	res, err := fsTree(context.Background(), rawArgs(t, map[string]interface{}{
+		"path":        dir,
+		"max_depth":   2,
+		"max_entries": 100,
+	}))
+	if err != nil {
+		t.Fatalf("fsTree err = %v", err)
+	}
+	payload := res.(map[string]interface{})
+	count := payload["count"].(int)
+	if count == 0 || count > 100 {
+		t.Fatalf("count = %d, want 1..100", count)
+	}
+}
+
+func TestNetTLSRejectsBadHost(t *testing.T) {
+	_, err := netTLS(context.Background(), rawArgs(t, map[string]interface{}{
+		"host": "example.com; rm -rf /",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "invalid characters") {
+		t.Fatalf("netTLS err = %v, want host validation", err)
+	}
+}
+
+func TestNetTLSRejectsBadPort(t *testing.T) {
+	_, err := netTLS(context.Background(), rawArgs(t, map[string]interface{}{
+		"host": "example.com",
+		"port": 70000,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "port") {
+		t.Fatalf("netTLS err = %v, want port validation", err)
+	}
+}
+
+func TestAppListRejectsOverLongPrefix(t *testing.T) {
+	_, err := appList(context.Background(), rawArgs(t, map[string]interface{}{
+		"name_prefix": strings.Repeat("a", 200),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("appList err = %v, want prefix validation", err)
+	}
+}
+
 func withSessionRiskPrompt(t *testing.T, prompt riskPrompt) {
 	t.Helper()
 	sessionRiskMu.Lock()
