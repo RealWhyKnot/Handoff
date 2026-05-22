@@ -10,8 +10,11 @@
 # Go module cache / vendor
 vendor/
 
-# Audit logs (local only)
-audit/
+# JSONL audit logs that handoff writes at runtime under
+# %PROGRAMDATA%\whyknot\handoff\audit\. Never committed to the repo;
+# the literal-anchor /audit/ matches the root only and leaves
+# internal/audit/ (the source package) alone.
+/audit/
 
 # Temp unpacked tools
 .handoff-bin/
