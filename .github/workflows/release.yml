@@ -13,11 +13,20 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + all tags so the release-body step can diff
+          # commits against the previous version tag for the changelog.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -41,9 +50,11 @@ jobs:
           if ($version -notmatch '^\d{4}\.\d+\.\d+\.\d+(-[A-Fa-f0-9]{4})?$') {
               throw "version '$version' does not match the YYYY.M.D.N(-XXXX) shape"
           }
+          $isPre = $version -like '*-*'
           "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "tag=$tag version=$version"
+          "is_pre=$($isPre.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "tag=$tag version=$version is_pre=$isPre"
 
       - name: Fetch picotool
         shell: pwsh
@@ -77,14 +88,141 @@ jobs:
           }
           $manifest | ConvertTo-Json -Compress | Out-File -FilePath handoff-version.json -Encoding ASCII
           Get-Content handoff-version.json
+          "sha256=$sha" >> $env:GITHUB_OUTPUT
 
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          files: |
-            handoff.exe
-            handoff-version.json
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.ver.outputs.tag }}
+          EXE_SHA256: ${{ steps.manifest.outputs.sha256 }}
+        shell: pwsh
+        run: |
+          # Build the release body. Top section is a conventional-commit
+          # changelog grouped by type, extracted from `git log $prev..$tag`.
+          # Bottom section is the static install snippet.
+
+          $prevTag = git tag --list 'v*' --sort=-version:refname |
+                     Where-Object { $_ -ne $env:TAG_NAME } |
+                     Select-Object -First 1
+
+          $sections = [ordered]@{
+              feat     = 'Features'
+              fix      = 'Bug Fixes'
+              perf     = 'Performance'
+              refactor = 'Refactors'
+              docs     = 'Documentation'
+              test     = 'Tests'
+              ci       = 'CI'
+              build    = 'Build'
+              chore    = 'Chores'
+              style    = 'Style'
+              revert   = 'Reverts'
+              other    = 'Other'
+          }
+          $groups = @{}
+          $breaking = @()
+
+          if ($prevTag) {
+              $range = "$prevTag..$env:TAG_NAME"
+              $logLines = git log $range --pretty=format:"%h%x09%s" --no-merges
+              foreach ($line in $logLines) {
+                  if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                  $parts = $line -split "`t", 2
+                  $sha = $parts[0]
+                  $subject = $parts[1]
+                  if ($subject -match '^(?<type>\w+)(\((?<scope>[^)]+)\))?(?<bang>!)?:\s*(?<desc>.+)$') {
+                      $type = $matches['type'].ToLowerInvariant()
+                      $scope = $matches['scope']
+                      $isBreaking = -not [string]::IsNullOrEmpty($matches['bang'])
+                      $desc = $matches['desc']
+                      if (-not $sections.Contains($type)) { $type = 'other' }
+                      if ($scope) {
+                          $entry = "- ``$sha`` **${scope}**: $desc"
+                      } else {
+                          $entry = "- ``$sha`` $desc"
+                      }
+                      if ($isBreaking) {
+                          if ($scope) {
+                              $breaking += "- ``$sha`` **${scope}**: $desc"
+                          } else {
+                              $breaking += "- ``$sha`` $desc"
+                          }
+                      }
+                      if (-not $groups.ContainsKey($type)) { $groups[$type] = @() }
+                      $groups[$type] += $entry
+                  } else {
+                      if (-not $groups.ContainsKey('other')) { $groups['other'] = @() }
+                      $groups['other'] += "- ``$sha`` $subject"
+                  }
+              }
+          }
+
+          $out = New-Object System.Collections.Generic.List[string]
+          if ($prevTag) {
+              $out.Add("## Changes since $prevTag")
+              $out.Add("")
+              if ($breaking.Count -gt 0) {
+                  $out.Add("### Breaking Changes")
+                  $out.Add("")
+                  foreach ($e in $breaking) { $out.Add($e) }
+                  $out.Add("")
+              }
+              $emitted = $false
+              foreach ($key in $sections.Keys) {
+                  if ($groups.ContainsKey($key) -and $groups[$key].Count -gt 0) {
+                      $emitted = $true
+                      $out.Add("### $($sections[$key])")
+                      $out.Add("")
+                      foreach ($e in $groups[$key]) { $out.Add($e) }
+                      $out.Add("")
+                  }
+              }
+              if (-not $emitted) {
+                  $out.Add("_No conventional-commit changes since $prevTag._")
+                  $out.Add("")
+              }
+              $out.Add("**Full diff:** https://github.com/$env:GITHUB_REPOSITORY/compare/$prevTag...$env:TAG_NAME")
+              $out.Add("")
+          } else {
+              $out.Add("Initial release.")
+              $out.Add("")
+          }
+
+          $out.Add("## Install")
+          $out.Add("")
+          $out.Add("Download ``handoff.exe`` from the assets below and run it from anywhere on PATH (or wherever you keep portable tools).")
+          $out.Add("")
+          $out.Add("SHA256: ``$env:EXE_SHA256``")
+          $out.Add("")
+          $out.Add("Auto-update clients can poll ``handoff-version.json`` next to the binary in the assets list.")
+          $out.Add("")
+          $out.Add("Getting started: https://github.com/$env:GITHUB_REPOSITORY/wiki/Getting-Started")
+
+          $notes = $out -join "`n"
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          Set-Content -LiteralPath $notesPath -Value $notes -Encoding UTF8
+
+          # Draft-first: create as draft, upload assets, only then promote
+          # to published. If anything between create and promote fails the
+          # release stays as a draft, which is more visible than a live
+          # release missing one of its assets.
+          $extra = @('--draft')
+          if ('${{ steps.ver.outputs.is_pre }}' -eq 'true') { $extra += @('--prerelease','--latest=false') }
+          gh release create $env:TAG_NAME handoff.exe handoff-version.json --title $env:TAG_NAME --notes-file $notesPath @extra
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE)" }
+
+          # Verify the assets actually attached -- gh release create can
+          # succeed with the metadata but fail mid-upload on the asset
+          # stage; the draft would then be live with missing files.
+          $json = gh release view $env:TAG_NAME --json assets,isDraft
+          if ($LASTEXITCODE -ne 0) { throw "gh release view failed (exit $LASTEXITCODE)" }
+          $info = $json | ConvertFrom-Json
+          $expected = @('handoff.exe', 'handoff-version.json')
+          foreach ($e in $expected) {
+              if (-not ($info.assets.name -contains $e)) {
+                  throw "Asset '$e' did not attach to draft release $env:TAG_NAME -- leaving as draft for manual inspection."
+              }
+          }
+          Write-Host "Draft release $env:TAG_NAME has all expected assets, promoting to published."
+          gh release edit $env:TAG_NAME --draft=false
+          if ($LASTEXITCODE -ne 0) { throw "gh release edit --draft=false failed (exit $LASTEXITCODE)" }
