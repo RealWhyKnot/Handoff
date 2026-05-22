@@ -16,7 +16,7 @@ host presses Ctrl+C or types `q` to end the session.
 
 Download the latest `handoff.exe` from
 [Releases](https://github.com/RealWhyKnot/Handoff/releases) and run it from a
-terminal. No installer. The default relay is `https://couchlink.whyknot.dev`;
+terminal. No installer. The default relay is `https://handoff.whyknot.dev`;
 set `HANDOFF_RELAY` to point at a different one.
 
 ### Build from source

@@ -130,7 +130,7 @@ func defaultRelay() string {
 	if r := os.Getenv("HANDOFF_RELAY"); r != "" {
 		return r
 	}
-	return "https://couchlink.whyknot.dev"
+	return "https://handoff.whyknot.dev"
 }
 
 func shortSid(t string) string {

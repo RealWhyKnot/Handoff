@@ -51,5 +51,5 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  version                 print version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Env:")
-	fmt.Fprintln(os.Stderr, "  HANDOFF_RELAY  override the default relay URL (https://couchlink.whyknot.dev)")
+	fmt.Fprintln(os.Stderr, "  HANDOFF_RELAY  override the default relay URL (https://handoff.whyknot.dev)")
 }
