@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. v0.1.0)'
+        description: 'Tag to release (e.g. v2026.5.22.0)'
         required: true
 
 permissions:
@@ -24,6 +24,27 @@ jobs:
           go-version: '1.22'
           cache: true
 
+      - name: Resolve version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          # Strip leading 'v' from the tag to land the family YYYY.M.D.N
+          # scheme into the binary version string. Tags MUST start with 'v'.
+          if (-not $tag.StartsWith('v')) {
+              throw "tag '$tag' does not start with 'v'"
+          }
+          $version = $tag.Substring(1)
+          # Sanity-check the YYYY.M.D.N(-XXXX) shape so a fat-fingered
+          # tag fails the release rather than shipping a broken version.
+          if ($version -notmatch '^\d{4}\.\d+\.\d+\.\d+(-[A-Fa-f0-9]{4})?$') {
+              throw "version '$version' does not match the YYYY.M.D.N(-XXXX) shape"
+          }
+          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "tag=$tag version=$version"
+
       - name: Fetch picotool
         shell: pwsh
         run: |
@@ -31,53 +52,39 @@ jobs:
 
       - name: Build with embedded picotool
         shell: pwsh
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+          HANDOFF_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          $env:GOOS = 'windows'
-          $env:GOARCH = 'amd64'
-          $env:CGO_ENABLED = '0'
-          go build -trimpath -ldflags="-s -w" -tags embed_picotool -o handoff.exe .
+          go build -trimpath -ldflags="-s -w -X main.version=$env:HANDOFF_VERSION" -tags embed_picotool -o handoff.exe .
+          ./handoff.exe version
 
-      - name: Build sidecar version manifest
+      - name: Write release manifest
+        id: manifest
         shell: pwsh
+        env:
+          HANDOFF_VERSION: ${{ steps.ver.outputs.version }}
+          HANDOFF_TAG: ${{ steps.ver.outputs.tag }}
         run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if (-not $tag) { $tag = "${{ github.ref_name }}" }
-          $version = $tag.TrimStart('v')
           $sha = (Get-FileHash -Algorithm SHA256 handoff.exe).Hash.ToLower()
           $manifest = [ordered]@{
-            version = $version
+            version = $env:HANDOFF_VERSION
             sha256  = $sha
-            url     = "https://github.com/${{ github.repository }}/releases/download/$tag/handoff.exe"
-            notes   = "Release $tag"
+            url     = "https://github.com/${{ github.repository }}/releases/download/$env:HANDOFF_TAG/handoff.exe"
+            notes   = "Release $env:HANDOFF_TAG"
           }
           $manifest | ConvertTo-Json -Compress | Out-File -FilePath handoff-version.json -Encoding ASCII
           Get-Content handoff-version.json
 
-      - name: Code signing (disabled until cert is provisioned)
-        if: ${{ env.SIGNING_CERT_BASE64 != '' }}
-        env:
-          SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
-          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
-        shell: pwsh
-        run: |
-          # Activate by setting the SIGNING_CERT_BASE64 and SIGNING_CERT_PASSWORD
-          # repository secrets to a base64-encoded PFX and its password. The
-          # block stays inert until both are set.
-          $pfx = [Convert]::FromBase64String($env:SIGNING_CERT_BASE64)
-          $tmp = Join-Path $env:RUNNER_TEMP 'handoff-sign.pfx'
-          [IO.File]::WriteAllBytes($tmp, $pfx)
-          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
-            Sort-Object -Descending FullName | Select-Object -First 1
-          & $signtool.FullName sign /f $tmp /p $env:SIGNING_CERT_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 handoff.exe
-          Remove-Item $tmp -Force
-
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.tag }}
           files: |
             handoff.exe
             handoff-version.json
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}

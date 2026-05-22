@@ -9,7 +9,11 @@ import (
 	"github.com/RealWhyKnot/Handoff/cmd"
 )
 
-const version = "0.1.0"
+// version is stamped by the release workflow via
+//   -ldflags "-X main.version=<tag without v-prefix>"
+// per the WhyKnot family YYYY.M.D.N scheme. The "dev" default
+// covers local builds without ldflags.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
