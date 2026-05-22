@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -192,6 +193,200 @@ func TestPsExecUsesSessionConsentInsteadOfEnvironmentGate(t *testing.T) {
 	stdout, _ := out["stdout"].(string)
 	if !strings.Contains(stdout, "ok") {
 		t.Fatalf("ps.exec stdout = %q, want ok", stdout)
+	}
+}
+
+func TestPsExecRejectsOversizedScript(t *testing.T) {
+	t.Setenv("HANDOFF_ALLOW_PSEXEC", "")
+	psMu.Lock()
+	psHistory = nil
+	psMu.Unlock()
+
+	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) {
+		return true, nil
+	})
+
+	_, err := psExec()(context.Background(), rawArgs(t, map[string]interface{}{
+		"script": strings.Repeat("x", psScriptCap+1),
+	}))
+	if err == nil {
+		t.Fatal("ps.exec did not reject oversized script")
+	}
+	if !strings.Contains(err.Error(), "cap is 65536") {
+		t.Fatalf("ps.exec err = %v, want cap is 65536", err)
+	}
+}
+
+func TestFsSearchRejectsRelativePath(t *testing.T) {
+	_, err := fsSearch(context.Background(), rawArgs(t, map[string]interface{}{
+		"path": "relative/path",
+		"pattern": "*.txt",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("fsSearch err = %v, want absolute-path error", err)
+	}
+}
+
+func TestFsSearchMatchesPatternAndRespectsLimits(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 120; i++ {
+		if err := os.WriteFile(filepath.Join(root, "log-"+strconv.Itoa(i)+".txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if err := os.MkdirAll(filepath.Join(root, ".hidden"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".hidden", "secret.log"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	result, err := fsSearch(context.Background(), rawArgs(t, map[string]interface{}{
+		"path":        root,
+		"pattern":     "*.txt",
+		"max_results": 20,
+	}))
+	if err != nil {
+		t.Fatalf("fsSearch returned error: %v", err)
+	}
+	payload, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("fsSearch result = %#v", result)
+	}
+	count, ok := payload["count"].(int)
+	if !ok {
+		t.Fatalf("count type = %T, want int", payload["count"])
+	}
+	if count != 20 {
+		t.Fatalf("count = %d, want 20", count)
+	}
+	entries, ok := payload["entries"].([]map[string]interface{})
+	if !ok || len(entries) != 20 {
+		t.Fatalf("entries = %#v, want 20", payload["entries"])
+	}
+	for _, row := range entries {
+		name, ok := row["name"].(string)
+		if !ok {
+			t.Fatalf("entry name type = %T, want string", row["name"])
+		}
+		if strings.HasPrefix(name, ".") {
+			t.Fatalf("hidden file returned despite include_hidden=false: %q", name)
+		}
+	}
+
+	_, err = fsSearch(context.Background(), rawArgs(t, map[string]interface{}{
+		"path": root,
+		"pattern": "*.log",
+		"include_hidden": true,
+	}))
+	if err != nil {
+		t.Fatalf("fsSearch hidden include error: %v", err)
+	}
+}
+
+func TestProcFindRejectsOverLongQuery(t *testing.T) {
+	_, err := procFind(context.Background(), rawArgs(t, map[string]interface{}{
+		"query": strings.Repeat("x", 130),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("procFind err = %v, want query too long", err)
+	}
+}
+
+func TestNetConnectionsRejectsInvalidState(t *testing.T) {
+	_, err := netConnections(context.Background(), rawArgs(t, map[string]interface{}{
+		"state": "bad-state",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "state must") {
+		t.Fatalf("netConnections err = %v, want validation error", err)
+	}
+}
+
+func TestResolveConnectionStateDefaultsToEstablished(t *testing.T) {
+	state, err := resolveConnectionState("")
+	if err != nil {
+		t.Fatalf("resolveConnectionState empty err = %v", err)
+	}
+	if state != "established" {
+		t.Fatalf("resolveConnectionState empty = %q, want established", state)
+	}
+}
+
+func TestResolveConnectionStateNormalizesCaseAndWhitespace(t *testing.T) {
+	state, err := resolveConnectionState("  Listen ")
+	if err != nil {
+		t.Fatalf("resolveConnectionState Listen err = %v", err)
+	}
+	if state != "listen" {
+		t.Fatalf("resolveConnectionState Listen = %q, want listen", state)
+	}
+}
+
+func TestRegQueryRejectsBadHive(t *testing.T) {
+	_, err := regQuery(context.Background(), rawArgs(t, map[string]interface{}{
+		"hive": "HKBOGUS",
+		"key":  "SOFTWARE",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "hive must be") {
+		t.Fatalf("regQuery err = %v, want hive validation error", err)
+	}
+}
+
+func TestRegQueryRejectsMissingKey(t *testing.T) {
+	_, err := regQuery(context.Background(), rawArgs(t, map[string]interface{}{
+		"hive": "HKLM",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "'key' is required") {
+		t.Fatalf("regQuery err = %v, want key required error", err)
+	}
+}
+
+func TestRegQueryRejectsPathTraversal(t *testing.T) {
+	_, err := regQuery(context.Background(), rawArgs(t, map[string]interface{}{
+		"hive": "HKLM",
+		"key":  "SOFTWARE\\..\\SECRET",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "..") {
+		t.Fatalf("regQuery err = %v, want traversal rejection", err)
+	}
+}
+
+func TestRegQueryRejectsBadCharacters(t *testing.T) {
+	_, err := regQuery(context.Background(), rawArgs(t, map[string]interface{}{
+		"hive": "HKLM",
+		"key":  "SOFTWARE;DROP",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
+		t.Fatalf("regQuery err = %v, want character rejection", err)
+	}
+}
+
+func TestTaskListRejectsInvalidState(t *testing.T) {
+	_, err := taskList(context.Background(), rawArgs(t, map[string]interface{}{
+		"state": "halfway",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "state must be") {
+		t.Fatalf("taskList err = %v, want state validation", err)
+	}
+}
+
+func TestSysEnvRejectsInvalidScope(t *testing.T) {
+	_, err := sysEnv(context.Background(), rawArgs(t, map[string]interface{}{
+		"scope": "session",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "scope must be") {
+		t.Fatalf("sysEnv err = %v, want scope validation", err)
+	}
+}
+
+func TestEvtProvidersRejectsOverLongPrefix(t *testing.T) {
+	_, err := evtProviders(context.Background(), rawArgs(t, map[string]interface{}{
+		"name_prefix": strings.Repeat("a", 200),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("evtProviders err = %v, want prefix length validation", err)
 	}
 }
 

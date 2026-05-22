@@ -27,6 +27,7 @@ var (
 	psLimit   = 10
 	psWindow  = time.Minute
 )
+const psScriptCap = 64 * 1024
 
 func psExec() dispatch.Handler {
 	return func(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
@@ -38,8 +39,8 @@ func psExec() dispatch.Handler {
 		if script == "" {
 			return nil, fmt.Errorf("ps.exec: 'script' is required")
 		}
-		if len(script) > 16*1024 {
-			return nil, fmt.Errorf("ps.exec: script is %d bytes; cap is 16384", len(script))
+		if len(script) > psScriptCap {
+			return nil, fmt.Errorf("ps.exec: script is %d bytes; cap is %d", len(script), psScriptCap)
 		}
 		if err := requireRiskConsent(ctx, "ps.exec", "Runs arbitrary PowerShell code on this computer. The script can read, change, or delete files and can start programs as the current user."); err != nil {
 			return nil, err

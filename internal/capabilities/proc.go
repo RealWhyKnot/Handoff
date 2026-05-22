@@ -15,6 +15,7 @@ import (
 func RegisterProc(r *dispatch.Router) {
 	r.Register("proc.list", procList)
 	r.Register("proc.kill", procKill)
+	r.Register("proc.find", procFind)
 	r.Register("svc.list", svcList)
 	r.Register("svc.control", svcControl)
 }
@@ -61,6 +62,42 @@ Stop-Process -Id $targetPid -Force -ErrorAction Stop
     killed = $true
 } | ConvertTo-Json -Compress
 `, pid)
+	return runPwshJSON(ctx, script)
+}
+
+func procFind(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
+	var (
+		query      string
+		maxResults int
+	)
+	if v, ok := args["query"]; ok {
+		_ = json.Unmarshal(v, &query)
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("proc.find: 'query' is required")
+	}
+	if len(query) > 128 {
+		return nil, fmt.Errorf("proc.find: 'query' is too long")
+	}
+	if v, ok := args["max_results"]; ok {
+		_ = json.Unmarshal(v, &maxResults)
+	}
+	if maxResults <= 0 {
+		maxResults = 100
+	}
+	if maxResults > 500 {
+		maxResults = 500
+	}
+
+	script := fmt.Sprintf(`
+$q = [regex]::Escape([string]%s)
+Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -match $q -or $_.ExecutablePath -match $q -or $_.CommandLine -match $q
+} | Select-Object ProcessId,Name,ExecutablePath,CommandLine,ParentProcessId,SessionId,@{n='WorkingSetMB';e={[math]::Round($_.WorkingSetSize/1MB,1)}} |
+    Select-Object -First %d |
+    ConvertTo-Json -Compress -Depth 4
+`, psSingleQuote(query), maxResults)
 	return runPwshJSON(ctx, script)
 }
 
