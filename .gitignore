@@ -1,0 +1,25 @@
+# Go build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go module cache / vendor
+vendor/
+
+# Audit logs (local only)
+audit/
+
+# Temp unpacked tools
+.handoff-bin/
+
+# Log files
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
