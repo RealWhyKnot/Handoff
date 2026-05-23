@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -34,9 +35,10 @@ type MintResponse struct {
 // `id` and `kind` fields are fixed; any other keys in the JSON payload
 // are accessible via Extras for kind-specific arguments.
 type Command struct {
-	ID     string                     `json:"id"`
-	Kind   string                     `json:"kind"`
-	Extras map[string]json.RawMessage `json:"-"`
+	ID        string                     `json:"id"`
+	Kind      string                     `json:"kind"`
+	TimeoutMS int                        `json:"timeout_ms,omitempty"`
+	Extras    map[string]json.RawMessage `json:"-"`
 }
 
 // UnmarshalJSON decodes a Command keeping the kind-specific fields as
@@ -53,6 +55,10 @@ func (c *Command) UnmarshalJSON(data []byte) error {
 	if v, ok := raw["kind"]; ok {
 		_ = json.Unmarshal(v, &c.Kind)
 		delete(raw, "kind")
+	}
+	if v, ok := raw["timeout_ms"]; ok {
+		_ = json.Unmarshal(v, &c.TimeoutMS)
+		delete(raw, "timeout_ms")
 	}
 	c.Extras = raw
 	return nil
@@ -91,7 +97,8 @@ func Mint(ctx context.Context, baseURL string) (*MintResponse, error) {
 
 // Bridge is the long-lived WebSocket between this host and the relay.
 type Bridge struct {
-	conn *websocket.Conn
+	conn    *websocket.Conn
+	writeMu sync.Mutex
 }
 
 // Dial opens the WebSocket to the relay's /ws endpoint with the write
@@ -185,6 +192,8 @@ func (b *Bridge) send(ctx context.Context, kind string, payload interface{}) err
 	if err := json.NewEncoder(&buf).Encode(ev); err != nil {
 		return err
 	}
+	b.writeMu.Lock()
+	defer b.writeMu.Unlock()
 	return b.conn.Write(ctx, websocket.MessageText, bytes.TrimRight(buf.Bytes(), "\n"))
 }
 

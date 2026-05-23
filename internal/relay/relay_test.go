@@ -83,3 +83,19 @@ func TestSendHelloIncludesProtocolAndCapabilities(t *testing.T) {
 		t.Fatalf("capabilities = %#v, want %#v", event.Payload.Capabilities, wantCaps)
 	}
 }
+
+func TestCommandUnmarshalCapturesTimeoutOutsideExtras(t *testing.T) {
+	var cmd Command
+	if err := json.Unmarshal([]byte(`{"id":"cmd-1","kind":"ps.exec","timeout_ms":1500,"script":"Start-Sleep 30"}`), &cmd); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if cmd.ID != "cmd-1" || cmd.Kind != "ps.exec" || cmd.TimeoutMS != 1500 {
+		t.Fatalf("command = %#v", cmd)
+	}
+	if _, ok := cmd.Extras["timeout_ms"]; ok {
+		t.Fatal("timeout_ms should not be forwarded to capability extras")
+	}
+	if _, ok := cmd.Extras["script"]; !ok {
+		t.Fatal("script extra missing")
+	}
+}

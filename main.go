@@ -7,42 +7,63 @@ import (
 	"os"
 
 	"github.com/RealWhyKnot/Handoff/cmd"
+	"github.com/RealWhyKnot/Handoff/internal/supportlog"
 )
 
 // version is stamped by the release workflow via
-//   -ldflags "-X main.version=<tag without v-prefix>"
+//
+//	-ldflags "-X main.version=<tag without v-prefix>"
+//
 // per the WhyKnot family YYYY.M.D.N scheme. The "dev" default
 // covers local builds without ldflags.
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-
 	cmd.Version = version
 
-	switch os.Args[1] {
+	if logPath, err := supportlog.Init(); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: support log unavailable:", err)
+	} else {
+		defer supportlog.Close()
+		fmt.Println("log:", logPath)
+	}
+
+	if code := run(os.Args[1:]); code != 0 {
+		os.Exit(code)
+	}
+}
+
+var newCommand = cmd.New
+
+func run(args []string) int {
+	if len(args) < 1 {
+		newCommand(nil)
+		return 0
+	}
+
+	switch args[0] {
 	case "new":
-		cmd.New(os.Args[2:])
+		newCommand(args[1:])
 	case "connect":
-		cmd.Connect(os.Args[2:])
+		cmd.Connect(args[1:])
 	case "update":
-		cmd.Update(os.Args[2:])
+		cmd.Update(args[1:])
 	case "version", "-v", "--version":
 		fmt.Println("handoff", version)
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", args[0])
 		usage()
-		os.Exit(2)
+		return 2
 	}
+	return 0
 }
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "handoff -- token-gated remote debug helper for Windows")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Running without a subcommand starts a new host session.")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Subcommands:")
 	fmt.Fprintln(os.Stderr, "  new                     start a host session, print the view URL")
