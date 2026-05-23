@@ -3,15 +3,15 @@ package main
 
 import "testing"
 
-func TestRunWithoutArgsStartsNewSession(t *testing.T) {
-	old := newCommand
-	defer func() { newCommand = old }()
+func TestRunWithoutArgsShowsMenu(t *testing.T) {
+	old := menuCommand
+	defer func() { menuCommand = old }()
 
 	called := false
-	newCommand = func(args []string) {
+	menuCommand = func(args []string) {
 		called = true
 		if len(args) != 0 {
-			t.Fatalf("new args = %#v, want empty", args)
+			t.Fatalf("menu args = %#v, want empty", args)
 		}
 	}
 
@@ -19,7 +19,22 @@ func TestRunWithoutArgsStartsNewSession(t *testing.T) {
 		t.Fatalf("run(nil) = %d, want 0", code)
 	}
 	if !called {
-		t.Fatal("new command was not called")
+		t.Fatal("menu command was not called")
+	}
+}
+
+func TestRunNewExplicitStillCallsHostSession(t *testing.T) {
+	old := newCommand
+	defer func() { newCommand = old }()
+
+	called := false
+	newCommand = func(args []string) { called = true }
+
+	if code := run([]string{"new"}); code != 0 {
+		t.Fatalf("run(new) = %d, want 0", code)
+	}
+	if !called {
+		t.Fatal("new command was not called for explicit `new` subcommand")
 	}
 }
 

@@ -63,12 +63,6 @@ func New(args []string) {
 		}
 	}()
 
-	// Dispatcher with all capabilities registered.
-	router := dispatch.New()
-	capabilities.RegisterAll(router)
-	supportlog.Printf("capabilities registered count=%d", len(router.Kinds()))
-	fmt.Printf("ready -- %d capabilities registered\n\n", len(router.Kinds()))
-
 	// Handle Ctrl+C.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -90,6 +84,13 @@ func New(args []string) {
 	}
 	defer bridge.Close()
 	supportlog.Printf("bridge connected sid=%s", sid)
+
+	// Dispatcher with all capabilities registered. The bridge is plumbed in so
+	// tunnel handlers can push bytes back outside the command_result return path.
+	router := dispatch.New()
+	capabilities.RegisterAll(router, bridge)
+	supportlog.Printf("capabilities registered count=%d", len(router.Kinds()))
+	fmt.Printf("ready -- %d capabilities registered\n\n", len(router.Kinds()))
 
 	hostname, _ := os.Hostname()
 	if err := bridge.SendHello(ctx, hostname, Version, router.Kinds()); err != nil {

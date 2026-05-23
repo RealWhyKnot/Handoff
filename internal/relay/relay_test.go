@@ -84,6 +84,121 @@ func TestSendHelloIncludesProtocolAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestSendTunnelDataEncodesBase64(t *testing.T) {
+	frames := make(chan []byte, 1)
+	errs := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			errs <- err
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		_, data, err := conn.Read(r.Context())
+		if err != nil {
+			errs <- err
+			return
+		}
+		frames <- data
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	bridge := &Bridge{conn: conn}
+	if err := bridge.SendTunnelData(ctx, "tn1", "s1", []byte("hello")); err != nil {
+		t.Fatalf("SendTunnelData: %v", err)
+	}
+
+	var frame []byte
+	select {
+	case frame = <-frames:
+	case err := <-errs:
+		t.Fatalf("server error: %v", err)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for tunnel_data frame")
+	}
+
+	var event struct {
+		Kind    string `json:"kind"`
+		Payload struct {
+			TunnelID string `json:"tunnel_id"`
+			StreamID string `json:"stream_id"`
+			DataB64  string `json:"data_base64"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(frame, &event); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if event.Kind != "tunnel_data" {
+		t.Fatalf("kind = %q, want tunnel_data", event.Kind)
+	}
+	if event.Payload.TunnelID != "tn1" || event.Payload.StreamID != "s1" {
+		t.Fatalf("payload identity = %#v", event.Payload)
+	}
+	if event.Payload.DataB64 != "aGVsbG8=" {
+		t.Fatalf("data_base64 = %q, want aGVsbG8=", event.Payload.DataB64)
+	}
+}
+
+func TestSendTunnelStreamCloseAndCloseFrames(t *testing.T) {
+	frames := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for i := 0; i < 2; i++ {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			frames <- data
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	bridge := &Bridge{conn: conn}
+
+	if err := bridge.SendTunnelStreamClose(ctx, "tn1", "s1", "eof"); err != nil {
+		t.Fatalf("SendTunnelStreamClose: %v", err)
+	}
+	if err := bridge.SendTunnelClose(ctx, "tn1", "host shutdown"); err != nil {
+		t.Fatalf("SendTunnelClose: %v", err)
+	}
+
+	for i, want := range []string{"tunnel_stream_close", "tunnel_close"} {
+		select {
+		case data := <-frames:
+			var ev struct {
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal(data, &ev); err != nil {
+				t.Fatalf("frame %d unmarshal: %v", i, err)
+			}
+			if ev.Kind != want {
+				t.Fatalf("frame %d kind = %q, want %q", i, ev.Kind, want)
+			}
+		case <-ctx.Done():
+			t.Fatalf("frame %d timed out", i)
+		}
+	}
+}
+
 func TestCommandUnmarshalCapturesTimeoutOutsideExtras(t *testing.T) {
 	var cmd Command
 	if err := json.Unmarshal([]byte(`{"id":"cmd-1","kind":"ps.exec","timeout_ms":1500,"script":"Start-Sleep 30"}`), &cmd); err != nil {

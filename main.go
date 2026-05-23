@@ -33,11 +33,14 @@ func main() {
 	}
 }
 
-var newCommand = cmd.New
+var (
+	newCommand  = cmd.New
+	menuCommand = cmd.Menu
+)
 
 func run(args []string) int {
 	if len(args) < 1 {
-		newCommand(nil)
+		menuCommand(nil)
 		return 0
 	}
 
@@ -46,6 +49,8 @@ func run(args []string) int {
 		newCommand(args[1:])
 	case "connect":
 		cmd.Connect(args[1:])
+	case "tunnel":
+		cmd.Tunnel(args[1:])
 	case "update":
 		cmd.Update(args[1:])
 	case "version", "-v", "--version":
@@ -63,13 +68,14 @@ func run(args []string) int {
 func usage() {
 	fmt.Fprintln(os.Stderr, "handoff -- token-gated remote debug helper for Windows")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Running without a subcommand starts a new host session.")
+	fmt.Fprintln(os.Stderr, "Running without a subcommand shows an interactive menu.")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Subcommands:")
-	fmt.Fprintln(os.Stderr, "  new                     start a host session, print the view URL")
-	fmt.Fprintln(os.Stderr, "  connect <url-or-token>  open an operator viewer (browser)")
-	fmt.Fprintln(os.Stderr, "  update [--check]        fetch a newer handoff.exe from the relay")
-	fmt.Fprintln(os.Stderr, "  version                 print version")
+	fmt.Fprintln(os.Stderr, "  new                       start a host session, print the view URL")
+	fmt.Fprintln(os.Stderr, "  connect <url-or-token>    open an operator viewer (browser)")
+	fmt.Fprintln(os.Stderr, "  tunnel <connect-token>    forward a remote local port to this computer")
+	fmt.Fprintln(os.Stderr, "  update [--check]          fetch a newer handoff.exe from the relay")
+	fmt.Fprintln(os.Stderr, "  version                   print version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Env:")
 	fmt.Fprintln(os.Stderr, "  HANDOFF_RELAY  override the default relay URL (https://handoff.whyknot.dev)")

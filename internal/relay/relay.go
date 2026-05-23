@@ -9,6 +9,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,6 +148,38 @@ func (b *Bridge) SendCommandResult(ctx context.Context, id string, ok bool, resu
 		"elapsed_ms": elapsedMs,
 	}
 	return b.send(ctx, "command_result", payload)
+}
+
+// SendTunnelData forwards bytes that the host just read from a tunneled local
+// TCP connection back to the relay, which routes them to the operator's WS.
+func (b *Bridge) SendTunnelData(ctx context.Context, tunnelID, streamID string, data []byte) error {
+	payload := map[string]interface{}{
+		"tunnel_id":   tunnelID,
+		"stream_id":   streamID,
+		"data_base64": base64.StdEncoding.EncodeToString(data),
+	}
+	return b.send(ctx, "tunnel_data", payload)
+}
+
+// SendTunnelStreamClose tells the relay that the host-side TCP connection for
+// a tunnel stream has ended (clean EOF or error).
+func (b *Bridge) SendTunnelStreamClose(ctx context.Context, tunnelID, streamID, reason string) error {
+	payload := map[string]interface{}{
+		"tunnel_id": tunnelID,
+		"stream_id": streamID,
+		"reason":    reason,
+	}
+	return b.send(ctx, "tunnel_stream_close", payload)
+}
+
+// SendTunnelClose tells the relay the whole tunnel is finished from the host's
+// perspective. Typically only used during shutdown.
+func (b *Bridge) SendTunnelClose(ctx context.Context, tunnelID, reason string) error {
+	payload := map[string]interface{}{
+		"tunnel_id": tunnelID,
+		"reason":    reason,
+	}
+	return b.send(ctx, "tunnel_close", payload)
 }
 
 // Recv blocks until the next Command arrives or the context cancels.
