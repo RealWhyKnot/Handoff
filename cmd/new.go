@@ -18,6 +18,7 @@ import (
 	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 	"github.com/RealWhyKnot/Handoff/internal/relay"
 	"github.com/RealWhyKnot/Handoff/internal/supportlog"
+	"github.com/RealWhyKnot/Handoff/internal/visibility"
 )
 
 // Version is stamped from main.go.
@@ -72,6 +73,11 @@ func New(args []string) {
 		fmt.Println("\nshutting down...")
 		cancel()
 	}()
+
+	// Force-quit if the program's window stops being visible in the
+	// taskbar -- closes the loophole where a hidden console keeps the
+	// remote-control channel open after the host thinks it's gone.
+	visibility.StartWatcher(ctx)
 
 	// Open the bridge WS.
 	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)

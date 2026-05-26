@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/RealWhyKnot/Handoff/internal/supportlog"
+	"github.com/RealWhyKnot/Handoff/internal/visibility"
 	"github.com/coder/websocket"
 )
 
@@ -98,6 +99,9 @@ func Tunnel(args []string) {
 
 	client := newTunnelClient(conn)
 	defer client.shutdown("operator close")
+
+	// Force-quit if our window disappears from the taskbar mid-tunnel.
+	visibility.StartWatcher(ctx)
 
 	go client.acceptLoop(ctx, listener)
 	if err := client.readLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
