@@ -28,6 +28,10 @@ jobs:
           # commits against the previous version tag for the changelog.
           fetch-depth: 0
 
+      - name: Test release base selection
+        shell: pwsh
+        run: ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -101,9 +105,7 @@ jobs:
           # changelog grouped by type, extracted from `git log $prev..$tag`.
           # Bottom section is the static install snippet.
 
-          $prevTag = git tag --list 'v*' --sort=-version:refname |
-                     Where-Object { $_ -ne $env:TAG_NAME } |
-                     Select-Object -First 1
+          $prevTag = & ./.github/scripts/Resolve-ReleaseBaseTag.ps1 -Tag $env:TAG_NAME
 
           $sections = [ordered]@{
               feat     = 'Features'
