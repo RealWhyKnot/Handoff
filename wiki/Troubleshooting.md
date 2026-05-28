@@ -32,7 +32,7 @@ does not appear, check that `PROGRAMDATA` is set (`$env:PROGRAMDATA`).
 
 ## The Operator Appears Hung / No Commands Arriving
 
-1. Confirm the host console still shows `ready -- 33 capabilities registered`.
+1. Confirm the host console still shows `ready -- <n> capabilities registered`.
 2. Have the operator reload the viewer page -- a stale WebSocket will reconnect.
 3. If the relay URL has changed, end the session (Ctrl+C), update `HANDOFF_RELAY`
    if needed, and run `handoff new` again for a fresh URL.

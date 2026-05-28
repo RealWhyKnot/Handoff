@@ -16,6 +16,7 @@ import (
 func RegisterSec(r *dispatch.Router) {
 	r.Register("update.history", updateHistory)
 	r.Register("defender.status", defenderStatus)
+	r.Register("sec.local-admins", secLocalAdmins)
 }
 
 func updateHistory(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
@@ -88,6 +89,47 @@ try {
     [ordered]@{
         available = $false
         error = $_.Exception.Message
+    } | ConvertTo-Json -Compress
+}
+`
+	return runPwshJSON(ctx, script)
+}
+
+func secLocalAdmins(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
+	script := `
+if (-not (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue)) {
+    [ordered]@{
+        available = $false
+        group = 'Administrators'
+        error = 'Get-LocalGroupMember is not available in this PowerShell host'
+        members = @()
+    } | ConvertTo-Json -Compress
+    return
+}
+
+try {
+    $members = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop |
+        Sort-Object ObjectClass, Name |
+        ForEach-Object {
+            [ordered]@{
+                name = [string]$_.Name
+                object_class = [string]$_.ObjectClass
+                sid = if ($_.SID) { [string]$_.SID.Value } else { $null }
+                principal_source = if ($null -ne $_.PrincipalSource) { [string]$_.PrincipalSource } else { $null }
+            }
+        }
+    [ordered]@{
+        available = $true
+        group = 'Administrators'
+        count = @($members).Count
+        members = @($members)
+    } | ConvertTo-Json -Compress -Depth 4
+} catch {
+    [ordered]@{
+        available = $false
+        group = 'Administrators'
+        error = $_.Exception.Message
+        members = @()
     } | ConvertTo-Json -Compress
 }
 `

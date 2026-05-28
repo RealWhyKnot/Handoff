@@ -22,6 +22,7 @@ func RegisterNet(r *dispatch.Router) {
 	r.Register("net.firewall", netFirewall)
 	r.Register("net.wlan", netWlan)
 	r.Register("net.tls", netTLS)
+	r.Register("net.shares", netShares)
 }
 
 func netAdapters(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {

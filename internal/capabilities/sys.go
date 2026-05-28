@@ -23,6 +23,7 @@ func RegisterSys(r *dispatch.Router) {
 	r.Register("sys.env", sysEnv)
 	r.Register("sys.users", sysUsers)
 	r.Register("sys.timezone", sysTimezone)
+	r.Register("sys.resources", sysResources)
 }
 
 func sysInfo(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
@@ -187,5 +188,72 @@ $computerName = $env:COMPUTERNAME
     computer_name = $computerName
 } | ConvertTo-Json -Compress
 `
+	return runPwshJSON(ctx, script)
+}
+
+func resourceTopArg(args map[string]json.RawMessage) int {
+	top := 10
+	if v, ok := args["top"]; ok {
+		_ = json.Unmarshal(v, &top)
+	}
+	if top <= 0 {
+		top = 10
+	}
+	if top > 50 {
+		top = 50
+	}
+	return top
+}
+
+func sysResources(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
+	top := resourceTopArg(args)
+	script := fmt.Sprintf(`
+$top = %d
+$sampled = Get-Date
+$os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+$cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+$page = Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue |
+    Select-Object @{n='name';e={[string]$_.Name}},
+                  @{n='allocated_mb';e={[int]$_.AllocatedBaseSize}},
+                  @{n='current_usage_mb';e={[int]$_.CurrentUsage}},
+                  @{n='peak_usage_mb';e={[int]$_.PeakUsage}}
+
+$procs = Get-Process -ErrorAction SilentlyContinue
+$topByMemory = $procs |
+    Sort-Object WorkingSet64 -Descending |
+    Select-Object -First $top |
+    Select-Object @{n='pid';e={[int]$_.Id}},
+                  @{n='name';e={[string]$_.ProcessName}},
+                  @{n='working_set_mb';e={[math]::Round($_.WorkingSet64 / 1MB, 1)}},
+                  @{n='cpu_seconds';e={ if ($null -ne $_.CPU) { [math]::Round($_.CPU, 1) } else { $null } }}
+
+$topByCpu = $procs |
+    Where-Object { $null -ne $_.CPU } |
+    Sort-Object CPU -Descending |
+    Select-Object -First $top |
+    Select-Object @{n='pid';e={[int]$_.Id}},
+                  @{n='name';e={[string]$_.ProcessName}},
+                  @{n='cpu_seconds';e={[math]::Round($_.CPU, 1)}},
+                  @{n='working_set_mb';e={[math]::Round($_.WorkingSet64 / 1MB, 1)}}
+
+$totalMB = if ($os) { [double]$os.TotalVisibleMemorySize / 1024 } else { $null }
+$freeMB = if ($os) { [double]$os.FreePhysicalMemory / 1024 } else { $null }
+$usedPct = $null
+if ($null -ne $totalMB -and $totalMB -gt 0 -and $null -ne $freeMB) {
+    $usedPct = [math]::Round((($totalMB - $freeMB) / $totalMB) * 100, 1)
+}
+
+[ordered]@{
+    sampled_utc = $sampled.ToUniversalTime().ToString("o")
+    top = $top
+    cpu_percent = if ($cpu) { [int]$cpu.PercentProcessorTime } else { $null }
+    memory_total_mb = if ($null -ne $totalMB) { [math]::Round($totalMB, 1) } else { $null }
+    memory_free_mb = if ($null -ne $freeMB) { [math]::Round($freeMB, 1) } else { $null }
+    memory_used_percent = $usedPct
+    pagefiles = @($page)
+    top_processes_by_memory = @($topByMemory)
+    top_processes_by_cpu = @($topByCpu)
+} | ConvertTo-Json -Compress -Depth 5
+`, top)
 	return runPwshJSON(ctx, script)
 }

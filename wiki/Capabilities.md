@@ -1,7 +1,8 @@
 # Capabilities
 
-All 33 capabilities registered by `handoff new`. Commands marked **risky** are
-blocked until the host approves the warning prompt for the current session.
+Operator-facing capabilities registered by `handoff new`. Commands marked
+**risky** are blocked until the host approves the warning prompt for the
+current session.
 
 ---
 
@@ -26,6 +27,35 @@ Returns the output of `Get-ComputerInfo` as JSON (depth 4). No args.
 ### `sys.uptime`
 Returns boot time (UTC ISO-8601), uptime in seconds, and last-boot in local
 time. No args.
+
+### `sys.resources`
+Returns a quick resource snapshot: sampled time, total CPU percent, memory
+totals/free/used percent, pagefile usage, and top processes by memory and
+cumulative CPU.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `top` | int | `10` | Number of top processes to return; clamped to 1-50. |
+
+### `sys.hotfixes`
+Installed Windows hotfixes sorted newest first. No args.
+
+### `sys.reboot-required`
+Checks common Windows pending-reboot markers. No args.
+
+### `sys.env`
+Environment variables by scope.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `scope` | string | `all` | `all`, `machine`, `user`, or `process`. |
+| `name_prefix` | string | empty | Optional prefix filter. |
+
+### `sys.users`
+Logged-on account and terminal-session snapshot. No args.
+
+### `sys.timezone`
+Time zone, current local/UTC time, culture, and daylight-saving state. No args.
 
 ---
 
@@ -53,6 +83,18 @@ GPU name, adapter RAM, driver version, video processor, and status from
 
 ---
 
+## Storage
+
+### `storage.volumes`
+Volume inventory from `Get-Volume`: drive letter, label, filesystem, size/free
+GB, free percent, health, operational status, path, and unique ID.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `drive_letter` | string | empty | Optional single drive letter such as `C` or `C:`. |
+
+---
+
 ## Network (inventory)
 
 ### `net.adapters`
@@ -70,6 +112,46 @@ and interface alias. No args.
 ### `net.dns-cache`
 DNS client cache snapshot: entry, name, record type, status, section, TTL,
 data length, and data. No args.
+
+### `net.listeners`
+TCP listeners and UDP endpoints with local address/port, owning PID, and
+process name where available. No args.
+
+### `net.connections`
+Current TCP connections with address/port pairs, state, owning PID, process
+name, and creation time.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `state` | string | `established` | `all`, `listen`, `established`, or a valid TCP state. |
+| `max_results` | int | `200` | Clamped to 1-1000. |
+
+### `net.firewall`
+Firewall profile state plus a sample of enabled firewall rules. No args.
+
+### `net.wlan`
+Wi-Fi adapter and profile snapshot via `netsh wlan`. No args.
+
+### `net.tls`
+TCP and TLS handshake check for a remote host, including certificate details
+when the handshake succeeds.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `host` | string | required | Hostname or IP; shell metacharacters are rejected. |
+| `port` | int | `443` | TCP port, 1-65535. |
+| `timeout_ms` | int | `5000` | Clamped to a safe default if out of range. |
+
+### `net.shares`
+SMB share inventory, with optional SMB session and open-file samples. Share,
+session, and open-file collection errors are returned in the payload instead of
+failing the whole command.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `include_hidden` | bool | `false` | Include hidden SMB shares. |
+| `include_sessions` | bool | `true` | Include SMB sessions and open files when permitted. |
+| `max_results` | int | `200` | Clamped to 1-1000 per section. |
 
 ---
 
@@ -95,6 +177,17 @@ Runs a traceroute to a named host or IP using `Test-NetConnection -TraceRoute`.
 Returns: computer name, remote address, ping success, ping reply details, and
 hop list. Can take 10-30 seconds on slow paths.
 
+### `net.tcp-test`
+Tests TCP connectivity to a host and port. Returns DNS resolution results, the
+selected remote address, success state, elapsed milliseconds, and error text
+when the connection fails.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `target` | string | required | Hostname or IP; shell metacharacters are rejected. |
+| `port` | int | required | TCP port, 1-65535. |
+| `timeout_ms` | int | `5000` | Clamped to 1000-30000. |
+
 ### `net.curl`
 Performs a GET or HEAD request to a public URL and returns the response.
 
@@ -116,6 +209,14 @@ Performs a GET or HEAD request to a public URL and returns the response.
 ### `proc.list`
 All running processes: PID, name, executable path, command line, working-set
 size (MB), and creation time from WMI `Win32_Process`. No args.
+
+### `proc.find`
+Finds processes by name, executable path, or command line.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `query` | string | required | Search text; regex-escaped before use. |
+| `max_results` | int | `100` | Clamped to 1-500. |
 
 ### `proc.kill`
 **Risky.** Terminates a process by PID.
@@ -161,6 +262,14 @@ mapping but is set to `false`; requests for it are rejected.
 Returns: time (UTC ISO-8601), level, event ID, provider name, and message per
 event.
 
+### `evt.providers`
+Lists known Windows Event Log channels and record counts.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `name_prefix` | string | empty | Optional channel-name prefix filter. |
+| `max_results` | int | `400` | Clamped to 1-4000. |
+
 ---
 
 ## Drivers
@@ -194,6 +303,43 @@ Reads a file and returns its content as base64 plus a SHA-256 hash.
 - Certain credential-holding system paths are always refused regardless of size
   (`\Windows\System32\config\`, `\Windows\System32\configstore\`,
   `\Users\All Users\Microsoft\Crypto\`).
+
+### `fs.search`
+Searches a directory tree for names matching a glob pattern.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `path` | string | required | Absolute directory path. |
+| `pattern` | string | `*` | Filepath glob pattern. |
+| `max_results` | int | `200` | Clamped to 1-2000. |
+| `max_depth` | int | `4` | Clamped to 0-20. |
+| `include_dirs` | bool | `false` | Include directories in matches. |
+| `include_hidden` | bool | `false` | Include dot-prefixed entries. |
+
+### `fs.head` / `fs.tail`
+Returns the first or last lines of a text file without reading the whole file.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `path` | string | required | Absolute file path. |
+| `lines` | int | `80` | Clamped to 1-5000. |
+
+### `fs.stat`
+Returns file metadata including size, mtime, mode, directory/symlink state, and
+symlink target when applicable.
+
+| Arg | Type | Notes |
+|---|---|---|
+| `path` | string | Required. Absolute path. |
+
+### `fs.tree`
+Returns a bounded directory tree.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `path` | string | required | Absolute directory path. |
+| `max_depth` | int | `3` | Clamped to 1-8. |
+| `max_entries` | int | `500` | Clamped to 50-5000. |
 
 ---
 
@@ -244,6 +390,70 @@ path in a future revision without changing the `fs.read` contract.
 | Arg | Type | Notes |
 |---|---|---|
 | `path` | string | Required. Absolute path to a file. |
+
+---
+
+## Registry and Tasks
+
+### `reg.query`
+Reads values and immediate subkeys from a registry key, or recursively walks a
+bounded subtree.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `hive` | string | `HKLM` | `HKLM`, `HKCU`, `HKCR`, `HKU`, or `HKCC`. |
+| `key` | string | required | Registry key path below the hive. |
+| `value` | string | empty | Optional specific value name. |
+| `recursive` | bool | `false` | Walk child keys when true. |
+| `max_results` | int | `200` | Clamped to 1-2000. |
+
+### `task.list`
+Lists scheduled tasks with state, author, description, run times, triggers, and
+actions.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `path_prefix` | string | empty | Optional task-path prefix filter. |
+| `state` | string | `all` | `all`, `ready`, `running`, `disabled`, `queued`, or `unknown`. |
+| `max_results` | int | `300` | Clamped to 1-2000. |
+
+---
+
+## Security and Updates
+
+### `update.history`
+Returns the last Windows Update history entries from the Microsoft Update COM
+API. No args.
+
+### `defender.status`
+Windows Defender status, signature freshness, recent scan times, and selected
+preference details. Returns `available=false` when Defender cmdlets are not
+available. No args.
+
+### `sec.local-admins`
+Lists members of the local Administrators group with name, object class, SID,
+and principal source. Returns `available=false` if `Get-LocalGroupMember` is
+not available in the host PowerShell. No args.
+
+---
+
+## Applications and Startup
+
+### `app.list`
+Lists installed Win32 uninstall entries and current-user AppX packages.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `name_prefix` | string | empty | Optional case-insensitive name prefix. |
+| `max_results` | int | `300` | Clamped to 1-5000. |
+
+### `startup.list`
+Lists startup entries from `Win32_StartupCommand`: name, command, location,
+user, user SID, and description.
+
+| Arg | Type | Default | Notes |
+|---|---|---|---|
+| `max_results` | int | `300` | Clamped to 1-2000. |
 
 ---
 

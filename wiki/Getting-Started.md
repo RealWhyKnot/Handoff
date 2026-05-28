@@ -25,7 +25,7 @@ session live -- share the view URL with your helper:
 
 press Ctrl+C to end the session at any time.
 
-ready -- 33 capabilities registered
+ready -- <n> capabilities registered
 ```
 
 Copy the URL and send it to your helper (chat, email, phone -- any channel
