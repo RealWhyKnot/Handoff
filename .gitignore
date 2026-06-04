@@ -22,6 +22,7 @@ vendor/
 # Bundled picotool binary downloaded by scripts/fetch-picotool.ps1.
 # Embedded only into -tags embed_picotool builds; default builds use PATH.
 internal/picotool/binaries/picotool.exe
+version.txt
 
 # Log files
 *.log

@@ -25,10 +25,10 @@ func TestWithSerialOnlyAppendsWhenNonEmpty(t *testing.T) {
 
 func TestPicoStringArgTrimsAndDefaults(t *testing.T) {
 	args := rawArgs(t, map[string]interface{}{
-		"present":   "  abc  ",
-		"empty":     "",
-		"only_ws":   "   ",
-		"non_str":   42,
+		"present": "  abc  ",
+		"empty":   "",
+		"only_ws": "   ",
+		"non_str": 42,
 	})
 	if got := picoStringArg(args, "present"); got != "abc" {
 		t.Fatalf("present = %q, want abc", got)

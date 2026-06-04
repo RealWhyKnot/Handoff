@@ -20,9 +20,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot   = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $binariesDir = Join-Path $repoRoot 'internal\picotool\binaries'
-$outExe     = Join-Path $binariesDir 'picotool.exe'
+$outExe = Join-Path $binariesDir 'picotool.exe'
 
 if ((Test-Path -LiteralPath $outExe) -and (-not $Force)) {
     Write-Host "picotool already present at $outExe (pass -Force to re-fetch)" -ForegroundColor Yellow
@@ -43,7 +43,8 @@ function Resolve-PicotoolAssetUrl {
         # Tag URL pattern: tags on this repo are 'v2.2.0-3' shape.
         $tag = if ($RequestedVersion.StartsWith('v')) { $RequestedVersion } else { "v$RequestedVersion" }
         "https://api.github.com/repos/raspberrypi/pico-sdk-tools/releases/tags/$tag"
-    } else {
+    }
+    else {
         "https://api.github.com/repos/raspberrypi/pico-sdk-tools/releases/latest"
     }
 
@@ -53,7 +54,8 @@ function Resolve-PicotoolAssetUrl {
     Write-Host "querying $api" -ForegroundColor Cyan
     try {
         $release = Invoke-RestMethod -Uri $api -Headers $headers -UseBasicParsing
-    } catch {
+    }
+    catch {
         throw "GitHub API query failed: $($_.Exception.Message)"
     }
 
@@ -77,7 +79,8 @@ function Resolve-PicotoolAssetUrl {
 if ($AssetUrl) {
     $url = $AssetUrl
     Write-Host "using explicit asset url" -ForegroundColor Cyan
-} else {
+}
+else {
     $url = Resolve-PicotoolAssetUrl -RequestedVersion $Version
 }
 
@@ -85,7 +88,8 @@ Write-Host "fetching $url" -ForegroundColor Cyan
 $tmpZip = Join-Path $binariesDir 'picotool-download.zip'
 try {
     Invoke-WebRequest -Uri $url -OutFile $tmpZip -UseBasicParsing
-} catch {
+}
+catch {
     throw "download failed: $($_.Exception.Message)"
 }
 

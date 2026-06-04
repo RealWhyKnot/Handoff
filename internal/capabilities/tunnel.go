@@ -49,9 +49,9 @@ type TunnelBridge interface {
 }
 
 const (
-	tunnelReadChunk      = 16 * 1024
+	tunnelReadChunk       = 16 * 1024
 	tunnelMaxFramePayload = 1 * 1024 * 1024 // operator-side write cap per frame
-	tunnelDialTimeout    = 5 * time.Second
+	tunnelDialTimeout     = 5 * time.Second
 )
 
 var (

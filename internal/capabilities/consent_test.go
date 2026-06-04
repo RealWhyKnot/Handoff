@@ -219,7 +219,7 @@ func TestPsExecRejectsOversizedScript(t *testing.T) {
 
 func TestFsSearchRejectsRelativePath(t *testing.T) {
 	_, err := fsSearch(context.Background(), rawArgs(t, map[string]interface{}{
-		"path": "relative/path",
+		"path":    "relative/path",
 		"pattern": "*.txt",
 	}))
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
@@ -277,8 +277,8 @@ func TestFsSearchMatchesPatternAndRespectsLimits(t *testing.T) {
 	}
 
 	_, err = fsSearch(context.Background(), rawArgs(t, map[string]interface{}{
-		"path": root,
-		"pattern": "*.log",
+		"path":           root,
+		"pattern":        "*.log",
 		"include_hidden": true,
 	}))
 	if err != nil {

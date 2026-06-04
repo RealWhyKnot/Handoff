@@ -17,15 +17,15 @@ import (
 
 // Entry is one row in the audit log.
 type Entry struct {
-	Ts        string      `json:"ts"`         // RFC3339 with millis, UTC
-	SessionID string      `json:"sid"`        // first 8 chars of view token
-	Operator  string      `json:"op"`         // remote ip seen at session start, may be empty
-	Capability string     `json:"cap"`        // command kind
-	Args      interface{} `json:"args"`       // command extras (may be trimmed for very large payloads)
-	Consent   string      `json:"consent"`    // session | prompt_allow | prompt_deny | auto
-	Result    string      `json:"result"`     // ok | err | denied
-	ElapsedMs int64       `json:"elapsed_ms"`
-	Detail    string      `json:"detail,omitempty"`
+	Ts         string      `json:"ts"`      // RFC3339 with millis, UTC
+	SessionID  string      `json:"sid"`     // first 8 chars of view token
+	Operator   string      `json:"op"`      // remote ip seen at session start, may be empty
+	Capability string      `json:"cap"`     // command kind
+	Args       interface{} `json:"args"`    // command extras (may be trimmed for very large payloads)
+	Consent    string      `json:"consent"` // session | prompt_allow | prompt_deny | auto
+	Result     string      `json:"result"`  // ok | err | denied
+	ElapsedMs  int64       `json:"elapsed_ms"`
+	Detail     string      `json:"detail,omitempty"`
 }
 
 // Logger is goroutine-safe; multiple capability handlers writing

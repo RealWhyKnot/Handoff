@@ -22,20 +22,25 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
           # Full history + all tags so the release-body step can diff
           # commits against the previous version tag for the changelog.
           fetch-depth: 0
 
-      - name: Test release base selection
+      - name: Validate PowerShell and release scripts
         shell: pwsh
-        run: ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
+        run: |
+          ./.github/scripts/Test-WorkflowSyntax.ps1
+          ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
 
       - name: Resolve version from tag
         id: ver
@@ -51,8 +56,8 @@ jobs:
           $version = $tag.Substring(1)
           # Sanity-check the YYYY.M.D.N(-XXXX) shape so a fat-fingered
           # tag fails the release rather than shipping a broken version.
-          if ($version -notmatch '^\d{4}\.\d+\.\d+\.\d+(-[A-Fa-f0-9]{4})?$') {
-              throw "version '$version' does not match the YYYY.M.D.N(-XXXX) shape"
+          if ($version -notmatch '^\d{4}\.\d+\.\d+\.\d+(-([A-Fa-f0-9]{4}|beta))?$') {
+              throw "version '$version' does not match the YYYY.M.D.N, YYYY.M.D.N-XXXX, or YYYY.M.D.N-beta shape"
           }
           $isPre = $version -like '*-*'
           "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append

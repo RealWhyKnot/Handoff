@@ -17,14 +17,14 @@ import (
 )
 
 const (
-	gwlExStyle               = -20
-	wsExToolWindow   uintptr = 0x00000080
-	wsExAppWindow    uintptr = 0x00040000
-	gwOwner          uintptr = 4
-	th32csSnapproc   uintptr = 0x00000002
-	dwmwaCloaked     uintptr = 14
-	hresultOK        uintptr = 0
-	invalidHandle            = ^uintptr(0)
+	gwlExStyle             = -20
+	wsExToolWindow uintptr = 0x00000080
+	wsExAppWindow  uintptr = 0x00040000
+	gwOwner        uintptr = 4
+	th32csSnapproc uintptr = 0x00000002
+	dwmwaCloaked   uintptr = 14
+	hresultOK      uintptr = 0
+	invalidHandle          = ^uintptr(0)
 )
 
 var (

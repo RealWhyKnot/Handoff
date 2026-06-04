@@ -258,14 +258,14 @@ func fsSearch(_ context.Context, args map[string]json.RawMessage) (interface{}, 
 	}
 
 	return map[string]interface{}{
-		"path":          searchPath,
-		"pattern":       pattern,
-		"max_depth":     maxDepth,
-		"max_results":   maxResults,
-		"include_dirs":  includeDirs,
+		"path":           searchPath,
+		"pattern":        pattern,
+		"max_depth":      maxDepth,
+		"max_results":    maxResults,
+		"include_dirs":   includeDirs,
 		"include_hidden": includeHidden,
-		"count":         len(entries),
-		"entries":       entries,
+		"count":          len(entries),
+		"entries":        entries,
 	}, nil
 }
 
@@ -364,13 +364,13 @@ func fsTextSample(args map[string]json.RawMessage, tail bool) (interface{}, erro
 	}
 
 	return map[string]interface{}{
-		"path":      path,
-		"size":      info.Size(),
-		"mtime":     info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
-		"lines":     allLines,
+		"path":       path,
+		"size":       info.Size(),
+		"mtime":      info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+		"lines":      allLines,
 		"line_count": len(allLines),
-		"truncated": info.Size() > int64(len(data)),
-		"mode":      sampleName(tail),
+		"truncated":  info.Size() > int64(len(data)),
+		"mode":       sampleName(tail),
 	}, nil
 }
 
@@ -416,13 +416,13 @@ func fsStat(_ context.Context, args map[string]json.RawMessage) (interface{}, er
 		}
 	}
 	return map[string]interface{}{
-		"path":          abs,
-		"name":          filepath.Base(path),
-		"size":          info.Size(),
-		"mtime":         info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
-		"mode":          info.Mode().String(),
-		"is_dir":        info.IsDir(),
-		"is_symlink":    info.Mode()&os.ModeSymlink != 0,
+		"path":           abs,
+		"name":           filepath.Base(path),
+		"size":           info.Size(),
+		"mtime":          info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+		"mode":           info.Mode().String(),
+		"is_dir":         info.IsDir(),
+		"is_symlink":     info.Mode()&os.ModeSymlink != 0,
 		"symlink_target": target,
 	}, nil
 }
