@@ -198,7 +198,7 @@ jobs:
           $out.Add("")
           $out.Add("Auto-update clients can poll ``handoff-version.json`` next to the binary in the assets list.")
           $out.Add("")
-          $out.Add("Getting started: https://github.com/$env:GITHUB_REPOSITORY/wiki/Getting-Started")
+          $out.Add("Getting started: https://github.com/$env:GITHUB_REPOSITORY#readme")
 
           $notes = $out -join "`n"
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
