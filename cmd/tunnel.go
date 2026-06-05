@@ -100,7 +100,7 @@ func Tunnel(args []string) {
 	client := newTunnelClient(conn)
 	defer client.shutdown("operator close")
 
-	// Force-quit if our window disappears from the taskbar mid-tunnel.
+	// Lifecycle hook for foreground-window policy. Currently a no-op.
 	visibility.StartWatcher(ctx)
 
 	go client.acceptLoop(ctx, listener)

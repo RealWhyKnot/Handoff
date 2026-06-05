@@ -8,12 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 	"syscall"
-	"time"
 	"unsafe"
-
-	"github.com/RealWhyKnot/Handoff/internal/supportlog"
 )
 
 const (
@@ -78,24 +74,9 @@ func enumProc(hwnd uintptr, _ uintptr) uintptr {
 // syscall.NewCallback leaks if re-called per tick.
 var enumProcCallback = syscall.NewCallback(enumProc)
 
-var startOnce sync.Once
-
-// StartWatcher launches the visibility watcher goroutine. Idempotent: only
-// the first call spawns a worker; subsequent calls are no-ops so a single
-// process that runs through multiple commands stays at one watcher.
-func StartWatcher(ctx context.Context) {
-	startOnce.Do(func() {
-		go func() {
-			t := time.NewTicker(defaultTick)
-			defer t.Stop()
-			runWatcher(ctx, t.C, defaultGraceTicks, performCheck, killProcess)
-		}()
-	})
-}
-
-func killProcess(reason string) {
-	supportlog.Printf("visibility watcher killing process: %s", reason)
-	os.Exit(1)
+// StartWatcher is intentionally disabled. The visibility heuristic can
+// misclassify valid terminal sessions on some Windows desktops.
+func StartWatcher(_ context.Context) {
 }
 
 func performCheck() checkResult {

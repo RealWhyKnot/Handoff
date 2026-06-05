@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package visibility kills the running process when no taskbar-visible
-// window can be found in its process ancestry. The check runs once per
-// second while a long-running command (host bridge or operator tunnel)
-// is active. On non-Windows builds StartWatcher is a no-op.
+// Package visibility contains the optional foreground-window lifecycle hook.
+// StartWatcher is currently a no-op on every platform.
 package visibility
 
 import (

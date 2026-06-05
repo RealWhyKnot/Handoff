@@ -74,9 +74,7 @@ func New(args []string) {
 		cancel()
 	}()
 
-	// Force-quit if the program's window stops being visible in the
-	// taskbar -- closes the loophole where a hidden console keeps the
-	// remote-control channel open after the host thinks it's gone.
+	// Lifecycle hook for foreground-window policy. Currently a no-op.
 	visibility.StartWatcher(ctx)
 
 	// Open the bridge WS.
