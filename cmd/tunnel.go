@@ -168,7 +168,7 @@ func parseTunnelArgs(args []string) (tunnelOptions, error) {
 }
 
 func tunnelWsURL(relayBase, token string) (string, error) {
-	if strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://") {
+	if isTunnelURL(token) {
 		u, err := url.Parse(token)
 		if err != nil {
 			return "", err
@@ -181,6 +181,13 @@ func tunnelWsURL(relayBase, token string) (string, error) {
 		return "", err
 	}
 	return swapScheme(u).String(), nil
+}
+
+func isTunnelURL(token string) bool {
+	return strings.HasPrefix(token, "http://") ||
+		strings.HasPrefix(token, "https://") ||
+		strings.HasPrefix(token, "ws://") ||
+		strings.HasPrefix(token, "wss://")
 }
 
 func swapScheme(u *url.URL) *url.URL {

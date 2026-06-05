@@ -92,6 +92,16 @@ func TestTunnelWsURLAcceptsFullURL(t *testing.T) {
 	}
 }
 
+func TestTunnelWsURLAcceptsFullWebSocketURL(t *testing.T) {
+	got, err := tunnelWsURL("https://ignored", "wss://handoff.example/api/tunnel/n2_tk_xyz")
+	if err != nil {
+		t.Fatalf("tunnelWsURL: %v", err)
+	}
+	if got != "wss://handoff.example/api/tunnel/n2_tk_xyz" {
+		t.Fatalf("ws url = %q", got)
+	}
+}
+
 func TestNewStreamIDFormat(t *testing.T) {
 	id := newStreamID()
 	if !strings.HasPrefix(id, "s_") {
