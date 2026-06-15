@@ -34,6 +34,7 @@ jobs:
         run: |
           ./.github/scripts/Test-WorkflowSyntax.ps1
           ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
+          ./.github/scripts/Test-ReleaseVersionSequence.ps1
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -64,6 +65,10 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "is_pre=$($isPre.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "tag=$tag version=$version is_pre=$isPre"
+
+      - name: Validate release version sequence
+        shell: pwsh
+        run: ./.github/scripts/Assert-ReleaseVersionSequence.ps1 -Tag '${{ steps.ver.outputs.tag }}'
 
       - name: Fetch picotool
         shell: pwsh
