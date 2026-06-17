@@ -123,7 +123,51 @@ func TestTunnelManagerOpensAndForwardsBytes(t *testing.T) {
 func TestTunnelManagerRejectsNonLoopback(t *testing.T) {
 	mgr := newTunnelMgr(newFakeTunnelBridge())
 	if _, err := mgr.open("tn1", 5555, "8.8.8.8"); err == nil {
-		t.Fatal("expected non-loopback to be rejected")
+		t.Fatal("expected public address to be rejected")
+	}
+}
+
+func TestTunnelManagerAcceptsPrivateTarget(t *testing.T) {
+	mgr := newTunnelMgr(newFakeTunnelBridge())
+	tun, err := mgr.open("tn1", 5555, "192.168.2.1")
+	if err != nil {
+		t.Fatalf("open private target: %v", err)
+	}
+	if tun.localHost != "192.168.2.1" {
+		t.Fatalf("localHost = %q, want 192.168.2.1", tun.localHost)
+	}
+}
+
+func TestTunnelManagerKeepsPrivateHostname(t *testing.T) {
+	oldLookup := tunnelLookupIP
+	tunnelLookupIP = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host != "fritz.repeater" {
+			t.Fatalf("lookup host = %q, want fritz.repeater", host)
+		}
+		return []net.IPAddr{{IP: net.ParseIP("192.168.2.103")}}, nil
+	}
+	t.Cleanup(func() { tunnelLookupIP = oldLookup })
+
+	mgr := newTunnelMgr(newFakeTunnelBridge())
+	tun, err := mgr.open("tn1", 5555, "fritz.repeater")
+	if err != nil {
+		t.Fatalf("open hostname: %v", err)
+	}
+	if tun.localHost != "fritz.repeater" {
+		t.Fatalf("localHost = %q, want fritz.repeater", tun.localHost)
+	}
+}
+
+func TestTunnelManagerRejectsHostnameResolvingPublic(t *testing.T) {
+	oldLookup := tunnelLookupIP
+	tunnelLookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+	}
+	t.Cleanup(func() { tunnelLookupIP = oldLookup })
+
+	mgr := newTunnelMgr(newFakeTunnelBridge())
+	if _, err := mgr.open("tn1", 5555, "example.com"); err == nil {
+		t.Fatal("expected public hostname to be rejected")
 	}
 }
 

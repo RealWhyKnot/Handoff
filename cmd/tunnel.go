@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -44,7 +45,7 @@ func Tunnel(args []string) {
 	opts, err := parseTunnelArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "handoff tunnel:", err)
-		fmt.Fprintln(os.Stderr, "usage: handoff tunnel <connect-token> [--local-port PORT] [--relay URL]")
+		fmt.Fprintln(os.Stderr, "usage: handoff tunnel <connect-token> [--local-port PORT] [--relay URL] [--http-host HOST]")
 		os.Exit(2)
 	}
 
@@ -88,6 +89,13 @@ func Tunnel(args []string) {
 	}
 	fmt.Printf("tunnel ready -- forwarding 127.0.0.1:%d -> host %s:%d\n",
 		opts.localPort, ready.HostAddr, ready.HostPort)
+	httpHost := opts.httpHost
+	if httpHost == "" {
+		httpHost = defaultTunnelHTTPHost(ready.HostAddr, ready.HostPort)
+	}
+	if httpHost != "" {
+		fmt.Printf("HTTP Host headers will use %s\n", httpHost)
+	}
 
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(opts.localPort)))
 	if err != nil {
@@ -97,7 +105,7 @@ func Tunnel(args []string) {
 	defer listener.Close()
 	fmt.Println("press Ctrl+C to close the tunnel.")
 
-	client := newTunnelClient(conn)
+	client := newTunnelClient(conn, httpHost)
 	defer client.shutdown("operator close")
 
 	// Lifecycle hook for foreground-window policy. Currently a no-op.
@@ -113,6 +121,7 @@ type tunnelOptions struct {
 	token     string
 	localPort int
 	relay     string
+	httpHost  string
 }
 
 func parseTunnelArgs(args []string) (tunnelOptions, error) {
@@ -137,6 +146,16 @@ func parseTunnelArgs(args []string) (tunnelOptions, error) {
 			}
 			i++
 			opts.relay = args[i]
+		case a == "--http-host" || a == "--host-header":
+			if i+1 >= len(args) {
+				return opts, errors.New("--http-host requires a value")
+			}
+			i++
+			host, err := cleanHTTPHost(args[i])
+			if err != nil {
+				return opts, err
+			}
+			opts.httpHost = host
 		case strings.HasPrefix(a, "--local-port="):
 			port, err := strconv.Atoi(strings.TrimPrefix(a, "--local-port="))
 			if err != nil || port <= 0 || port > 65535 {
@@ -145,6 +164,18 @@ func parseTunnelArgs(args []string) (tunnelOptions, error) {
 			opts.localPort = port
 		case strings.HasPrefix(a, "--relay="):
 			opts.relay = strings.TrimPrefix(a, "--relay=")
+		case strings.HasPrefix(a, "--http-host="):
+			host, err := cleanHTTPHost(strings.TrimPrefix(a, "--http-host="))
+			if err != nil {
+				return opts, err
+			}
+			opts.httpHost = host
+		case strings.HasPrefix(a, "--host-header="):
+			host, err := cleanHTTPHost(strings.TrimPrefix(a, "--host-header="))
+			if err != nil {
+				return opts, err
+			}
+			opts.httpHost = host
 		case strings.HasPrefix(a, "-"):
 			return opts, fmt.Errorf("unknown flag %q", a)
 		default:
@@ -165,6 +196,17 @@ func parseTunnelArgs(args []string) (tunnelOptions, error) {
 		opts.localPort = 47800
 	}
 	return opts, nil
+}
+
+func cleanHTTPHost(host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", errors.New("--http-host requires a non-empty value")
+	}
+	if strings.ContainsAny(host, "\r\n") {
+		return "", errors.New("--http-host must not contain newlines")
+	}
+	return host, nil
 }
 
 func tunnelWsURL(relayBase, token string) (string, error) {
@@ -249,7 +291,8 @@ func awaitTunnelReady(ctx context.Context, conn *websocket.Conn) (*tunnelReady, 
 }
 
 type tunnelClient struct {
-	conn *websocket.Conn
+	conn     *websocket.Conn
+	httpHost string
 
 	writeMu sync.Mutex
 
@@ -258,8 +301,8 @@ type tunnelClient struct {
 	closed  bool
 }
 
-func newTunnelClient(conn *websocket.Conn) *tunnelClient {
-	return &tunnelClient{conn: conn, streams: map[string]net.Conn{}}
+func newTunnelClient(conn *websocket.Conn, httpHost string) *tunnelClient {
+	return &tunnelClient{conn: conn, httpHost: httpHost, streams: map[string]net.Conn{}}
 }
 
 func (t *tunnelClient) acceptLoop(ctx context.Context, listener net.Listener) {
@@ -319,6 +362,8 @@ func (t *tunnelClient) readLoop(ctx context.Context) error {
 
 func (t *tunnelClient) copyToRelay(ctx context.Context, streamID string, conn net.Conn) {
 	buf := make([]byte, 16*1024)
+	rewriteHTTPHost := t.httpHost != ""
+	var pending []byte
 	defer t.dropStream(streamID, "local end of stream")
 	for {
 		if ctx.Err() != nil {
@@ -328,6 +373,20 @@ func (t *tunnelClient) copyToRelay(ctx context.Context, streamID string, conn ne
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
+			if rewriteHTTPHost {
+				pending = append(pending, chunk...)
+				rewritten, ready := rewriteHTTPHostHeader(pending, t.httpHost)
+				if !ready && err == nil {
+					continue
+				}
+				if ready {
+					chunk = rewritten
+				} else {
+					chunk = pending
+				}
+				pending = nil
+				rewriteHTTPHost = false
+			}
 			frame := tunnelFrame{
 				Kind:     "data",
 				StreamID: streamID,
@@ -341,10 +400,133 @@ func (t *tunnelClient) copyToRelay(ctx context.Context, streamID string, conn ne
 			if !errors.Is(err, io.EOF) {
 				supportlog.Printf("tunnel-client local read error stream=%s: %v", streamID, err)
 			}
+			if rewriteHTTPHost && len(pending) > 0 {
+				_ = t.sendFrame(ctx, tunnelFrame{
+					Kind:     "data",
+					StreamID: streamID,
+					DataB64:  base64.StdEncoding.EncodeToString(pending),
+				})
+				pending = nil
+				rewriteHTTPHost = false
+			}
 			_ = t.sendFrame(ctx, tunnelFrame{Kind: "stream_close", StreamID: streamID, Reason: "eof"})
 			return
 		}
 	}
+}
+
+const httpHeaderRewriteLimit = 64 * 1024
+
+var httpMethodPrefixes = [][]byte{
+	[]byte("GET "),
+	[]byte("POST "),
+	[]byte("HEAD "),
+	[]byte("PUT "),
+	[]byte("DELETE "),
+	[]byte("OPTIONS "),
+	[]byte("PATCH "),
+	[]byte("TRACE "),
+}
+
+func defaultTunnelHTTPHost(host string, port int) string {
+	host = strings.TrimSpace(host)
+	if host == "" || isLoopbackTunnelHost(host) {
+		return ""
+	}
+	if port <= 0 || port == 80 {
+		cleaned, err := cleanHTTPHost(host)
+		if err != nil {
+			return ""
+		}
+		return cleaned
+	}
+	hostPort := host + ":" + strconv.Itoa(port)
+	if ip := net.ParseIP(host); ip != nil && strings.Contains(host, ":") {
+		hostPort = net.JoinHostPort(host, strconv.Itoa(port))
+	}
+	cleaned, err := cleanHTTPHost(hostPort)
+	if err != nil {
+		return ""
+	}
+	return cleaned
+}
+
+func isLoopbackTunnelHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func rewriteHTTPHostHeader(data []byte, host string) ([]byte, bool) {
+	if host == "" {
+		return data, true
+	}
+	if !hasHTTPMethodPrefix(data) {
+		if mayBecomeHTTPMethod(data) {
+			return nil, false
+		}
+		return data, true
+	}
+	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		if len(data) < httpHeaderRewriteLimit {
+			return nil, false
+		}
+		return data, true
+	}
+
+	header := data[:headerEnd]
+	body := data[headerEnd+4:]
+	lines := bytes.Split(header, []byte("\r\n"))
+	if len(lines) == 0 {
+		return data, true
+	}
+
+	hostLine := []byte("Host: " + host)
+	out := make([][]byte, 0, len(lines)+1)
+	out = append(out, lines[0])
+	replaced := false
+	for _, line := range lines[1:] {
+		if bytes.HasPrefix(bytes.ToLower(line), []byte("host:")) {
+			if !replaced {
+				out = append(out, hostLine)
+				replaced = true
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	if !replaced {
+		out = append(out[:1], append([][]byte{hostLine}, out[1:]...)...)
+	}
+
+	rewritten := bytes.Join(out, []byte("\r\n"))
+	rewritten = append(rewritten, []byte("\r\n\r\n")...)
+	rewritten = append(rewritten, body...)
+	return rewritten, true
+}
+
+func hasHTTPMethodPrefix(data []byte) bool {
+	for _, method := range httpMethodPrefixes {
+		if bytes.HasPrefix(data, method) {
+			return true
+		}
+	}
+	return false
+}
+
+func mayBecomeHTTPMethod(data []byte) bool {
+	if len(data) == 0 || len(data) > len("OPTIONS ") {
+		return false
+	}
+	for _, method := range httpMethodPrefixes {
+		if len(data) <= len(method) && bytes.HasPrefix(method, data) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *tunnelClient) sendFrame(ctx context.Context, frame tunnelFrame) error {

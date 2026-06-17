@@ -37,8 +37,11 @@ import (
 // stream / close frames are fire-and-forget bytes through an already-trusted
 // tunnel.
 //
-// Hosts only forward bytes to loopback (127.0.0.1 / ::1). The local_port is
-// validated 1..65535 before anything is dialed.
+// Hosts only forward bytes to loopback or local network destinations. Hostnames
+// are resolved before the tunnel is opened and must resolve only to loopback,
+// private, or link-local addresses. The original hostname is kept for dialing so
+// router/repeater admin pages that key off the host name still see the expected
+// target.
 
 // TunnelBridge is the subset of the relay bridge the tunnel manager needs.
 // Defined locally to keep the capabilities package decoupled from internal/relay.
@@ -52,11 +55,16 @@ const (
 	tunnelReadChunk       = 16 * 1024
 	tunnelMaxFramePayload = 1 * 1024 * 1024 // operator-side write cap per frame
 	tunnelDialTimeout     = 5 * time.Second
+	tunnelHostLookupTime  = 3 * time.Second
 )
 
 var (
 	tunnelMu      sync.Mutex
 	tunnelManager *tunnelMgr
+
+	tunnelLookupIP = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	}
 )
 
 // RegisterTunnel wires the tunnel.* command kinds. The bridge is captured so
@@ -138,8 +146,9 @@ func (m *tunnelMgr) open(tunnelID string, port int, host string) (*tunnelState, 
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	if !isLoopbackHost(host) {
-		return nil, fmt.Errorf("tunnel.open: only loopback hosts allowed (got %q)", host)
+	host, err := validateTunnelTargetHost(host)
+	if err != nil {
+		return nil, err
 	}
 
 	m.mu.Lock()
@@ -324,8 +333,68 @@ func (t *tunnelState) closeAll(reason string) {
 	supportlog.Printf("tunnel close tunnel=%s reason=%s", t.id, reason)
 }
 
+func validateTunnelTargetHost(host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "127.0.0.1", nil
+	}
+	if strings.Contains(host, "://") || strings.ContainsAny(host, "/\\?#@") {
+		return "", fmt.Errorf("tunnel.open: host must be a hostname or IP address (got %q)", host)
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return "", fmt.Errorf("tunnel.open: host must not include a port (got %q)", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !isAllowedTunnelTargetIP(ip) {
+			return "", fmt.Errorf("tunnel.open: host %q is not a local network address", host)
+		}
+		return host, nil
+	}
+	if !isReasonableTunnelHostname(host) {
+		return "", fmt.Errorf("tunnel.open: invalid host %q", host)
+	}
+
+	lookupCtx, cancel := context.WithTimeout(context.Background(), tunnelHostLookupTime)
+	defer cancel()
+	addrs, err := tunnelLookupIP(lookupCtx, host)
+	if err != nil {
+		return "", fmt.Errorf("tunnel.open: resolve host %q: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("tunnel.open: resolve host %q: no addresses", host)
+	}
+	for _, addr := range addrs {
+		if !isAllowedTunnelTargetIP(addr.IP) {
+			return "", fmt.Errorf("tunnel.open: host %q resolves outside the local network (%s)", host, addr.IP.String())
+		}
+	}
+	return host, nil
+}
+
+func isReasonableTunnelHostname(host string) bool {
+	if len(host) > 253 {
+		return false
+	}
+	for _, r := range host {
+		if r <= 0x20 || r > 0x7e {
+			return false
+		}
+		if !(r == '.' || r == '-' || r == '_' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllowedTunnelTargetIP(ip net.IP) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
 func isLoopbackHost(host string) bool {
-	if host == "localhost" {
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
