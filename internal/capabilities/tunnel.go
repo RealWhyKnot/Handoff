@@ -111,10 +111,11 @@ type tunnelState struct {
 }
 
 type tunnelStream struct {
-	id     string
-	conn   net.Conn
-	tun    *tunnelState
-	cancel context.CancelFunc
+	id      string
+	conn    net.Conn
+	tun     *tunnelState
+	writeMu sync.Mutex
+	cancel  context.CancelFunc
 }
 
 func newTunnelMgr(bridge TunnelBridge) *tunnelMgr {
@@ -250,6 +251,8 @@ func (m *tunnelMgr) writeData(tunnelID, streamID string, payload []byte) error {
 	if len(payload) > tunnelMaxFramePayload {
 		return fmt.Errorf("tunnel.data: payload %d bytes exceeds cap %d", len(payload), tunnelMaxFramePayload)
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if _, err := s.conn.Write(payload); err != nil {
 		s.close("write error: " + err.Error())
 		return fmt.Errorf("tunnel.data: write: %w", err)
