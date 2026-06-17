@@ -324,7 +324,7 @@ func (t *tunnelClient) acceptLoop(ctx context.Context, listener net.Listener) {
 			t.dropStream(streamID, "stream open send failed")
 			continue
 		}
-		go t.copyToRelay(ctx, streamID, conn)
+		go t.copyToRelayAfterStreamOpen(ctx, streamID, conn)
 	}
 }
 
@@ -358,6 +358,20 @@ func (t *tunnelClient) readLoop(ctx context.Context) error {
 			fmt.Fprintln(os.Stderr, "relay error:", frame.Message)
 		}
 	}
+}
+
+const tunnelStreamOpenSettleDelay = 250 * time.Millisecond
+
+func (t *tunnelClient) copyToRelayAfterStreamOpen(ctx context.Context, streamID string, conn net.Conn) {
+	timer := time.NewTimer(tunnelStreamOpenSettleDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		t.dropStream(streamID, "stream open settle cancelled")
+		return
+	case <-timer.C:
+	}
+	t.copyToRelay(ctx, streamID, conn)
 }
 
 func (t *tunnelClient) copyToRelay(ctx context.Context, streamID string, conn net.Conn) {

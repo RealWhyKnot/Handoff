@@ -120,6 +120,42 @@ func TestTunnelManagerOpensAndForwardsBytes(t *testing.T) {
 	}
 }
 
+func TestTunnelManagerWaitsForStreamBeforeWritingData(t *testing.T) {
+	port, stop := startEchoServer(t)
+	defer stop()
+
+	bridge := newFakeTunnelBridge()
+	mgr := newTunnelMgr(bridge)
+	defer mgr.shutdown()
+
+	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	payload := []byte("request raced stream open")
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- mgr.writeData("tn1", "s1", payload)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := mgr.openStream(context.Background(), "tn1", "s1"); err != nil {
+		t.Fatalf("openStream: %v", err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("writeData: %v", err)
+	}
+
+	select {
+	case rec := <-bridge.dataCh:
+		if string(rec.payload) != string(payload) {
+			t.Fatalf("echo payload = %q, want %q", rec.payload, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive echoed bytes back from tunnel within 2s")
+	}
+}
+
 func TestTunnelManagerRejectsNonLoopback(t *testing.T) {
 	mgr := newTunnelMgr(newFakeTunnelBridge())
 	if _, err := mgr.open("tn1", 5555, "8.8.8.8"); err == nil {

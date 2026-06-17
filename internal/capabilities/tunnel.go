@@ -56,6 +56,8 @@ const (
 	tunnelMaxFramePayload = 1 * 1024 * 1024 // operator-side write cap per frame
 	tunnelDialTimeout     = 5 * time.Second
 	tunnelHostLookupTime  = 3 * time.Second
+	tunnelStreamOpenWait  = 2 * time.Second
+	tunnelStreamWaitTick  = 10 * time.Millisecond
 )
 
 var (
@@ -241,9 +243,7 @@ func (m *tunnelMgr) writeData(tunnelID, streamID string, payload []byte) error {
 	if !ok {
 		return fmt.Errorf("tunnel.data: unknown tunnel_id %s", tunnelID)
 	}
-	t.mu.Lock()
-	s, ok := t.streams[streamID]
-	t.mu.Unlock()
+	s, ok := t.waitForStream(streamID, tunnelStreamOpenWait)
 	if !ok {
 		return fmt.Errorf("tunnel.data: unknown stream_id %s", streamID)
 	}
@@ -255,6 +255,23 @@ func (m *tunnelMgr) writeData(tunnelID, streamID string, payload []byte) error {
 		return fmt.Errorf("tunnel.data: write: %w", err)
 	}
 	return nil
+}
+
+func (t *tunnelState) waitForStream(streamID string, timeout time.Duration) (*tunnelStream, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		t.mu.Lock()
+		s, ok := t.streams[streamID]
+		closed := t.closed
+		t.mu.Unlock()
+		if ok {
+			return s, true
+		}
+		if closed || time.Now().After(deadline) {
+			return nil, false
+		}
+		time.Sleep(tunnelStreamWaitTick)
+	}
 }
 
 func (m *tunnelMgr) closeStream(tunnelID, streamID, reason string) bool {
