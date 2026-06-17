@@ -2,11 +2,15 @@
 package capabilities
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"sync"
 	"testing"
@@ -78,6 +82,31 @@ func startEchoServer(t *testing.T) (int, func()) {
 	}()
 	port := listener.Addr().(*net.TCPAddr).Port
 	return port, func() { _ = listener.Close() }
+}
+
+func startHTTPServer(t *testing.T) (int, func()) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("fritz ok"))
+	}))
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		server.Close()
+		t.Fatalf("parse server URL: %v", err)
+	}
+	_, portText, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		server.Close()
+		t.Fatalf("split server host: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		server.Close()
+		t.Fatalf("parse server port: %v", err)
+	}
+	return port, server.Close
 }
 
 func TestTunnelManagerOpensAndForwardsBytes(t *testing.T) {
@@ -153,6 +182,73 @@ func TestTunnelManagerWaitsForStreamBeforeWritingData(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not receive echoed bytes back from tunnel within 2s")
+	}
+}
+
+func TestTunnelManagerHTTPGetCanRaceStreamOpen(t *testing.T) {
+	port, stop := startHTTPServer(t)
+	defer stop()
+
+	bridge := newFakeTunnelBridge()
+	mgr := newTunnelMgr(bridge)
+	defer mgr.shutdown()
+
+	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	request := []byte("GET /login_sid.lua HTTP/1.1\r\nHost: fritz.repeater\r\nConnection: close\r\n\r\n")
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- mgr.writeData("tn1", "s1", request)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := mgr.openStream(context.Background(), "tn1", "s1"); err != nil {
+		t.Fatalf("openStream: %v", err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("writeData: %v", err)
+	}
+
+	var response []byte
+	deadline := time.After(2 * time.Second)
+	for !bytes.Contains(response, []byte("fritz ok")) {
+		select {
+		case rec := <-bridge.dataCh:
+			response = append(response, rec.payload...)
+		case <-deadline:
+			t.Fatalf("HTTP response did not arrive; got %q", response)
+		}
+	}
+}
+
+func TestTunnelManagerWriteDataStopsWaitingWhenTunnelCloses(t *testing.T) {
+	bridge := newFakeTunnelBridge()
+	mgr := newTunnelMgr(bridge)
+	defer mgr.shutdown()
+
+	if _, err := mgr.open("tn1", 5555, "127.0.0.1"); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- mgr.writeData("tn1", "missing", []byte("payload"))
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if ok := mgr.closeTunnel("tn1", "test close"); !ok {
+		t.Fatal("closeTunnel returned false")
+	}
+
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("writeData unexpectedly succeeded")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("writeData did not unblock after tunnel close")
 	}
 }
 
