@@ -28,6 +28,7 @@ jobs:
           # Full history + all tags so the release-body step can diff
           # commits against the previous version tag for the changelog.
           fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Validate PowerShell and release scripts
         shell: pwsh
