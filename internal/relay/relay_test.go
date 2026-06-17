@@ -14,6 +14,11 @@ import (
 	"github.com/coder/websocket"
 )
 
+type capturedFrame struct {
+	token string
+	data  []byte
+}
+
 func TestSendHelloIncludesProtocolAndCapabilities(t *testing.T) {
 	frames := make(chan []byte, 1)
 	errs := make(chan error, 1)
@@ -82,6 +87,91 @@ func TestSendHelloIncludesProtocolAndCapabilities(t *testing.T) {
 	if !reflect.DeepEqual(event.Payload.Capabilities, wantCaps) {
 		t.Fatalf("capabilities = %#v, want %#v", event.Payload.Capabilities, wantCaps)
 	}
+}
+
+func TestReconnectSwapsConnAndReplaysHello(t *testing.T) {
+	frames := make(chan capturedFrame, 2)
+	errs := make(chan error, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			errs <- err
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		_, data, err := conn.Read(r.Context())
+		if err != nil {
+			errs <- err
+			return
+		}
+		frames <- capturedFrame{token: r.Header.Get("X-Write-Token"), data: data}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bridge, err := Dial(ctx, server.URL, "write-token")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer bridge.Close()
+	if err := bridge.SendHello(ctx, "host-a", "v2026.6.17.2", []string{"sys.info", "tunnel.open"}); err != nil {
+		t.Fatalf("SendHello: %v", err)
+	}
+	first := readCapturedFrame(t, ctx, frames, errs)
+
+	if err := bridge.Reconnect(ctx); err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+	second := readCapturedFrame(t, ctx, frames, errs)
+
+	for i, frame := range []capturedFrame{first, second} {
+		if frame.token != "write-token" {
+			t.Fatalf("frame %d token = %q, want write-token", i, frame.token)
+		}
+		var event struct {
+			Kind    string `json:"kind"`
+			Payload struct {
+				Hostname     string   `json:"hostname"`
+				Version      string   `json:"version"`
+				Capabilities []string `json:"capabilities"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(frame.data, &event); err != nil {
+			t.Fatalf("frame %d unmarshal: %v", i, err)
+		}
+		if event.Kind != "hello" || event.Payload.Hostname != "host-a" || event.Payload.Version != "v2026.6.17.2" {
+			t.Fatalf("frame %d event = %#v", i, event)
+		}
+		wantCaps := []string{"sys.info", "tunnel.open"}
+		if !reflect.DeepEqual(event.Payload.Capabilities, wantCaps) {
+			t.Fatalf("frame %d capabilities = %#v, want %#v", i, event.Payload.Capabilities, wantCaps)
+		}
+	}
+}
+
+func TestReconnectHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	bridge := &Bridge{baseURL: "http://127.0.0.1:1", writeToken: "write-token"}
+	if err := bridge.Reconnect(ctx); err == nil {
+		t.Fatal("Reconnect succeeded with canceled context")
+	}
+}
+
+func readCapturedFrame(t *testing.T, ctx context.Context, frames <-chan capturedFrame, errs <-chan error) capturedFrame {
+	t.Helper()
+	select {
+	case frame := <-frames:
+		return frame
+	case err := <-errs:
+		t.Fatalf("server error: %v", err)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for frame")
+	}
+	return capturedFrame{}
 }
 
 func TestSendTunnelDataEncodesBase64(t *testing.T) {

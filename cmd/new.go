@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"sync"
@@ -25,7 +24,7 @@ import (
 var Version = "0.1.0"
 
 // New mints a fresh session on the relay, opens the bridge WebSocket,
-// and runs the host agent loop until Ctrl+C or relay disconnect.
+// and runs the host agent loop until Ctrl+C.
 func New(args []string) {
 	relayBase := defaultRelay()
 	supportlog.Printf("session start relay=%s version=%s", relayBase, Version)
@@ -108,17 +107,22 @@ func New(args []string) {
 	defer jobs.CancelAll()
 
 	// Main loop: receive commands and hand them to cancellable workers.
+	backoff := newReconnectBackoff()
 	for {
 		cmd, err := bridge.Recv(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				supportlog.Printf("recv ended sid=%s err=%v", sid, err)
 				return
 			}
-			supportlog.Printf("recv error sid=%s: %v", sid, err)
-			fmt.Fprintln(os.Stderr, "recv error:", err)
-			return
+			supportlog.Printf("recv ended sid=%s err=%v; reconnecting", sid, err)
+			fmt.Fprintln(os.Stderr, "connection lost; reconnecting...")
+			if !reconnectBridge(ctx, sid, bridge, backoff) {
+				return
+			}
+			continue
 		}
+		backoff.Reset()
 		supportlog.Printf("command received sid=%s id=%s kind=%s", sid, cmd.ID, cmd.Kind)
 		if cmd.Kind == "control.cancel" {
 			targetID := readStringExtra(cmd.Extras, "target_id")
@@ -136,6 +140,67 @@ func New(args []string) {
 		}
 		fmt.Printf("[cmd] %s  kind=%s\n", cmd.ID, cmd.Kind)
 		jobs.Start(cmd)
+	}
+}
+
+type reconnectBackoff struct {
+	next time.Duration
+}
+
+func newReconnectBackoff() *reconnectBackoff {
+	return &reconnectBackoff{next: 500 * time.Millisecond}
+}
+
+func (b *reconnectBackoff) Next() time.Duration {
+	if b.next <= 0 {
+		b.next = 500 * time.Millisecond
+	}
+	d := b.next
+	b.next *= 2
+	if b.next > 5*time.Second {
+		b.next = 5 * time.Second
+	}
+	return d
+}
+
+func (b *reconnectBackoff) Reset() {
+	b.next = 500 * time.Millisecond
+}
+
+func reconnectBridge(ctx context.Context, sid string, bridge *relay.Bridge, backoff *reconnectBackoff) bool {
+	for {
+		delay := backoff.Next()
+		if !sleepContext(ctx, delay) {
+			supportlog.Printf("reconnect cancelled sid=%s", sid)
+			return false
+		}
+
+		reconnectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := bridge.Reconnect(reconnectCtx)
+		cancel()
+		if err == nil {
+			backoff.Reset()
+			supportlog.Printf("bridge reconnected sid=%s", sid)
+			fmt.Println("reconnected.")
+			return true
+		}
+		if ctx.Err() != nil {
+			supportlog.Printf("reconnect ended sid=%s err=%v", sid, ctx.Err())
+			return false
+		}
+		supportlog.Printf("reconnect failed sid=%s delay=%s err=%v", sid, delay, err)
+		fmt.Fprintln(os.Stderr, "reconnect failed:", err)
+	}
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

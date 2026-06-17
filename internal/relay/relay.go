@@ -98,13 +98,34 @@ func Mint(ctx context.Context, baseURL string) (*MintResponse, error) {
 
 // Bridge is the long-lived WebSocket between this host and the relay.
 type Bridge struct {
-	conn    *websocket.Conn
+	baseURL    string
+	writeToken string
+
+	connMu sync.RWMutex
+	conn   *websocket.Conn
+
 	writeMu sync.Mutex
+	helloMu sync.Mutex
+	hello   *helloPayload
+}
+
+type helloPayload struct {
+	hostname     string
+	version      string
+	capabilities []string
 }
 
 // Dial opens the WebSocket to the relay's /ws endpoint with the write
 // token in the X-Write-Token header.
 func Dial(ctx context.Context, baseURL, writeToken string) (*Bridge, error) {
+	conn, err := dialConn(ctx, baseURL, writeToken)
+	if err != nil {
+		return nil, err
+	}
+	return &Bridge{baseURL: baseURL, writeToken: writeToken, conn: conn}, nil
+}
+
+func dialConn(ctx context.Context, baseURL, writeToken string) (*websocket.Conn, error) {
 	wsURL, err := httpToWs(baseURL)
 	if err != nil {
 		return nil, err
@@ -118,7 +139,7 @@ func Dial(ctx context.Context, baseURL, writeToken string) (*Bridge, error) {
 		return nil, fmt.Errorf("ws dial: %w", err)
 	}
 	conn.SetReadLimit(8 << 20) // 8 MiB
-	return &Bridge{conn: conn}, nil
+	return conn, nil
 }
 
 // SendHello announces this host's identity and command surface so the
@@ -126,12 +147,27 @@ func Dial(ctx context.Context, baseURL, writeToken string) (*Bridge, error) {
 func (b *Bridge) SendHello(ctx context.Context, hostname, version string, capabilities []string) error {
 	caps := append([]string(nil), capabilities...)
 	sort.Strings(caps)
+	hello := &helloPayload{
+		hostname:     hostname,
+		version:      version,
+		capabilities: append([]string(nil), caps...),
+	}
+	b.helloMu.Lock()
+	b.hello = hello
+	b.helloMu.Unlock()
+	return b.sendHello(ctx, hello)
+}
+
+func (b *Bridge) sendHello(ctx context.Context, hello *helloPayload) error {
+	if hello == nil {
+		return nil
+	}
 	payload := map[string]interface{}{
-		"hostname":         hostname,
-		"version":          version,
+		"hostname":         hello.hostname,
+		"version":          hello.version,
 		"os":               "windows",
 		"protocol_version": 1,
-		"capabilities":     caps,
+		"capabilities":     hello.capabilities,
 	}
 	return b.send(ctx, "hello", payload)
 }
@@ -186,7 +222,11 @@ func (b *Bridge) SendTunnelClose(ctx context.Context, tunnelID, reason string) e
 // A clean shutdown returns io.EOF.
 func (b *Bridge) Recv(ctx context.Context) (*Command, error) {
 	for {
-		typ, data, err := b.conn.Read(ctx)
+		conn, err := b.currentConn()
+		if err != nil {
+			return nil, err
+		}
+		typ, data, err := conn.Read(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
@@ -210,9 +250,41 @@ func (b *Bridge) Recv(ctx context.Context) (*Command, error) {
 	}
 }
 
+// Reconnect swaps the bridge to a fresh relay WebSocket and replays the last
+// hello on the same Bridge object so callers keep existing tunnel state.
+func (b *Bridge) Reconnect(ctx context.Context) error {
+	conn, err := dialConn(ctx, b.baseURL, b.writeToken)
+	if err != nil {
+		return err
+	}
+
+	b.connMu.Lock()
+	old := b.conn
+	b.conn = conn
+	b.connMu.Unlock()
+	if old != nil {
+		_ = old.Close(websocket.StatusNormalClosure, "reconnect")
+	}
+
+	b.helloMu.Lock()
+	hello := b.hello
+	b.helloMu.Unlock()
+	if err := b.sendHello(ctx, hello); err != nil {
+		return fmt.Errorf("replay hello: %w", err)
+	}
+	return nil
+}
+
 // Close ends the WebSocket cleanly. Safe to call once.
 func (b *Bridge) Close() error {
-	return b.conn.Close(websocket.StatusNormalClosure, "bye")
+	b.connMu.Lock()
+	conn := b.conn
+	b.conn = nil
+	b.connMu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Close(websocket.StatusNormalClosure, "bye")
 }
 
 func (b *Bridge) send(ctx context.Context, kind string, payload interface{}) error {
@@ -227,7 +299,21 @@ func (b *Bridge) send(ctx context.Context, kind string, payload interface{}) err
 	}
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
-	return b.conn.Write(ctx, websocket.MessageText, bytes.TrimRight(buf.Bytes(), "\n"))
+	conn, err := b.currentConn()
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, bytes.TrimRight(buf.Bytes(), "\n"))
+}
+
+func (b *Bridge) currentConn() (*websocket.Conn, error) {
+	b.connMu.RLock()
+	conn := b.conn
+	b.connMu.RUnlock()
+	if conn == nil {
+		return nil, errors.New("bridge is closed")
+	}
+	return conn, nil
 }
 
 func httpToWs(base string) (string, error) {
