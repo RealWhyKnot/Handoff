@@ -73,8 +73,12 @@ func TestE2EWebProxyServesLocalSite(t *testing.T) {
 	if headers.Get("X-Frame-Options") != "" {
 		t.Fatalf("X-Frame-Options leaked to the browser: %q", headers.Get("X-Frame-Options"))
 	}
-	if headers.Get("Set-Cookie") != "" {
-		t.Fatalf("Set-Cookie leaked to the browser: %q", headers.Get("Set-Cookie"))
+	// The device's own cookies must stay server-side. Edge infrastructure may add
+	// unrelated cookies of its own (node affinity), so check for this device's.
+	for _, cookie := range headers.Values("Set-Cookie") {
+		if strings.Contains(cookie, deviceCookie) {
+			t.Fatalf("device cookie leaked to the browser: %q", cookie)
+		}
 	}
 
 	// A relative asset must resolve through the proxy too.
@@ -196,6 +200,8 @@ func freePort(t *testing.T) int {
 
 type fakeDevice struct{ port int }
 
+const deviceCookie = "handoff_e2e_device_secret"
+
 func startFakeDevice(t *testing.T, marker string) fakeDevice {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -214,7 +220,7 @@ func startFakeDevice(t *testing.T, marker string) fakeDevice {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Set-Cookie", "sess=supersecret; HttpOnly")
+		w.Header().Set("Set-Cookie", "sess="+deviceCookie+"; HttpOnly")
 		_, _ = io.WriteString(w,
 			`<html><head><title>Router</title><link rel="stylesheet" href="style.css"></head>`+
 				`<body><h1>`+marker+`</h1></body></html>`)
