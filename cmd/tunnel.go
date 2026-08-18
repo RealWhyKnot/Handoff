@@ -69,59 +69,122 @@ func Tunnel(args []string) {
 		fmt.Fprintln(os.Stderr, "handoff tunnel:", err)
 		os.Exit(1)
 	}
-	fmt.Println("connecting to relay:", opts.relay)
 
-	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
-	conn, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{}})
-	dialCancel()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "could not open tunnel:", err)
-		os.Exit(1)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "bye")
-	conn.SetReadLimit(8 << 20)
-
-	// Expect a tunnel_ready (or error) before binding the local listener.
-	ready, err := awaitTunnelReady(ctx, conn)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "tunnel handshake failed:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("tunnel ready -- forwarding 127.0.0.1:%d -> host %s:%d\n",
-		opts.localPort, ready.HostAddr, ready.HostPort)
-	httpHost := opts.httpHost
-	if httpHost == "" {
-		httpHost = defaultTunnelHTTPHost(ready.HostAddr, ready.HostPort)
-	}
-	if httpHost != "" {
-		fmt.Printf("HTTP Host headers will use %s\n", httpHost)
-	}
-
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(opts.localPort)))
+	listener, err := bindLocalListener(opts.localPort, opts.portExplicit)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "could not bind local port:", err)
+		if !opts.portExplicit {
+			fmt.Fprintf(os.Stderr, "tried ports %d-%d; pass --local-port to choose another\n",
+				opts.localPort, opts.localPort+tunnelPortScanRange-1)
+		}
 		os.Exit(1)
 	}
 	defer listener.Close()
-	fmt.Println("press Ctrl+C to close the tunnel.")
-
-	client := newTunnelClient(conn, httpHost)
-	defer client.shutdown("operator close")
+	boundPort := listener.Addr().(*net.TCPAddr).Port
+	if boundPort != opts.localPort {
+		fmt.Printf("port %d was busy -- using %d instead\n", opts.localPort, boundPort)
+	}
 
 	// Lifecycle hook for foreground-window policy. Currently a no-op.
 	visibility.StartWatcher(ctx)
 
-	go client.acceptLoop(ctx, listener)
-	if err := client.readLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		supportlog.Printf("tunnel client read loop ended: %v", err)
+	fmt.Println("connecting to relay:", opts.relay)
+	runTunnelSessions(ctx, opts, wsURL, listener, boundPort)
+}
+
+// runTunnelSessions keeps the local listener bound across relay outages. Each
+// pass dials the relay, serves until the connection ends, then backs off and
+// retries; only ctx cancellation (Ctrl+C) or a relay-side tunnel close ends it.
+func runTunnelSessions(ctx context.Context, opts tunnelOptions, wsURL string, listener net.Listener, boundPort int) {
+	backoff := newReconnectBackoff()
+	announced := false
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		done, err := serveTunnelSession(ctx, opts, wsURL, listener, boundPort, &announced)
+		if done || ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			supportlog.Printf("tunnel session ended: %v", err)
+			fmt.Fprintln(os.Stderr, "tunnel connection lost:", err)
+		}
+		fmt.Println("reconnecting...")
+		if !sleepContext(ctx, backoff.Next()) {
+			return
+		}
 	}
 }
 
+// serveTunnelSession runs one relay connection. done=true means stop for good
+// (the relay closed the tunnel); otherwise the caller reconnects.
+func serveTunnelSession(ctx context.Context, opts tunnelOptions, wsURL string, listener net.Listener, boundPort int, announced *bool) (done bool, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			supportlog.Printf("tunnel session panic: %v", p)
+			err = fmt.Errorf("internal error: %v", p)
+		}
+	}()
+
+	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
+	conn, _, dialErr := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{}})
+	dialCancel()
+	if dialErr != nil {
+		return false, dialErr
+	}
+	// CloseNow, not Close: a graceful close waits for the peer's close frame, and
+	// a wedged relay would stall every reconnect for the handshake timeout.
+	defer conn.CloseNow()
+	conn.SetReadLimit(8 << 20)
+
+	ready, readyErr := awaitTunnelReady(ctx, conn)
+	if readyErr != nil {
+		return false, readyErr
+	}
+
+	httpHost := opts.httpHost
+	if httpHost == "" {
+		httpHost = defaultTunnelHTTPHost(ready.HostAddr, ready.HostPort)
+	}
+	fmt.Printf("tunnel ready -- forwarding 127.0.0.1:%d -> host %s:%d\n", boundPort, ready.HostAddr, ready.HostPort)
+	if !*announced {
+		if httpHost != "" {
+			fmt.Printf("HTTP Host headers will use %s\n", httpHost)
+		}
+		fmt.Printf("open http://127.0.0.1:%d/ in your browser\n", boundPort)
+		fmt.Println("press Ctrl+C to close the tunnel.")
+		*announced = true
+	}
+
+	client := newTunnelClient(conn, httpHost)
+	defer client.shutdown("session ended")
+
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	defer cancelSession()
+	go client.acceptLoop(sessionCtx, listener)
+
+	loopErr := client.readLoop(sessionCtx)
+	if errors.Is(loopErr, errTunnelClosedByRelay) {
+		return true, nil
+	}
+	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
+		return false, loopErr
+	}
+	return ctx.Err() != nil, nil
+}
+
+const (
+	defaultTunnelLocalPort = 47800
+	tunnelPortScanRange    = 20
+)
+
 type tunnelOptions struct {
-	token     string
-	localPort int
-	relay     string
-	httpHost  string
+	token        string
+	localPort    int
+	relay        string
+	httpHost     string
+	portExplicit bool
 }
 
 func parseTunnelArgs(args []string) (tunnelOptions, error) {
@@ -193,9 +256,34 @@ func parseTunnelArgs(args []string) (tunnelOptions, error) {
 	}
 	if opts.localPort == 0 {
 		// Default to a stable mid-range local port; the operator can override.
-		opts.localPort = 47800
+		opts.localPort = defaultTunnelLocalPort
+	} else {
+		opts.portExplicit = true
 	}
 	return opts, nil
+}
+
+// bindLocalListener binds the operator's local port. When the port was not asked
+// for explicitly, a busy port rolls forward instead of killing the process --
+// support calls should not fail because a previous tunnel is still closing.
+func bindLocalListener(port int, explicit bool) (net.Listener, error) {
+	attempts := 1
+	if !explicit {
+		attempts = tunnelPortScanRange
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		candidate := port + i
+		if candidate > 65535 {
+			break
+		}
+		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(candidate)))
+		if err == nil {
+			return listener, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func cleanHTTPHost(host string) (string, error) {
@@ -305,14 +393,23 @@ func newTunnelClient(conn *websocket.Conn, httpHost string) *tunnelClient {
 	return &tunnelClient{conn: conn, httpHost: httpHost, streams: map[string]net.Conn{}}
 }
 
+// errTunnelClosedByRelay means the relay ended the tunnel for good -- there is
+// nothing to reconnect to, unlike a dropped connection.
+var errTunnelClosedByRelay = errors.New("relay closed tunnel")
+
 func (t *tunnelClient) acceptLoop(ctx context.Context, listener net.Listener) {
+	defer func() {
+		if p := recover(); p != nil {
+			supportlog.Printf("tunnel-client accept loop panic: %v", p)
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		conn, err := listener.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
+			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
 			supportlog.Printf("tunnel-client accept error: %v", err)
@@ -324,7 +421,7 @@ func (t *tunnelClient) acceptLoop(ctx context.Context, listener net.Listener) {
 			t.dropStream(streamID, "stream open send failed")
 			continue
 		}
-		go t.copyToRelayAfterStreamOpen(ctx, streamID, conn)
+		go t.copyToRelay(ctx, streamID, conn)
 	}
 }
 
@@ -353,28 +450,20 @@ func (t *tunnelClient) readLoop(ctx context.Context) error {
 			t.dropStream(frame.StreamID, frame.Reason)
 		case "tunnel_closed":
 			fmt.Println("relay closed tunnel:", frame.Reason)
-			return io.EOF
+			return errTunnelClosedByRelay
 		case "error":
 			fmt.Fprintln(os.Stderr, "relay error:", frame.Message)
 		}
 	}
 }
 
-const tunnelStreamOpenSettleDelay = 250 * time.Millisecond
-
-func (t *tunnelClient) copyToRelayAfterStreamOpen(ctx context.Context, streamID string, conn net.Conn) {
-	timer := time.NewTimer(tunnelStreamOpenSettleDelay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		t.dropStream(streamID, "stream open settle cancelled")
-		return
-	case <-timer.C:
-	}
-	t.copyToRelay(ctx, streamID, conn)
-}
-
 func (t *tunnelClient) copyToRelay(ctx context.Context, streamID string, conn net.Conn) {
+	defer func() {
+		if p := recover(); p != nil {
+			supportlog.Printf("tunnel-client copy panic stream=%s: %v", streamID, p)
+			t.dropStream(streamID, "internal error")
+		}
+	}()
 	buf := make([]byte, 16*1024)
 	rewriteHTTPHost := t.httpHost != ""
 	var pending []byte

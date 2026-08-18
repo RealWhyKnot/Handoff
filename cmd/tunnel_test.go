@@ -2,8 +2,17 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 func TestParseTunnelArgsRequiresToken(t *testing.T) {
@@ -68,6 +77,71 @@ func TestParseTunnelArgsDefaultsLocalPort(t *testing.T) {
 	}
 	if opts.localPort != 47800 {
 		t.Fatalf("default localPort = %d, want 47800", opts.localPort)
+	}
+	if opts.portExplicit {
+		t.Fatal("default port must not be marked explicit")
+	}
+}
+
+func TestParseTunnelArgsMarksExplicitPort(t *testing.T) {
+	opts, err := parseTunnelArgs([]string{"tk", "--local-port", "1234"})
+	if err != nil {
+		t.Fatalf("parseTunnelArgs: %v", err)
+	}
+	if !opts.portExplicit {
+		t.Fatal("explicit --local-port was not recorded")
+	}
+}
+
+// A busy default port must roll forward instead of killing the process.
+func TestBindLocalListenerRollsForwardWhenPortBusy(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer busy.Close()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	listener, err := bindLocalListener(busyPort, false)
+	if err != nil {
+		t.Fatalf("bindLocalListener: %v", err)
+	}
+	defer listener.Close()
+	if got := listener.Addr().(*net.TCPAddr).Port; got == busyPort {
+		t.Fatalf("bound the busy port %d", got)
+	}
+}
+
+// An explicitly requested port must fail loudly rather than silently moving.
+func TestBindLocalListenerRespectsExplicitPort(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer busy.Close()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	if listener, err := bindLocalListener(busyPort, true); err == nil {
+		listener.Close()
+		t.Fatal("explicit busy port should not bind")
+	}
+}
+
+func TestBindLocalListenerBindsRequestedPortWhenFree(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	listener, err := bindLocalListener(port, true)
+	if err != nil {
+		t.Skipf("port %d not reusable in this environment: %v", port, err)
+	}
+	defer listener.Close()
+	if got := listener.Addr().(*net.TCPAddr).Port; got != port {
+		t.Fatalf("bound port %d, want %d", got, port)
 	}
 }
 
@@ -171,5 +245,116 @@ func TestRewriteHTTPHostHeaderPassesThroughNonHTTP(t *testing.T) {
 	}
 	if string(got) != string(input) {
 		t.Fatalf("non-HTTP data changed: %q", got)
+	}
+}
+
+// A relay that drops the connection must not end the operator's tunnel: the
+// listener stays bound and the client dials again.
+func TestTunnelSessionsReconnectAfterRelayDrop(t *testing.T) {
+	var dials atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		n := dials.Add(1)
+		ready, _ := json.Marshal(map[string]interface{}{
+			"kind": "tunnel_ready", "tunnel_id": "tn1", "host_addr": "127.0.0.1", "host_port": 80,
+		})
+		_ = conn.Write(r.Context(), websocket.MessageText, ready)
+		if n < 3 {
+			// Simulate an outage: hang up right after the handshake.
+			conn.Close(websocket.StatusInternalError, "drop")
+			return
+		}
+		<-r.Context().Done()
+		conn.Close(websocket.StatusNormalClosure, "bye")
+	}))
+	defer server.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/tunnel/tk"
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		runTunnelSessions(ctx, tunnelOptions{token: "tk"}, wsURL, listener,
+			listener.Addr().(*net.TCPAddr).Port)
+		close(done)
+	}()
+
+	deadline := time.After(10 * time.Second)
+	for dials.Load() < 3 {
+		select {
+		case <-deadline:
+			t.Fatalf("relay saw %d dials, want 3 (no reconnect)", dials.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// The listener must still be usable after those reconnects.
+	probe, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("listener stopped serving after reconnect: %v", err)
+	}
+	probe.Close()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runTunnelSessions did not stop on context cancel")
+	}
+}
+
+// A relay-side tunnel_closed is terminal -- no reconnect storm.
+func TestTunnelSessionsStopOnRelayTunnelClosed(t *testing.T) {
+	var dials atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		dials.Add(1)
+		ready, _ := json.Marshal(map[string]interface{}{
+			"kind": "tunnel_ready", "tunnel_id": "tn1", "host_addr": "127.0.0.1", "host_port": 80,
+		})
+		_ = conn.Write(r.Context(), websocket.MessageText, ready)
+		closed, _ := json.Marshal(map[string]interface{}{"kind": "tunnel_closed", "reason": "host ended session"})
+		_ = conn.Write(r.Context(), websocket.MessageText, closed)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/tunnel/tk"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		runTunnelSessions(ctx, tunnelOptions{token: "tk"}, wsURL, listener,
+			listener.Addr().(*net.TCPAddr).Port)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tunnel_closed did not end the session loop")
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want 1 (no reconnect after tunnel_closed)", got)
 	}
 }

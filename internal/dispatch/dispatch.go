@@ -55,7 +55,9 @@ type Outcome struct {
 
 // Dispatch resolves a command kind to its handler and runs it.
 // Unknown kinds produce an Outcome with OK=false; the loop continues.
-func (r *Router) Dispatch(ctx context.Context, kind string, args map[string]json.RawMessage) Outcome {
+// A panic in any handler is recovered into a failed Outcome so one bad
+// command can never take down the host session.
+func (r *Router) Dispatch(ctx context.Context, kind string, args map[string]json.RawMessage) (out Outcome) {
 	t0 := time.Now()
 	h, ok := r.handlers[kind]
 	if !ok {
@@ -65,8 +67,17 @@ func (r *Router) Dispatch(ctx context.Context, kind string, args map[string]json
 			ElapsedMs: time.Since(t0).Milliseconds(),
 		}
 	}
+	defer func() {
+		if p := recover(); p != nil {
+			out = Outcome{
+				OK:        false,
+				Error:     fmt.Sprintf("internal error handling %s: %v", kind, p),
+				ElapsedMs: time.Since(t0).Milliseconds(),
+			}
+		}
+	}()
 	res, err := h(ctx, args)
-	out := Outcome{
+	out = Outcome{
 		OK:        err == nil,
 		Result:    res,
 		ElapsedMs: time.Since(t0).Milliseconds(),

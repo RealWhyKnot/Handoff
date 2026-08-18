@@ -138,6 +138,11 @@ func New(args []string) {
 			}
 			continue
 		}
+		if capabilities.IsTunnelFrameKind(cmd.Kind) {
+			// Ordered, off the goroutine-per-command path, so stream bytes stay in wire order.
+			capabilities.EnqueueTunnelFrame(cmd.Kind, cmd.Extras)
+			continue
+		}
 		fmt.Printf("[cmd] %s  kind=%s\n", cmd.ID, cmd.Kind)
 		jobs.Start(cmd)
 	}
@@ -241,6 +246,9 @@ func (r *jobRunner) Start(cmd *relay.Command) {
 
 	go func() {
 		defer func() {
+			if p := recover(); p != nil {
+				supportlog.Printf("job panic sid=%s id=%s: %v", r.sid, cmd.ID, p)
+			}
 			r.mu.Lock()
 			delete(r.active, cmd.ID)
 			r.mu.Unlock()

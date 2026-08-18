@@ -68,16 +68,21 @@ func TestRiskConsentGateCachesDenial(t *testing.T) {
 	}
 }
 
-func TestRiskPromptTextWarnsAboutRemainderOfSession(t *testing.T) {
+func TestRiskPromptTextEnumeratesGrantedPowers(t *testing.T) {
 	text := riskPromptText(riskRequest{
 		Kind:    "ps.exec",
 		Summary: "Runs arbitrary code.",
 	})
+	// The single per-session prompt must spell out every power a Yes grants and
+	// name the LAN reach, so the host understands the scope of one decision.
 	for _, want := range []string{
-		"ps.exec",
 		"Runs arbitrary code.",
-		"remainder of this session",
-		"Only choose Yes if you trust that person",
+		"rest of this session",
+		"PowerShell",
+		"delete your files",
+		"local network",
+		"router",
+		"Only choose Yes if you trust this person",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("riskPromptText missing %q in %q", want, text)

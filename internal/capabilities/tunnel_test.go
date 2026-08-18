@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,24 +29,18 @@ type fakeTunnelBridge struct {
 	mu     sync.Mutex
 	data   []recordedTunnelData
 	closes []string
-	dataCh chan recordedTunnelData
 }
 
 func newFakeTunnelBridge() *fakeTunnelBridge {
-	return &fakeTunnelBridge{dataCh: make(chan recordedTunnelData, 16)}
+	return &fakeTunnelBridge{}
 }
 
 func (b *fakeTunnelBridge) SendTunnelData(_ context.Context, tunnelID, streamID string, data []byte) error {
 	cp := make([]byte, len(data))
 	copy(cp, data)
-	rec := recordedTunnelData{tunnelID: tunnelID, streamID: streamID, payload: cp}
 	b.mu.Lock()
-	b.data = append(b.data, rec)
+	b.data = append(b.data, recordedTunnelData{tunnelID: tunnelID, streamID: streamID, payload: cp})
 	b.mu.Unlock()
-	select {
-	case b.dataCh <- rec:
-	default:
-	}
 	return nil
 }
 
@@ -60,6 +56,50 @@ func (b *fakeTunnelBridge) SendTunnelClose(_ context.Context, tunnelID, reason s
 	b.closes = append(b.closes, tunnelID+":TUNNEL:"+reason)
 	b.mu.Unlock()
 	return nil
+}
+
+// streamBytes returns everything the host has sent back to the operator for one
+// stream so far, in order.
+func (b *fakeTunnelBridge) streamBytes(tunnelID, streamID string) []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []byte
+	for _, rec := range b.data {
+		if rec.tunnelID == tunnelID && rec.streamID == streamID {
+			out = append(out, rec.payload...)
+		}
+	}
+	return out
+}
+
+func (b *fakeTunnelBridge) closeReasons() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.closes...)
+}
+
+// waitEcho polls the returned bytes until wantLen have come back or the deadline.
+func waitEcho(t *testing.T, b *fakeTunnelBridge, tunnelID, streamID string, wantLen int) []byte {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := b.streamBytes(tunnelID, streamID)
+		if len(got) >= wantLen {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d bytes echoed back for %s/%s", len(got), wantLen, tunnelID, streamID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func openStreamOrdered(mgr *tunnelMgr, tunnelID, streamID string) {
+	mgr.enqueueFrame("tunnel.stream_open", tunnelID, streamID, "", "")
+}
+
+func writeOrdered(mgr *tunnelMgr, tunnelID, streamID string, payload []byte) {
+	mgr.enqueueFrame("tunnel.data", tunnelID, streamID, base64.StdEncoding.EncodeToString(payload), "")
 }
 
 func startEchoServer(t *testing.T) (int, func()) {
@@ -109,8 +149,24 @@ func startHTTPServer(t *testing.T) (int, func()) {
 	return port, server.Close
 }
 
+func waitStreamCount(t *testing.T, tun *tunnelState, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		tun.mu.Lock()
+		n := len(tun.streams)
+		tun.mu.Unlock()
+		if n == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stream count = %d, want %d", n, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestTunnelManagerOpensAndForwardsBytes(t *testing.T) {
-	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) { return true, nil })
 	port, stop := startEchoServer(t)
 	defer stop()
 
@@ -121,35 +177,20 @@ func TestTunnelManagerOpensAndForwardsBytes(t *testing.T) {
 	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := mgr.openStream(context.Background(), "tn1", "s1"); err != nil {
-		t.Fatalf("openStream: %v", err)
-	}
+	openStreamOrdered(mgr, "tn1", "s1")
 	payload := []byte("hello tunnel\n")
-	if err := mgr.writeData("tn1", "s1", payload); err != nil {
-		t.Fatalf("writeData: %v", err)
-	}
+	writeOrdered(mgr, "tn1", "s1", payload)
 
-	select {
-	case rec := <-bridge.dataCh:
-		if rec.tunnelID != "tn1" || rec.streamID != "s1" {
-			t.Fatalf("unexpected echo target tunnel=%s stream=%s", rec.tunnelID, rec.streamID)
-		}
-		if string(rec.payload) != string(payload) {
-			t.Fatalf("echo payload = %q, want %q", rec.payload, payload)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("did not receive echoed bytes back from tunnel within 2s")
-	}
-
-	if ok := mgr.closeStream("tn1", "s1", "test cleanup"); !ok {
-		t.Fatal("closeStream returned false")
-	}
-	if ok := mgr.closeTunnel("tn1", "test cleanup"); !ok {
-		t.Fatal("closeTunnel returned false")
+	got := waitEcho(t, bridge, "tn1", "s1", len(payload))
+	if string(got) != string(payload) {
+		t.Fatalf("echo = %q, want %q", got, payload)
 	}
 }
 
-func TestTunnelManagerWaitsForStreamBeforeWritingData(t *testing.T) {
+// TestTunnelManagerPreservesDataOrder is the core correctness guarantee: many
+// data frames on one stream must reach the socket in wire order. A single
+// ordered consumer makes this hold; the old goroutine-per-frame path did not.
+func TestTunnelManagerPreservesDataOrder(t *testing.T) {
 	port, stop := startEchoServer(t)
 	defer stop()
 
@@ -160,32 +201,23 @@ func TestTunnelManagerWaitsForStreamBeforeWritingData(t *testing.T) {
 	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	openStreamOrdered(mgr, "tn1", "s1")
 
-	payload := []byte("request raced stream open")
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- mgr.writeData("tn1", "s1", payload)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	if err := mgr.openStream(context.Background(), "tn1", "s1"); err != nil {
-		t.Fatalf("openStream: %v", err)
-	}
-	if err := <-writeDone; err != nil {
-		t.Fatalf("writeData: %v", err)
+	const frames = 200
+	var want bytes.Buffer
+	for i := 0; i < frames; i++ {
+		chunk := fmt.Sprintf("%06d", i)
+		want.WriteString(chunk)
+		writeOrdered(mgr, "tn1", "s1", []byte(chunk))
 	}
 
-	select {
-	case rec := <-bridge.dataCh:
-		if string(rec.payload) != string(payload) {
-			t.Fatalf("echo payload = %q, want %q", rec.payload, payload)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("did not receive echoed bytes back from tunnel within 2s")
+	got := waitEcho(t, bridge, "tn1", "s1", want.Len())
+	if !bytes.Equal(got[:want.Len()], want.Bytes()) {
+		t.Fatalf("frames arrived out of order")
 	}
 }
 
-func TestTunnelManagerHTTPGetCanRaceStreamOpen(t *testing.T) {
+func TestTunnelManagerForwardsHTTPResponse(t *testing.T) {
 	port, stop := startHTTPServer(t)
 	defer stop()
 
@@ -196,59 +228,19 @@ func TestTunnelManagerHTTPGetCanRaceStreamOpen(t *testing.T) {
 	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	openStreamOrdered(mgr, "tn1", "s1")
+	writeOrdered(mgr, "tn1", "s1", []byte("GET /login_sid.lua HTTP/1.1\r\nHost: fritz.repeater\r\nConnection: close\r\n\r\n"))
 
-	request := []byte("GET /login_sid.lua HTTP/1.1\r\nHost: fritz.repeater\r\nConnection: close\r\n\r\n")
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- mgr.writeData("tn1", "s1", request)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	if err := mgr.openStream(context.Background(), "tn1", "s1"); err != nil {
-		t.Fatalf("openStream: %v", err)
-	}
-	if err := <-writeDone; err != nil {
-		t.Fatalf("writeData: %v", err)
-	}
-
-	var response []byte
-	deadline := time.After(2 * time.Second)
-	for !bytes.Contains(response, []byte("fritz ok")) {
+	deadline := time.After(3 * time.Second)
+	for {
+		if bytes.Contains(bridge.streamBytes("tn1", "s1"), []byte("fritz ok")) {
+			return
+		}
 		select {
-		case rec := <-bridge.dataCh:
-			response = append(response, rec.payload...)
 		case <-deadline:
-			t.Fatalf("HTTP response did not arrive; got %q", response)
+			t.Fatalf("HTTP response did not arrive; got %q", bridge.streamBytes("tn1", "s1"))
+		case <-time.After(10 * time.Millisecond):
 		}
-	}
-}
-
-func TestTunnelManagerWriteDataStopsWaitingWhenTunnelCloses(t *testing.T) {
-	bridge := newFakeTunnelBridge()
-	mgr := newTunnelMgr(bridge)
-	defer mgr.shutdown()
-
-	if _, err := mgr.open("tn1", 5555, "127.0.0.1"); err != nil {
-		t.Fatalf("open: %v", err)
-	}
-
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- mgr.writeData("tn1", "missing", []byte("payload"))
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	if ok := mgr.closeTunnel("tn1", "test close"); !ok {
-		t.Fatal("closeTunnel returned false")
-	}
-
-	select {
-	case err := <-writeDone:
-		if err == nil {
-			t.Fatal("writeData unexpectedly succeeded")
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("writeData did not unblock after tunnel close")
 	}
 }
 
@@ -265,12 +257,14 @@ func TestTunnelManagerAcceptsPrivateTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open private target: %v", err)
 	}
-	if tun.localHost != "192.168.2.1" {
-		t.Fatalf("localHost = %q, want 192.168.2.1", tun.localHost)
+	if tun.localHost != "192.168.2.1" || tun.dialHost != "192.168.2.1" {
+		t.Fatalf("localHost=%q dialHost=%q, want 192.168.2.1 for both", tun.localHost, tun.dialHost)
 	}
 }
 
-func TestTunnelManagerKeepsPrivateHostname(t *testing.T) {
+// TestTunnelManagerPinsResolvedHostname: the hostname is kept for display but the
+// dial address is pinned to the IP validated at open time (closes the TOCTOU gap).
+func TestTunnelManagerPinsResolvedHostname(t *testing.T) {
 	oldLookup := tunnelLookupIP
 	tunnelLookupIP = func(_ context.Context, host string) ([]net.IPAddr, error) {
 		if host != "fritz.repeater" {
@@ -287,6 +281,9 @@ func TestTunnelManagerKeepsPrivateHostname(t *testing.T) {
 	}
 	if tun.localHost != "fritz.repeater" {
 		t.Fatalf("localHost = %q, want fritz.repeater", tun.localHost)
+	}
+	if tun.dialHost != "192.168.2.103" {
+		t.Fatalf("dialHost = %q, want pinned 192.168.2.103", tun.dialHost)
 	}
 }
 
@@ -313,20 +310,80 @@ func TestTunnelManagerRejectsBadPort(t *testing.T) {
 	}
 }
 
-func TestTunnelManagerDataRejectsOversized(t *testing.T) {
+func TestIsAllowedTunnelTargetIP(t *testing.T) {
+	allow := []string{"127.0.0.1", "::1", "192.168.1.1", "10.0.0.5", "172.16.0.1", "169.254.1.1", "100.64.0.1", "100.127.255.254"}
+	deny := []string{"8.8.8.8", "1.1.1.1", "100.128.0.1", "100.63.255.255", "0.0.0.0", "224.0.0.1"}
+	for _, s := range allow {
+		if !isAllowedTunnelTargetIP(net.ParseIP(s)) {
+			t.Errorf("isAllowedTunnelTargetIP(%s) = false, want true", s)
+		}
+	}
+	for _, s := range deny {
+		if isAllowedTunnelTargetIP(net.ParseIP(s)) {
+			t.Errorf("isAllowedTunnelTargetIP(%s) = true, want false", s)
+		}
+	}
+}
+
+func TestTunnelTargetDescription(t *testing.T) {
+	if d := tunnelTargetDescription("", 8080); !strings.Contains(d, "this computer") {
+		t.Fatalf("loopback description = %q, want to mention this computer", d)
+	}
+	if d := tunnelTargetDescription("127.0.0.1", 80); !strings.Contains(d, "this computer") {
+		t.Fatalf("loopback description = %q, want to mention this computer", d)
+	}
+	if d := tunnelTargetDescription("192.168.1.1", 80); !strings.Contains(d, "local network") {
+		t.Fatalf("LAN description = %q, want to mention local network", d)
+	}
+}
+
+func TestTunnelDataOversizeClosesStream(t *testing.T) {
 	port, stop := startEchoServer(t)
 	defer stop()
-	mgr := newTunnelMgr(newFakeTunnelBridge())
+	bridge := newFakeTunnelBridge()
+	mgr := newTunnelMgr(bridge)
 	defer mgr.shutdown()
 	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := mgr.openStream(context.Background(), "tn1", "s1"); err != nil {
-		t.Fatalf("openStream: %v", err)
-	}
+	openStreamOrdered(mgr, "tn1", "s1")
 	big := make([]byte, tunnelMaxFramePayload+1)
-	if err := mgr.writeData("tn1", "s1", big); err == nil {
-		t.Fatal("expected oversized payload to be rejected")
+	writeOrdered(mgr, "tn1", "s1", big)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		found := false
+		for _, c := range bridge.closeReasons() {
+			if strings.Contains(c, "frame too large") {
+				found = true
+			}
+		}
+		if found {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("oversize frame did not close the stream; closes=%v", bridge.closeReasons())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestTunnelBadBase64DoesNotKillStream(t *testing.T) {
+	port, stop := startEchoServer(t)
+	defer stop()
+	bridge := newFakeTunnelBridge()
+	mgr := newTunnelMgr(bridge)
+	defer mgr.shutdown()
+	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	openStreamOrdered(mgr, "tn1", "s1")
+	mgr.enqueueFrame("tunnel.data", "tn1", "s1", "$$$not base64!!!", "") // dropped, must not crash
+	writeOrdered(mgr, "tn1", "s1", []byte("still alive"))
+
+	got := waitEcho(t, bridge, "tn1", "s1", len("still alive"))
+	if string(got) != "still alive" {
+		t.Fatalf("echo = %q, want %q", got, "still alive")
 	}
 }
 
@@ -352,7 +409,10 @@ func TestTunnelOpenHandlerRequiresConsent(t *testing.T) {
 	}
 }
 
-func TestTunnelStreamOpenDataAndCloseRoundTrip(t *testing.T) {
+// TestTunnelEndToEndThroughGlobalManager exercises the production path: open via
+// the handler, then drive frames through EnqueueTunnelFrame (as the receive loop
+// does), then close.
+func TestTunnelEndToEndThroughGlobalManager(t *testing.T) {
 	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) { return true, nil })
 	port, stop := startEchoServer(t)
 	defer stop()
@@ -374,41 +434,23 @@ func TestTunnelStreamOpenDataAndCloseRoundTrip(t *testing.T) {
 	})); err != nil {
 		t.Fatalf("tunnelOpen: %v", err)
 	}
-	if _, err := tunnelStreamOpenHandler(context.Background(), rawArgs(t, map[string]interface{}{
-		"tunnel_id": "tn1",
-		"stream_id": "s1",
-	})); err != nil {
-		t.Fatalf("tunnelStreamOpen: %v", err)
-	}
-	payload := []byte("round trip bytes")
-	if _, err := tunnelDataHandler(context.Background(), rawArgs(t, map[string]interface{}{
-		"tunnel_id":   "tn1",
-		"stream_id":   "s1",
-		"data_base64": base64.StdEncoding.EncodeToString(payload),
-	})); err != nil {
-		t.Fatalf("tunnelData: %v", err)
-	}
-
-	select {
-	case rec := <-bridge.dataCh:
-		if string(rec.payload) != string(payload) {
-			t.Fatalf("payload = %q, want %q", rec.payload, payload)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("did not see echoed payload within 2s")
-	}
-
-	res, err := tunnelStreamCloseHandler(context.Background(), rawArgs(t, map[string]interface{}{
-		"tunnel_id": "tn1",
-		"stream_id": "s1",
+	EnqueueTunnelFrame("tunnel.stream_open", rawArgs(t, map[string]interface{}{
+		"tunnel_id": "tn1", "stream_id": "s1",
 	}))
-	if err != nil {
-		t.Fatalf("tunnelStreamClose: %v", err)
+	payload := []byte("round trip bytes")
+	EnqueueTunnelFrame("tunnel.data", rawArgs(t, map[string]interface{}{
+		"tunnel_id": "tn1", "stream_id": "s1", "data_base64": base64.StdEncoding.EncodeToString(payload),
+	}))
+
+	got := waitEcho(t, bridge, "tn1", "s1", len(payload))
+	if string(got) != string(payload) {
+		t.Fatalf("payload = %q, want %q", got, payload)
 	}
-	if got := res.(map[string]interface{})["closed"]; got != true {
-		t.Fatalf("stream close result = %v, want closed=true", res)
-	}
-	res, err = tunnelCloseHandler(context.Background(), rawArgs(t, map[string]interface{}{
+
+	EnqueueTunnelFrame("tunnel.stream_close", rawArgs(t, map[string]interface{}{
+		"tunnel_id": "tn1", "stream_id": "s1",
+	}))
+	res, err := tunnelCloseHandler(context.Background(), rawArgs(t, map[string]interface{}{
 		"tunnel_id": "tn1",
 	}))
 	if err != nil {
@@ -419,69 +461,20 @@ func TestTunnelStreamOpenDataAndCloseRoundTrip(t *testing.T) {
 	}
 }
 
-func TestTunnelDataDecodesBase64(t *testing.T) {
-	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) { return true, nil })
-	port, stop := startEchoServer(t)
-	defer stop()
-	bridge := newFakeTunnelBridge()
-	tunnelMu.Lock()
-	tunnelManager = newTunnelMgr(bridge)
-	tunnelMu.Unlock()
-	defer func() {
-		tunnelMu.Lock()
-		tunnelManager.shutdown()
-		tunnelManager = nil
-		tunnelMu.Unlock()
-	}()
-
-	if _, err := tunnelOpenHandler(context.Background(), rawArgs(t, map[string]interface{}{
-		"tunnel_id":  "tn1",
-		"local_port": port,
-	})); err != nil {
-		t.Fatalf("tunnelOpen: %v", err)
-	}
-	if _, err := tunnelStreamOpenHandler(context.Background(), rawArgs(t, map[string]interface{}{
-		"tunnel_id": "tn1",
-		"stream_id": "s1",
-	})); err != nil {
-		t.Fatalf("tunnelStreamOpen: %v", err)
-	}
-	if _, err := tunnelDataHandler(context.Background(), rawArgs(t, map[string]interface{}{
-		"tunnel_id":   "tn1",
-		"stream_id":   "s1",
-		"data_base64": "$$$not base64!!!",
-	})); err == nil {
-		t.Fatal("expected bad base64 to fail")
-	}
-}
-
-func TestIsLoopbackHostAcceptsLocalhostAndLoopback(t *testing.T) {
-	for _, h := range []string{"localhost", "127.0.0.1", "::1"} {
-		if !isLoopbackHost(h) {
-			t.Fatalf("isLoopbackHost(%q) = false, want true", h)
-		}
-	}
-	for _, h := range []string{"", "8.8.8.8", "192.168.1.1", "example.com"} {
-		if isLoopbackHost(h) {
-			t.Fatalf("isLoopbackHost(%q) = true, want false", h)
-		}
-	}
-}
-
 func TestTunnelManagerShutdownClosesActiveStreams(t *testing.T) {
 	port, stop := startEchoServer(t)
 	defer stop()
 	mgr := newTunnelMgr(newFakeTunnelBridge())
-	if _, err := mgr.open("tn1", port, "127.0.0.1"); err != nil {
+	tun, err := mgr.open("tn1", port, "127.0.0.1")
+	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := mgr.openStream(context.Background(), "tn1", "s1"); err != nil {
-		t.Fatalf("openStream: %v", err)
-	}
+	openStreamOrdered(mgr, "tn1", "s1")
+	waitStreamCount(t, tun, 1)
+
 	mgr.shutdown()
-	// After shutdown the stream entry must be gone -- closeStream returns false.
-	if ok := mgr.closeStream("tn1", "s1", "after-shutdown"); ok {
-		t.Fatal("closeStream succeeded after shutdown")
+	if _, ok := mgr.get("tn1"); ok {
+		t.Fatal("tunnel still present after shutdown")
 	}
 }
 
@@ -507,11 +500,5 @@ func TestTunnelManagerOpenWithExistingTunnelIDReturnsExisting(t *testing.T) {
 func TestTunnelMaxFramePayloadIsAtLeast64KB(t *testing.T) {
 	if tunnelMaxFramePayload < 64*1024 {
 		t.Fatalf("tunnelMaxFramePayload = %d, want at least 64KB", tunnelMaxFramePayload)
-	}
-}
-
-func TestTunnelPortStringFormatting(t *testing.T) {
-	if got := strconv.Itoa(65535); got != "65535" {
-		t.Fatalf("Itoa = %q", got)
 	}
 }

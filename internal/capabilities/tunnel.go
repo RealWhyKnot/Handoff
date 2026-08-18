@@ -52,12 +52,12 @@ type TunnelBridge interface {
 }
 
 const (
-	tunnelReadChunk       = 16 * 1024
-	tunnelMaxFramePayload = 1 * 1024 * 1024 // operator-side write cap per frame
-	tunnelDialTimeout     = 5 * time.Second
-	tunnelHostLookupTime  = 3 * time.Second
-	tunnelStreamOpenWait  = 2 * time.Second
-	tunnelStreamWaitTick  = 10 * time.Millisecond
+	tunnelReadChunk        = 16 * 1024
+	tunnelMaxFramePayload  = 1 * 1024 * 1024 // operator-side write cap per frame
+	tunnelDialTimeout      = 5 * time.Second
+	tunnelHostLookupTime   = 3 * time.Second
+	tunnelStreamQueueDepth = 1024             // buffered frames per stream before the receive loop backpressures
+	tunnelWriteDeadline    = 60 * time.Second // a wedged local peer can't block a stream forever
 )
 
 var (
@@ -80,10 +80,41 @@ func RegisterTunnel(r *dispatch.Router, bridge TunnelBridge) {
 	tunnelMu.Unlock()
 
 	r.Register("tunnel.open", tunnelOpenHandler)
-	r.Register("tunnel.stream_open", tunnelStreamOpenHandler)
-	r.Register("tunnel.data", tunnelDataHandler)
-	r.Register("tunnel.stream_close", tunnelStreamCloseHandler)
 	r.Register("tunnel.close", tunnelCloseHandler)
+}
+
+// tunnelFrameKinds are the per-stream data frames the host receive loop routes
+// to the ordered consumer instead of the goroutine-per-command dispatcher, so
+// bytes for one stream reach the socket in wire order.
+var tunnelFrameKinds = map[string]bool{
+	"tunnel.stream_open":  true,
+	"tunnel.data":         true,
+	"tunnel.stream_close": true,
+}
+
+// IsTunnelFrameKind reports whether a command kind is an ordered tunnel data
+// frame that must bypass the dispatcher.
+func IsTunnelFrameKind(kind string) bool { return tunnelFrameKinds[kind] }
+
+// EnqueueTunnelFrame hands a tunnel data frame to its stream's ordered queue.
+// Safe to call with any args; unknown tunnels/streams are dropped.
+func EnqueueTunnelFrame(kind string, args map[string]json.RawMessage) {
+	mgr := activeTunnelManager()
+	if mgr == nil {
+		return
+	}
+	mgr.enqueueFrame(kind, rawString(args, "tunnel_id"), rawString(args, "stream_id"),
+		rawString(args, "data_base64"), rawString(args, "reason"))
+}
+
+func rawString(args map[string]json.RawMessage, key string) string {
+	v, ok := args[key]
+	if !ok {
+		return ""
+	}
+	var s string
+	_ = json.Unmarshal(v, &s)
+	return s
 }
 
 // activeTunnelManager returns the currently registered manager. Used by tests.
@@ -103,19 +134,38 @@ type tunnelMgr struct {
 type tunnelState struct {
 	id        string
 	localPort int
-	localHost string
+	localHost string // display name (hostname or IP) for logs and the consent prompt
+	dialHost  string // pinned IP validated at open time; dialed instead of re-resolving
+
+	mgr    *tunnelMgr
+	done   chan struct{}
+	doneMu sync.Once
 
 	mu      sync.Mutex
 	streams map[string]*tunnelStream
+	queues  map[string]chan tunnelFrame
 	closed  bool
 }
 
 type tunnelStream struct {
-	id      string
-	conn    net.Conn
-	tun     *tunnelState
-	writeMu sync.Mutex
-	cancel  context.CancelFunc
+	id     string
+	conn   net.Conn
+	tun    *tunnelState
+	cancel context.CancelFunc
+}
+
+type frameKind int
+
+const (
+	frameStreamOpen frameKind = iota
+	frameData
+	frameStreamClose
+)
+
+type tunnelFrame struct {
+	kind    frameKind
+	payload []byte
+	reason  string
 }
 
 func newTunnelMgr(bridge TunnelBridge) *tunnelMgr {
@@ -149,7 +199,7 @@ func (m *tunnelMgr) open(tunnelID string, port int, host string) (*tunnelState, 
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	host, err := validateTunnelTargetHost(host)
+	displayHost, dialIP, err := validateTunnelTargetHost(host)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +207,7 @@ func (m *tunnelMgr) open(tunnelID string, port int, host string) (*tunnelState, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing, ok := m.tunnels[tunnelID]; ok {
-		if existing.localPort != port || existing.localHost != host {
+		if existing.localPort != port || existing.localHost != displayHost {
 			return nil, fmt.Errorf("tunnel.open: tunnel_id %s already open on a different port", tunnelID)
 		}
 		return existing, nil
@@ -165,11 +215,19 @@ func (m *tunnelMgr) open(tunnelID string, port int, host string) (*tunnelState, 
 	t := &tunnelState{
 		id:        tunnelID,
 		localPort: port,
-		localHost: host,
+		localHost: displayHost,
+		dialHost:  dialIP,
+		mgr:       m,
+		done:      make(chan struct{}),
 		streams:   map[string]*tunnelStream{},
+		queues:    map[string]chan tunnelFrame{},
 	}
 	m.tunnels[tunnelID] = t
 	return t, nil
+}
+
+func (t *tunnelState) dialTarget() string {
+	return net.JoinHostPort(t.dialHost, strconv.Itoa(t.localPort))
 }
 
 func (m *tunnelMgr) get(tunnelID string) (*tunnelState, bool) {
@@ -193,32 +251,132 @@ func (m *tunnelMgr) closeTunnel(tunnelID, reason string) bool {
 	return true
 }
 
-func (m *tunnelMgr) openStream(ctx context.Context, tunnelID, streamID string) error {
+// enqueueFrame routes a wire frame to the owning stream's ordered queue. It is
+// called from the host receive loop in wire order, so a single consumer goroutine
+// per stream preserves byte order without racing goroutines -- the correctness
+// guarantee HTTP traffic depends on.
+func (m *tunnelMgr) enqueueFrame(kind, tunnelID, streamID, dataB64, reason string) {
 	t, ok := m.get(tunnelID)
-	if !ok {
-		return fmt.Errorf("tunnel.stream_open: unknown tunnel_id %s", tunnelID)
+	if !ok || streamID == "" {
+		return
 	}
-	if streamID == "" {
-		return errors.New("tunnel.stream_open: stream_id is required")
+	switch kind {
+	case "tunnel.stream_open":
+		t.enqueue(streamID, tunnelFrame{kind: frameStreamOpen})
+	case "tunnel.data":
+		payload, err := base64.StdEncoding.DecodeString(dataB64)
+		if err != nil {
+			supportlog.Printf("tunnel data bad base64 tunnel=%s stream=%s: %v", tunnelID, streamID, err)
+			return
+		}
+		if len(payload) > tunnelMaxFramePayload {
+			supportlog.Printf("tunnel data oversize tunnel=%s stream=%s bytes=%d", tunnelID, streamID, len(payload))
+			_ = m.bridge.SendTunnelStreamClose(context.Background(), tunnelID, streamID, "frame too large")
+			t.enqueue(streamID, tunnelFrame{kind: frameStreamClose, reason: "frame too large"})
+			return
+		}
+		t.enqueue(streamID, tunnelFrame{kind: frameData, payload: payload})
+	case "tunnel.stream_close":
+		if reason == "" {
+			reason = "operator close"
+		}
+		t.enqueue(streamID, tunnelFrame{kind: frameStreamClose, reason: reason})
 	}
+}
 
+func (t *tunnelState) enqueue(streamID string, f tunnelFrame) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
-		return fmt.Errorf("tunnel.stream_open: tunnel %s is closed", tunnelID)
+		return
+	}
+	ch, ok := t.queues[streamID]
+	if !ok {
+		ch = make(chan tunnelFrame, tunnelStreamQueueDepth)
+		t.queues[streamID] = ch
+		go t.consume(streamID, ch)
+	}
+	t.mu.Unlock()
+	select {
+	case ch <- f:
+	case <-t.done:
+	}
+}
+
+// consume drains one stream's frames in order: dial on stream_open, write data in
+// arrival order, tear down on stream_close or tunnel close.
+func (t *tunnelState) consume(streamID string, ch chan tunnelFrame) {
+	defer func() {
+		if r := recover(); r != nil {
+			supportlog.Printf("tunnel consumer panic tunnel=%s stream=%s: %v", t.id, streamID, r)
+		}
+		t.removeQueue(streamID)
+	}()
+	var s *tunnelStream
+	for {
+		select {
+		case <-t.done:
+			if s != nil {
+				s.close("tunnel closed")
+			}
+			return
+		case f := <-ch:
+			switch f.kind {
+			case frameStreamOpen:
+				if s != nil {
+					continue
+				}
+				st, err := t.mgr.dialStream(t, streamID)
+				if err != nil {
+					supportlog.Printf("tunnel dial failed tunnel=%s stream=%s: %v", t.id, streamID, err)
+					_ = t.mgr.bridge.SendTunnelStreamClose(context.Background(), t.id, streamID, "dial error: "+err.Error())
+					continue
+				}
+				s = st
+			case frameData:
+				if s == nil {
+					continue
+				}
+				if err := s.write(f.payload); err != nil {
+					supportlog.Printf("tunnel write failed tunnel=%s stream=%s: %v", t.id, streamID, err)
+					_ = t.mgr.bridge.SendTunnelStreamClose(context.Background(), t.id, streamID, "write error: "+err.Error())
+					s.close("write error")
+					s = nil
+				}
+			case frameStreamClose:
+				if s != nil {
+					s.close(f.reason)
+				}
+				return
+			}
+		}
+	}
+}
+
+func (t *tunnelState) removeQueue(streamID string) {
+	t.mu.Lock()
+	delete(t.queues, streamID)
+	t.mu.Unlock()
+}
+
+func (m *tunnelMgr) dialStream(t *tunnelState, streamID string) (*tunnelStream, error) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("tunnel %s is closed", t.id)
 	}
 	if _, exists := t.streams[streamID]; exists {
 		t.mu.Unlock()
-		return fmt.Errorf("tunnel.stream_open: stream_id %s already open", streamID)
+		return nil, fmt.Errorf("stream_id %s already open", streamID)
 	}
+	target := t.dialTarget()
 	t.mu.Unlock()
 
-	dialCtx, cancel := context.WithTimeout(ctx, tunnelDialTimeout)
+	dialCtx, cancel := context.WithTimeout(context.Background(), tunnelDialTimeout)
 	defer cancel()
-	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(t.localHost, strconv.Itoa(t.localPort)))
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", target)
 	if err != nil {
-		return fmt.Errorf("tunnel.stream_open: dial %s:%d: %w", t.localHost, t.localPort, err)
+		return nil, fmt.Errorf("dial %s: %w", target, err)
 	}
 
 	pumpCtx, pumpCancel := context.WithCancel(context.Background())
@@ -229,73 +387,28 @@ func (m *tunnelMgr) openStream(ctx context.Context, tunnelID, streamID string) e
 		t.mu.Unlock()
 		pumpCancel()
 		_ = conn.Close()
-		return fmt.Errorf("tunnel.stream_open: tunnel %s closed during dial", tunnelID)
+		return nil, fmt.Errorf("tunnel %s closed during dial", t.id)
 	}
 	t.streams[streamID] = stream
 	t.mu.Unlock()
 
 	go m.readPump(pumpCtx, t.id, stream)
-	supportlog.Printf("tunnel stream open tunnel=%s stream=%s local=%s:%d", t.id, streamID, t.localHost, t.localPort)
-	return nil
+	supportlog.Printf("tunnel stream open tunnel=%s stream=%s local=%s", t.id, streamID, target)
+	return stream, nil
 }
 
-func (m *tunnelMgr) writeData(tunnelID, streamID string, payload []byte) error {
-	t, ok := m.get(tunnelID)
-	if !ok {
-		return fmt.Errorf("tunnel.data: unknown tunnel_id %s", tunnelID)
-	}
-	s, ok := t.waitForStream(streamID, tunnelStreamOpenWait)
-	if !ok {
-		return fmt.Errorf("tunnel.data: unknown stream_id %s", streamID)
-	}
-	if len(payload) > tunnelMaxFramePayload {
-		return fmt.Errorf("tunnel.data: payload %d bytes exceeds cap %d", len(payload), tunnelMaxFramePayload)
-	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if _, err := s.conn.Write(payload); err != nil {
-		s.close("write error: " + err.Error())
-		return fmt.Errorf("tunnel.data: write: %w", err)
-	}
-	return nil
-}
-
-func (t *tunnelState) waitForStream(streamID string, timeout time.Duration) (*tunnelStream, bool) {
-	deadline := time.Now().Add(timeout)
-	for {
-		t.mu.Lock()
-		s, ok := t.streams[streamID]
-		closed := t.closed
-		t.mu.Unlock()
-		if ok {
-			return s, true
-		}
-		if closed || time.Now().After(deadline) {
-			return nil, false
-		}
-		time.Sleep(tunnelStreamWaitTick)
-	}
-}
-
-func (m *tunnelMgr) closeStream(tunnelID, streamID, reason string) bool {
-	t, ok := m.get(tunnelID)
-	if !ok {
-		return false
-	}
-	t.mu.Lock()
-	s, ok := t.streams[streamID]
-	if ok {
-		delete(t.streams, streamID)
-	}
-	t.mu.Unlock()
-	if !ok {
-		return false
-	}
-	s.close(reason)
-	return true
+func (s *tunnelStream) write(payload []byte) error {
+	_ = s.conn.SetWriteDeadline(time.Now().Add(tunnelWriteDeadline))
+	_, err := s.conn.Write(payload)
+	return err
 }
 
 func (m *tunnelMgr) readPump(ctx context.Context, tunnelID string, s *tunnelStream) {
+	defer func() {
+		if r := recover(); r != nil {
+			supportlog.Printf("tunnel readpump panic tunnel=%s stream=%s: %v", tunnelID, s.id, r)
+		}
+	}()
 	buf := make([]byte, tunnelReadChunk)
 	defer func() {
 		s.tun.mu.Lock()
@@ -347,48 +460,52 @@ func (t *tunnelState) closeAll(reason string) {
 	}
 	t.streams = map[string]*tunnelStream{}
 	t.mu.Unlock()
+	t.doneMu.Do(func() { close(t.done) })
 	for _, s := range streams {
 		s.close(reason)
 	}
 	supportlog.Printf("tunnel close tunnel=%s reason=%s", t.id, reason)
 }
 
-func validateTunnelTargetHost(host string) (string, error) {
+// validateTunnelTargetHost returns the display host (hostname or IP for logs and
+// the consent prompt) and the pinned IP to dial. Pinning closes the TOCTOU gap:
+// the address is validated once here and dialed as-is, never re-resolved.
+func validateTunnelTargetHost(host string) (display, dialIP string, err error) {
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return "127.0.0.1", nil
+		return "127.0.0.1", "127.0.0.1", nil
 	}
 	if strings.Contains(host, "://") || strings.ContainsAny(host, "/\\?#@") {
-		return "", fmt.Errorf("tunnel.open: host must be a hostname or IP address (got %q)", host)
+		return "", "", fmt.Errorf("tunnel.open: host must be a hostname or IP address (got %q)", host)
 	}
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return "", fmt.Errorf("tunnel.open: host must not include a port (got %q)", host)
+	if _, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+		return "", "", fmt.Errorf("tunnel.open: host must not include a port (got %q)", host)
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if !isAllowedTunnelTargetIP(ip) {
-			return "", fmt.Errorf("tunnel.open: host %q is not a local network address", host)
+			return "", "", fmt.Errorf("tunnel.open: host %q is not a local network address", host)
 		}
-		return host, nil
+		return host, host, nil
 	}
 	if !isReasonableTunnelHostname(host) {
-		return "", fmt.Errorf("tunnel.open: invalid host %q", host)
+		return "", "", fmt.Errorf("tunnel.open: invalid host %q", host)
 	}
 
 	lookupCtx, cancel := context.WithTimeout(context.Background(), tunnelHostLookupTime)
 	defer cancel()
-	addrs, err := tunnelLookupIP(lookupCtx, host)
-	if err != nil {
-		return "", fmt.Errorf("tunnel.open: resolve host %q: %w", host, err)
+	addrs, lookupErr := tunnelLookupIP(lookupCtx, host)
+	if lookupErr != nil {
+		return "", "", fmt.Errorf("tunnel.open: resolve host %q: %w", host, lookupErr)
 	}
 	if len(addrs) == 0 {
-		return "", fmt.Errorf("tunnel.open: resolve host %q: no addresses", host)
+		return "", "", fmt.Errorf("tunnel.open: resolve host %q: no addresses", host)
 	}
 	for _, addr := range addrs {
 		if !isAllowedTunnelTargetIP(addr.IP) {
-			return "", fmt.Errorf("tunnel.open: host %q resolves outside the local network (%s)", host, addr.IP.String())
+			return "", "", fmt.Errorf("tunnel.open: host %q resolves outside the local network (%s)", host, addr.IP.String())
 		}
 	}
-	return host, nil
+	return host, addrs[0].IP.String(), nil
 }
 
 func isReasonableTunnelHostname(host string) bool {
@@ -410,15 +527,14 @@ func isAllowedTunnelTargetIP(ip net.IP) bool {
 	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
 		return false
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	// 100.64.0.0/10 CGNAT -- some ISP-managed router pages live here.
+	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1]&0xc0 == 64 {
+		return true
+	}
+	return false
 }
 
 // ---- handlers ----
@@ -442,8 +558,8 @@ func tunnelOpenHandler(ctx context.Context, args map[string]json.RawMessage) (in
 		return nil, errors.New("tunnel.open: tunnel manager not registered")
 	}
 
-	summary := fmt.Sprintf("Opens a tunnel from the operator to %s:%d on this computer. The operator will be able to reach that local service for as long as the tunnel stays open.",
-		hostOrDefault(hostArg), port)
+	summary := fmt.Sprintf("Opens a network tunnel so the helper can reach %s. It stays open until you end the session or the helper closes it.",
+		tunnelTargetDescription(hostArg, port))
 	if err := requireRiskConsent(ctx, "tunnel.open", summary); err != nil {
 		return nil, err
 	}
@@ -457,70 +573,6 @@ func tunnelOpenHandler(ctx context.Context, args map[string]json.RawMessage) (in
 		"local_port": t.localPort,
 		"local_host": t.localHost,
 	}, nil
-}
-
-func tunnelStreamOpenHandler(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
-	var tunnelID, streamID string
-	if v, ok := args["tunnel_id"]; ok {
-		_ = json.Unmarshal(v, &tunnelID)
-	}
-	if v, ok := args["stream_id"]; ok {
-		_ = json.Unmarshal(v, &streamID)
-	}
-	mgr := activeTunnelManager()
-	if mgr == nil {
-		return nil, errors.New("tunnel.stream_open: tunnel manager not registered")
-	}
-	if err := mgr.openStream(ctx, tunnelID, streamID); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"opened": true}, nil
-}
-
-func tunnelDataHandler(_ context.Context, args map[string]json.RawMessage) (interface{}, error) {
-	var tunnelID, streamID, dataB64 string
-	if v, ok := args["tunnel_id"]; ok {
-		_ = json.Unmarshal(v, &tunnelID)
-	}
-	if v, ok := args["stream_id"]; ok {
-		_ = json.Unmarshal(v, &streamID)
-	}
-	if v, ok := args["data_base64"]; ok {
-		_ = json.Unmarshal(v, &dataB64)
-	}
-	mgr := activeTunnelManager()
-	if mgr == nil {
-		return nil, errors.New("tunnel.data: tunnel manager not registered")
-	}
-	payload, err := base64.StdEncoding.DecodeString(dataB64)
-	if err != nil {
-		return nil, fmt.Errorf("tunnel.data: data_base64: %w", err)
-	}
-	if err := mgr.writeData(tunnelID, streamID, payload); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"bytes": len(payload)}, nil
-}
-
-func tunnelStreamCloseHandler(_ context.Context, args map[string]json.RawMessage) (interface{}, error) {
-	var tunnelID, streamID, reason string
-	if v, ok := args["tunnel_id"]; ok {
-		_ = json.Unmarshal(v, &tunnelID)
-	}
-	if v, ok := args["stream_id"]; ok {
-		_ = json.Unmarshal(v, &streamID)
-	}
-	if v, ok := args["reason"]; ok {
-		_ = json.Unmarshal(v, &reason)
-	}
-	mgr := activeTunnelManager()
-	if mgr == nil {
-		return map[string]interface{}{"closed": false}, nil
-	}
-	if reason == "" {
-		reason = "operator close"
-	}
-	return map[string]interface{}{"closed": mgr.closeStream(tunnelID, streamID, reason)}, nil
 }
 
 func tunnelCloseHandler(_ context.Context, args map[string]json.RawMessage) (interface{}, error) {
@@ -541,10 +593,18 @@ func tunnelCloseHandler(_ context.Context, args map[string]json.RawMessage) (int
 	return map[string]interface{}{"closed": mgr.closeTunnel(tunnelID, reason)}, nil
 }
 
-func hostOrDefault(host string) string {
-	host = strings.TrimSpace(host)
+// tunnelTargetDescription is the plain-language phrase shown in the consent
+// prompt, honest about whether the target is on this PC or elsewhere on the LAN.
+func tunnelTargetDescription(hostArg string, port int) string {
+	host := strings.TrimSpace(hostArg)
 	if host == "" {
-		return "127.0.0.1"
+		host = "127.0.0.1"
 	}
-	return host
+	if strings.EqualFold(host, "localhost") {
+		return fmt.Sprintf("a service running on this computer (%s:%d)", host, port)
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return fmt.Sprintf("a service running on this computer (%s:%d)", host, port)
+	}
+	return fmt.Sprintf("a device on this computer's local network -- %s:%d (for example a router or printer)", host, port)
 }

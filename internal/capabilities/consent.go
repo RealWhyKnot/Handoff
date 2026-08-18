@@ -103,12 +103,15 @@ func riskPromptText(req riskRequest) string {
 		summary = "Run a command that can change this computer."
 	}
 	return fmt.Sprintf(
-		"Handoff is asking to allow risky commands for this session.\n\n"+
-			"Requested command: %s\n\n"+
-			"%s\n\n"+
-			"If you choose Yes, Handoff will allow risky commands from the person using the view URL for the remainder of this session without asking again. Only choose Yes if you trust that person.\n\n"+
-			"Choose No to block risky commands for this session.",
-		req.Kind,
+		"Your helper is asking for permission to do more on this computer.\n\n"+
+			"What they asked for now:\n%s\n\n"+
+			"Choosing Yes lets the person with your view link, for the rest of this session, without asking again:\n"+
+			"  - run PowerShell commands\n"+
+			"  - read, add, change, and delete your files\n"+
+			"  - list and stop programs and Windows services\n"+
+			"  - read the Windows registry\n"+
+			"  - open network connections to this PC and to devices on your local network (for example your router)\n\n"+
+			"Only choose Yes if you trust this person and asked them for help. Choose No to keep these blocked.",
 		summary,
 	)
 }
