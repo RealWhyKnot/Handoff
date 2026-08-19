@@ -16,6 +16,7 @@ import (
 	"github.com/RealWhyKnot/Handoff/internal/capabilities"
 	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 	"github.com/RealWhyKnot/Handoff/internal/relay"
+	"github.com/RealWhyKnot/Handoff/internal/stayawake"
 	"github.com/RealWhyKnot/Handoff/internal/supportlog"
 	"github.com/RealWhyKnot/Handoff/internal/visibility"
 )
@@ -75,6 +76,7 @@ func New(args []string) {
 
 	// Lifecycle hook for foreground-window policy. Currently a no-op.
 	visibility.StartWatcher(ctx)
+	stayawake.Start(ctx)
 
 	// Open the bridge WS.
 	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
