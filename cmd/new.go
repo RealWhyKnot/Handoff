@@ -102,50 +102,60 @@ func New(args []string) {
 		os.Exit(1)
 	}
 	supportlog.Printf("hello sent sid=%s hostname=%s", sid, hostname)
+	bridge.StartHeartbeat(ctx)
 
 	jobs := newJobRunner(ctx, sid, router, bridge, log)
 	defer jobs.CancelAll()
 
 	// Main loop: receive commands and hand them to cancellable workers.
 	backoff := newReconnectBackoff()
-	for {
-		cmd, err := bridge.Recv(ctx)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-				supportlog.Printf("recv ended sid=%s err=%v", sid, err)
-				return
-			}
-			supportlog.Printf("recv ended sid=%s err=%v; reconnecting", sid, err)
-			fmt.Fprintln(os.Stderr, "connection lost; reconnecting...")
-			if !reconnectBridge(ctx, sid, bridge, backoff) {
-				return
-			}
-			continue
-		}
-		backoff.Reset()
-		supportlog.Printf("command received sid=%s id=%s kind=%s", sid, cmd.ID, cmd.Kind)
-		if cmd.Kind == "control.cancel" {
-			targetID := readStringExtra(cmd.Extras, "target_id")
-			if targetID == "" {
-				supportlog.Printf("cancel control missing target sid=%s id=%s", sid, cmd.ID)
-				continue
-			}
-			if jobs.Cancel(targetID) {
-				fmt.Printf("[cancel] %s\n", targetID)
-				supportlog.Printf("command cancel requested sid=%s id=%s", sid, targetID)
-			} else {
-				supportlog.Printf("cancel target not active sid=%s id=%s", sid, targetID)
-			}
-			continue
-		}
-		if capabilities.IsTunnelFrameKind(cmd.Kind) {
-			// Ordered, off the goroutine-per-command path, so stream bytes stay in wire order.
-			capabilities.EnqueueTunnelFrame(cmd.Kind, cmd.Extras)
-			continue
-		}
-		fmt.Printf("[cmd] %s  kind=%s\n", cmd.ID, cmd.Kind)
-		jobs.Start(cmd)
+	for recvIteration(ctx, sid, bridge, backoff, jobs) {
 	}
+}
+
+// recvIteration runs one Recv+dispatch step; a panic must not kill the
+// process, so it is logged and the loop continues.
+func recvIteration(ctx context.Context, sid string, bridge *relay.Bridge, backoff *reconnectBackoff, jobs *jobRunner) (keepGoing bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			supportlog.Printf("recv loop panic sid=%s: %v", sid, r)
+			keepGoing = true
+		}
+	}()
+	cmd, err := bridge.Recv(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			supportlog.Printf("recv ended sid=%s err=%v", sid, err)
+			return false
+		}
+		supportlog.Printf("recv ended sid=%s err=%v; reconnecting", sid, err)
+		fmt.Fprintln(os.Stderr, "connection lost; reconnecting...")
+		return reconnectBridge(ctx, sid, bridge, backoff)
+	}
+	backoff.Reset()
+	supportlog.Printf("command received sid=%s id=%s kind=%s", sid, cmd.ID, cmd.Kind)
+	if cmd.Kind == "control.cancel" {
+		targetID := readStringExtra(cmd.Extras, "target_id")
+		if targetID == "" {
+			supportlog.Printf("cancel control missing target sid=%s id=%s", sid, cmd.ID)
+			return true
+		}
+		if jobs.Cancel(targetID) {
+			fmt.Printf("[cancel] %s\n", targetID)
+			supportlog.Printf("command cancel requested sid=%s id=%s", sid, targetID)
+		} else {
+			supportlog.Printf("cancel target not active sid=%s id=%s", sid, targetID)
+		}
+		return true
+	}
+	if capabilities.IsTunnelFrameKind(cmd.Kind) {
+		// Ordered, off the goroutine-per-command path, so stream bytes stay in wire order.
+		capabilities.EnqueueTunnelFrame(cmd.Kind, cmd.Extras)
+		return true
+	}
+	fmt.Printf("[cmd] %s  kind=%s\n", cmd.ID, cmd.Kind)
+	jobs.Start(cmd)
+	return true
 }
 
 type reconnectBackoff struct {

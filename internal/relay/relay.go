@@ -96,17 +96,29 @@ func Mint(ctx context.Context, baseURL string) (*MintResponse, error) {
 	return &m, nil
 }
 
+// Vars, not consts, so tests can shrink them.
+var (
+	pingInterval = 15 * time.Second
+	pingTimeout  = 30 * time.Second
+)
+
+var errBridgeStale = errors.New("bridge stale: ping timeout")
+
 // Bridge is the long-lived WebSocket between this host and the relay.
 type Bridge struct {
 	baseURL    string
 	writeToken string
 
-	connMu sync.RWMutex
-	conn   *websocket.Conn
+	connMu        sync.RWMutex
+	conn          *websocket.Conn
+	keepaliveStop chan struct{}
 
 	writeMu sync.Mutex
 	helloMu sync.Mutex
 	hello   *helloPayload
+
+	staleMu   sync.Mutex
+	staleConn *websocket.Conn
 }
 
 type helloPayload struct {
@@ -122,7 +134,9 @@ func Dial(ctx context.Context, baseURL, writeToken string) (*Bridge, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bridge{baseURL: baseURL, writeToken: writeToken, conn: conn}, nil
+	b := &Bridge{baseURL: baseURL, writeToken: writeToken, conn: conn}
+	b.startKeepalive(conn)
+	return b, nil
 }
 
 func dialConn(ctx context.Context, baseURL, writeToken string) (*websocket.Conn, error) {
@@ -231,10 +245,15 @@ func (b *Bridge) Recv(ctx context.Context) (*Command, error) {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
 			}
-			// Treat normal closes as EOF.
+			b.staleMu.Lock()
+			stale := b.staleConn == conn
+			b.staleMu.Unlock()
+			if stale {
+				return nil, errBridgeStale
+			}
 			var ce websocket.CloseError
 			if errors.As(err, &ce) {
-				return nil, io.EOF
+				return nil, fmt.Errorf("ws closed: code=%d (%v) reason=%q: %w", int(ce.Code), ce.Code, ce.Reason, io.EOF)
 			}
 			return nil, err
 		}
@@ -260,11 +279,18 @@ func (b *Bridge) Reconnect(ctx context.Context) error {
 
 	b.connMu.Lock()
 	old := b.conn
+	oldStop := b.keepaliveStop
 	b.conn = conn
+	b.keepaliveStop = nil
 	b.connMu.Unlock()
+	// Stop before Close so the old keepalive's ping error exits silently.
+	if oldStop != nil {
+		close(oldStop)
+	}
 	if old != nil {
 		_ = old.Close(websocket.StatusNormalClosure, "reconnect")
 	}
+	b.startKeepalive(conn)
 
 	b.helloMu.Lock()
 	hello := b.hello
@@ -279,12 +305,77 @@ func (b *Bridge) Reconnect(ctx context.Context) error {
 func (b *Bridge) Close() error {
 	b.connMu.Lock()
 	conn := b.conn
+	stop := b.keepaliveStop
 	b.conn = nil
+	b.keepaliveStop = nil
 	b.connMu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
 	if conn == nil {
 		return nil
 	}
 	return conn.Close(websocket.StatusNormalClosure, "bye")
+}
+
+// startKeepalive watches one conn; a swap or Close retires the watcher.
+func (b *Bridge) startKeepalive(conn *websocket.Conn) {
+	stop := make(chan struct{})
+	b.connMu.Lock()
+	b.keepaliveStop = stop
+	b.connMu.Unlock()
+	go b.keepalive(conn, stop)
+}
+
+func (b *Bridge) keepalive(conn *websocket.Conn, stop chan struct{}) {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+		pingCtx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+		err := conn.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			continue
+		}
+		// Only a timeout means an unresponsive peer; any other ping error
+		// means someone else closed the conn and owns the error.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		b.staleMu.Lock()
+		b.staleConn = conn
+		b.staleMu.Unlock()
+		// Unblocks the Recv stuck on a half-open socket.
+		_ = conn.CloseNow()
+		return
+	}
+}
+
+// StartHeartbeat sends a data frame every 30s; some edges ignore WS
+// control frames. Send failures are the keepalive's problem, not ours.
+func (b *Bridge) StartHeartbeat(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = b.send(ctx, "ping", nil)
+			}
+		}
+	}()
 }
 
 func (b *Bridge) send(ctx context.Context, kind string, payload interface{}) error {

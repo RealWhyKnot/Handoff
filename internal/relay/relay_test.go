@@ -4,6 +4,8 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -286,6 +288,121 @@ func TestSendTunnelStreamCloseAndCloseFrames(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("frame %d timed out", i)
 		}
+	}
+}
+
+func setKeepaliveTiming(t *testing.T, interval, timeout time.Duration) {
+	t.Helper()
+	oldInterval, oldTimeout := pingInterval, pingTimeout
+	pingInterval, pingTimeout = interval, timeout
+	t.Cleanup(func() { pingInterval, pingTimeout = oldInterval, oldTimeout })
+}
+
+// Accepts the WS then never Reads, so pings are never answered -- the
+// client-visible shape of a half-open TCP.
+func newSilentServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestKeepaliveDetectsHalfOpenConn(t *testing.T) {
+	setKeepaliveTiming(t, 50*time.Millisecond, 200*time.Millisecond)
+	server := newSilentServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	bridge, err := Dial(ctx, server.URL, "write-token")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer bridge.Close()
+
+	if _, err := bridge.Recv(ctx); !errors.Is(err, errBridgeStale) {
+		t.Fatalf("Recv err = %v, want errBridgeStale", err)
+	}
+}
+
+func TestReconnectStopsOldKeepalive(t *testing.T) {
+	setKeepaliveTiming(t, 50*time.Millisecond, 200*time.Millisecond)
+	silent := newSilentServer(t)
+	// Reads (so pings are answered) and sends one command after ~8 ping
+	// cycles; a conn wrongly marked stale can never deliver it.
+	pongs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		go func() {
+			time.Sleep(400 * time.Millisecond)
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"id":"c1","kind":"noop"}`))
+		}()
+		for {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	defer pongs.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bridge, err := Dial(ctx, silent.URL, "write-token")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer bridge.Close()
+	if _, err := bridge.Recv(ctx); !errors.Is(err, errBridgeStale) {
+		t.Fatalf("first Recv err = %v, want errBridgeStale", err)
+	}
+
+	bridge.baseURL = pongs.URL
+	if err := bridge.Reconnect(ctx); err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+
+	cmd, err := bridge.Recv(ctx)
+	if err != nil {
+		t.Fatalf("second Recv err = %v, want command", err)
+	}
+	if cmd.ID != "c1" || cmd.Kind != "noop" {
+		t.Fatalf("second Recv command = %#v", cmd)
+	}
+}
+
+func TestRecvPreservesCloseCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusGoingAway, "cf timeout")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	bridge := &Bridge{conn: conn}
+
+	_, err = bridge.Recv(ctx)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("Recv err = %v, want io.EOF via errors.Is", err)
+	}
+	if !strings.Contains(err.Error(), "1001") || !strings.Contains(err.Error(), "cf timeout") {
+		t.Fatalf("Recv err = %q, want close code 1001 and reason", err)
 	}
 }
 
