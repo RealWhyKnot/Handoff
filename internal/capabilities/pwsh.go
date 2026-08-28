@@ -13,21 +13,54 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 )
 
-// runPwsh executes a PowerShell script and returns stdout + stderr.
-// Non-zero exits propagate as errors with stderr attached.
-func runPwsh(ctx context.Context, script string) ([]byte, error) {
+// pwshResult carries everything a caller needs to report a shell-out honestly:
+// both streams and the numeric exit code, rather than one string with stderr
+// concatenated into it.
+type pwshResult struct {
+	Stdout   []byte
+	Stderr   []byte
+	ExitCode int
+}
+
+// runPwshFull executes a PowerShell script and reports both streams plus the
+// exit code. A non-zero exit is returned as a *dispatch.Failure so the command
+// envelope's ok flag stays truthful.
+func runPwshFull(ctx context.Context, script string) (pwshResult, error) {
 	cmd := exec.CommandContext(ctx, "powershell.exe",
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
 		"-Command", script)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.Bytes(), fmt.Errorf("powershell: %v: %s", err, strings.TrimSpace(stderr.String()))
+
+	err := cmd.Run()
+	res := pwshResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: cmd.ProcessState.ExitCode()}
+	if err == nil {
+		return res, nil
 	}
-	return stdout.Bytes(), nil
+
+	msg := strings.TrimSpace(string(res.Stderr))
+	if msg == "" {
+		msg = err.Error()
+	}
+	code := res.ExitCode
+	return res, &dispatch.Failure{
+		Message:  fmt.Sprintf("powershell exited %d: %s", code, msg),
+		ExitCode: &code,
+		Stdout:   string(res.Stdout),
+		Stderr:   string(res.Stderr),
+	}
+}
+
+// runPwsh executes a PowerShell script and returns stdout.
+// Non-zero exits propagate as errors with stderr attached.
+func runPwsh(ctx context.Context, script string) ([]byte, error) {
+	res, err := runPwshFull(ctx, script)
+	return res.Stdout, err
 }
 
 // runPwshJSON runs the script, expects JSON on stdout, and returns the
@@ -40,7 +73,9 @@ func runPwshJSON(ctx context.Context, script string) (interface{}, error) {
 	}
 	out = bytes.TrimSpace(out)
 	if len(out) == 0 {
-		return nil, nil
+		// An empty result set and a cmdlet that printed nothing are the same
+		// thing to the caller; both are "no rows", never a null.
+		return []interface{}{}, nil
 	}
 	var v interface{}
 	if err := json.Unmarshal(out, &v); err != nil {

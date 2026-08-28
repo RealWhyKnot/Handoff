@@ -12,7 +12,14 @@ import (
 
 // RegisterStorage wires read-only local storage inventory handlers.
 func RegisterStorage(r *dispatch.Router) {
-	r.Register("storage.volumes", storageVolumes)
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "storage.volumes",
+		Label:       "Volumes",
+		Description: "List drives and their free space.",
+		Params: []dispatch.Param{
+			{Name: "drive_letter", Type: dispatch.ParamString, Description: "Limit to one drive, for example C."},
+		},
+	}, storageVolumes)
 }
 
 func storageDriveLetterArg(args map[string]json.RawMessage) (string, error) {

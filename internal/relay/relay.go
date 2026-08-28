@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 	"github.com/coder/websocket"
 )
 
@@ -125,6 +126,7 @@ type helloPayload struct {
 	hostname     string
 	version      string
 	capabilities []string
+	specs        []dispatch.Spec
 }
 
 // Dial opens the WebSocket to the relay's /ws endpoint with the write
@@ -158,13 +160,14 @@ func dialConn(ctx context.Context, baseURL, writeToken string) (*websocket.Conn,
 
 // SendHello announces this host's identity and command surface so the
 // operator's viewer can match the command palette to this host.
-func (b *Bridge) SendHello(ctx context.Context, hostname, version string, capabilities []string) error {
+func (b *Bridge) SendHello(ctx context.Context, hostname, version string, capabilities []string, specs []dispatch.Spec) error {
 	caps := append([]string(nil), capabilities...)
 	sort.Strings(caps)
 	hello := &helloPayload{
 		hostname:     hostname,
 		version:      version,
 		capabilities: append([]string(nil), caps...),
+		specs:        append([]dispatch.Spec(nil), specs...),
 	}
 	b.helloMu.Lock()
 	b.hello = hello
@@ -176,12 +179,19 @@ func (b *Bridge) sendHello(ctx context.Context, hello *helloPayload) error {
 	if hello == nil {
 		return nil
 	}
+	// capabilities stays a plain string array forever: a relay that predates
+	// command_specs filters this list by element type, and anything else here
+	// would leave it with zero usable kinds. New schema data goes alongside,
+	// where an older relay drops it cleanly.
 	payload := map[string]interface{}{
 		"hostname":         hello.hostname,
 		"version":          hello.version,
 		"os":               "windows",
-		"protocol_version": 1,
+		"protocol_version": 2,
 		"capabilities":     hello.capabilities,
+	}
+	if len(hello.specs) > 0 {
+		payload["command_specs"] = hello.specs
 	}
 	return b.send(ctx, "hello", payload)
 }
@@ -189,13 +199,22 @@ func (b *Bridge) sendHello(ctx context.Context, hello *helloPayload) error {
 // SendCommandResult posts the outcome of a dispatched command back to
 // the relay. Payload includes the command id so the operator's viewer
 // can pair it with the queued event.
-func (b *Bridge) SendCommandResult(ctx context.Context, id string, ok bool, result interface{}, errMsg string, elapsedMs int64) error {
+func (b *Bridge) SendCommandResult(ctx context.Context, id string, out dispatch.Outcome) error {
 	payload := map[string]interface{}{
 		"id":         id,
-		"ok":         ok,
-		"result":     result,
-		"error":      errMsg,
-		"elapsed_ms": elapsedMs,
+		"ok":         out.OK,
+		"result":     out.Result,
+		"error":      out.Error,
+		"elapsed_ms": out.ElapsedMs,
+	}
+	if out.Detail != nil {
+		payload["detail"] = out.Detail
+	}
+	if len(out.Clamped) > 0 {
+		payload["clamped"] = out.Clamped
+	}
+	if len(out.Ignored) > 0 {
+		payload["ignored"] = out.Ignored
 	}
 	return b.send(ctx, "command_result", payload)
 }

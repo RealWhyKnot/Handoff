@@ -88,10 +88,10 @@ func TestPowerUserBoundedArgs(t *testing.T) {
 	if got := resourceTopArg(rawArgs(t, map[string]interface{}{"top": 0})); got != 10 {
 		t.Fatalf("resourceTopArg zero = %d, want default", got)
 	}
-	if got := startupMaxResultsArg(rawArgs(t, map[string]interface{}{"max_results": 5000})); got != 2000 {
+	if got := startupMaxResultsArg(rawArgs(t, map[string]interface{}{"limit": 5000})); got != 2000 {
 		t.Fatalf("startupMaxResultsArg = %d, want 2000", got)
 	}
-	if got := startupMaxResultsArg(rawArgs(t, map[string]interface{}{"max_results": -1})); got != 300 {
+	if got := startupMaxResultsArg(rawArgs(t, map[string]interface{}{"limit": -1})); got != 300 {
 		t.Fatalf("startupMaxResultsArg negative = %d, want default", got)
 	}
 

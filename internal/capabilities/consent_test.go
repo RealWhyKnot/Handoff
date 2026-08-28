@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 )
 
 func TestRiskConsentGatePromptsOnceForConcurrentRequests(t *testing.T) {
@@ -192,12 +194,52 @@ func TestPsExecUsesSessionConsentInsteadOfEnvironmentGate(t *testing.T) {
 	if !ok {
 		t.Fatalf("ps.exec result = %#v, want map", res)
 	}
-	if out["ok"] != true {
-		t.Fatalf("ps.exec ok = %#v, want true", out["ok"])
+	if out["exit_code"] != 0 {
+		t.Fatalf("ps.exec exit_code = %#v, want 0", out["exit_code"])
 	}
 	stdout, _ := out["stdout"].(string)
 	if !strings.Contains(stdout, "ok") {
 		t.Fatalf("ps.exec stdout = %q, want ok", stdout)
+	}
+}
+
+func TestPsExecFailureIsAnErrorNotASuccessPayload(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("ps.exec shells out to powershell.exe")
+	}
+	t.Setenv("HANDOFF_ALLOW_PSEXEC", "")
+	psMu.Lock()
+	psHistory = nil
+	psMu.Unlock()
+
+	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) {
+		return true, nil
+	})
+
+	res, err := psExec()(context.Background(), rawArgs(t, map[string]interface{}{
+		"script": "exit 3",
+	}))
+	if err == nil {
+		t.Fatal("a non-zero exit must surface as an error, not a success payload")
+	}
+	if res != nil {
+		t.Fatalf("failed ps.exec should not return a result payload: %#v", res)
+	}
+
+	var fail *dispatch.Failure
+	if !errors.As(err, &fail) {
+		t.Fatalf("error = %#v, want *dispatch.Failure", err)
+	}
+	if fail.ExitCode == nil || *fail.ExitCode != 3 {
+		t.Fatalf("exit code = %#v, want 3", fail.ExitCode)
+	}
+
+	out := dispatch.New()
+	out.RegisterSpec(dispatch.Spec{Kind: "x"}, func(context.Context, map[string]json.RawMessage) (interface{}, error) {
+		return nil, err
+	})
+	if o := out.Dispatch(context.Background(), "x", nil); o.OK {
+		t.Fatal("the command envelope must report ok=false for a failed script")
 	}
 }
 

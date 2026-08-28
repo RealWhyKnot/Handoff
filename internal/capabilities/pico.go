@@ -17,13 +17,83 @@ import (
 // system-installed picotool; v0.2 will embed it via go:embed so the
 // host doesn't need to install anything beyond handoff.exe.
 func RegisterPico(r *dispatch.Router) {
-	r.Register("pico.list", picoList)
-	r.Register("pico.info", picoInfo)
-	r.Register("pico.bootsel", picoBootsel)
-	r.Register("pico.flash", picoFlash)
-	r.Register("pico.verify", picoVerify)
-	r.Register("pico.save", picoSave)
-	r.Register("pico.reset", picoReset)
+	serial := dispatch.Param{
+		Name:        "serial",
+		Type:        dispatch.ParamString,
+		Description: "Target a specific board when more than one is attached.",
+	}
+	cpu := dispatch.Param{
+		Name:        "cpu",
+		Type:        dispatch.ParamEnum,
+		Enum:        []string{"arm", "riscv"},
+		Description: "RP2350 architecture.",
+	}
+	partition := dispatch.Param{
+		Name:        "partition",
+		Type:        dispatch.ParamString,
+		Description: "RP2350 partition to target.",
+	}
+	family := dispatch.Param{
+		Name: "family",
+		Type: dispatch.ParamEnum,
+		Enum: []string{"rp2040", "rp2350-arm-s", "rp2350-arm-ns", "rp2350-riscv", "absolute", "data"},
+	}
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind: "pico.list", Label: "List Pico devices",
+		Description: "List attached Raspberry Pi Pico boards.",
+	}, picoList)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind: "pico.info", Label: "Pico info",
+		Description: "Read details from an attached Pico.",
+		Params:      []dispatch.Param{serial},
+	}, picoInfo)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind: "pico.bootsel", Label: "Reboot to BOOTSEL",
+		Description: "Reboot an attached Pico into BOOTSEL mode.",
+		Risky:       true,
+		Params:      []dispatch.Param{serial, cpu, partition},
+	}, picoBootsel)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind: "pico.flash", Label: "Flash UF2",
+		Description: "Write a UF2 image to an attached Pico.",
+		Risky:       true,
+		Params: []dispatch.Param{
+			{Name: "uf2_path", Type: dispatch.ParamString, Required: true, Description: "Path to the UF2 file on the host."},
+			family,
+			serial,
+		},
+	}, picoFlash)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind: "pico.verify", Label: "Verify flash",
+		Description: "Compare a file against the flash contents.",
+		Params: []dispatch.Param{
+			{Name: "file_path", Type: dispatch.ParamString, Required: true},
+			family,
+			serial,
+		},
+	}, picoVerify)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind: "pico.save", Label: "Save flash",
+		Description: "Save Pico flash to a host file.",
+		Risky:       true,
+		Params: []dispatch.Param{
+			{Name: "out_path", Type: dispatch.ParamString, Required: true},
+			serial,
+		},
+	}, picoSave)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind: "pico.reset", Label: "Reset Pico",
+		Description: "Reboot an attached Pico normally.",
+		Risky:       true,
+		Params:      []dispatch.Param{serial, cpu, partition},
+	}, picoReset)
 }
 
 func picotoolPath() (string, error) {

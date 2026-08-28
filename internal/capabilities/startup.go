@@ -11,12 +11,17 @@ import (
 
 // RegisterStartup wires read-only startup-entry inventory handlers.
 func RegisterStartup(r *dispatch.Router) {
-	r.Register("startup.list", startupList)
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "startup.list",
+		Label:       "Startup items",
+		Description: "List programs configured to run at sign-in.",
+		Params:      []dispatch.Param{limitParam(300, 1, 2000)},
+	}, startupList)
 }
 
 func startupMaxResultsArg(args map[string]json.RawMessage) int {
 	maxResults := 300
-	if v, ok := args["max_results"]; ok {
+	if v, ok := args["limit"]; ok {
 		_ = json.Unmarshal(v, &maxResults)
 	}
 	if maxResults <= 0 {

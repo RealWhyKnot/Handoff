@@ -13,11 +13,39 @@ import (
 
 // RegisterProc wires proc.* and svc.* handlers.
 func RegisterProc(r *dispatch.Router) {
-	r.Register("proc.list", procList)
-	r.Register("proc.kill", procKill)
-	r.Register("proc.find", procFind)
-	r.Register("svc.list", svcList)
-	r.Register("svc.control", svcControl)
+	r.RegisterSpec(plainSpec("proc.list", "Processes", "List running processes."), procList)
+	r.RegisterSpec(plainSpec("svc.list", "Services", "List Windows services."), svcList)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "proc.kill",
+		Label:       "Stop process",
+		Description: "Terminate a process by id.",
+		Risky:       true,
+		Params: []dispatch.Param{
+			{Name: "pid", Type: dispatch.ParamInt, Required: true, Min: dispatch.IntPtr(1), Description: "Process id to terminate."},
+		},
+	}, procKill)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "proc.find",
+		Label:       "Find process",
+		Description: "Find processes whose name or path matches a query.",
+		Params: []dispatch.Param{
+			{Name: "query", Type: dispatch.ParamString, Required: true, MaxBytes: 128},
+			limitParam(100, 1, 500),
+		},
+	}, procFind)
+
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "svc.control",
+		Label:       "Control service",
+		Description: "Start, stop, or restart a Windows service.",
+		Risky:       true,
+		Params: []dispatch.Param{
+			{Name: "name", Type: dispatch.ParamString, Required: true},
+			{Name: "action", Type: dispatch.ParamEnum, Required: true, Enum: []string{"start", "stop", "restart"}},
+		},
+	}, svcControl)
 }
 
 func procList(ctx context.Context, _ map[string]json.RawMessage) (interface{}, error) {
@@ -80,7 +108,7 @@ func procFind(ctx context.Context, args map[string]json.RawMessage) (interface{}
 	if len(query) > 128 {
 		return nil, fmt.Errorf("proc.find: 'query' is too long")
 	}
-	if v, ok := args["max_results"]; ok {
+	if v, ok := args["limit"]; ok {
 		_ = json.Unmarshal(v, &maxResults)
 	}
 	if maxResults <= 0 {

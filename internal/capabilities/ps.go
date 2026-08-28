@@ -18,7 +18,21 @@ import (
 // Executions are rate-limited to 10 per rolling minute per session to slow
 // runaway loops.
 func RegisterPs(r *dispatch.Router) {
-	r.Register("ps.exec", psExec())
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "ps.exec",
+		Label:       "Run script",
+		Description: "Run arbitrary PowerShell on the host.",
+		Risky:       true,
+		Params: []dispatch.Param{
+			{
+				Name:        "script",
+				Type:        dispatch.ParamString,
+				Required:    true,
+				MaxBytes:    psScriptCap,
+				Description: "PowerShell 5.1 script to run as the current user.",
+			},
+		},
+	}, psExec())
 }
 
 var (
@@ -66,17 +80,14 @@ func psExec() dispatch.Handler {
 		psMu.Unlock()
 
 		// Run as a single -Command invocation; capture stdout and stderr.
-		out, err := runPwsh(ctx, script)
+		res, err := runPwshFull(ctx, script)
 		if err != nil {
-			return map[string]interface{}{
-				"ok":     false,
-				"stdout": string(out),
-				"error":  err.Error(),
-			}, nil
+			return nil, err
 		}
 		return map[string]interface{}{
-			"ok":     true,
-			"stdout": string(out),
+			"exit_code": res.ExitCode,
+			"stdout":    string(res.Stdout),
+			"stderr":    string(res.Stderr),
 		}, nil
 	}
 }

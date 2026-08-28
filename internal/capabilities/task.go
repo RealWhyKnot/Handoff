@@ -17,7 +17,21 @@ import (
 // unknown. The default is "all". Up to max_results rows are returned with
 // trigger summaries for context.
 func RegisterTask(r *dispatch.Router) {
-	r.Register("task.list", taskList)
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "task.list",
+		Label:       "Scheduled tasks",
+		Description: "List Windows scheduled tasks.",
+		Params: []dispatch.Param{
+			{Name: "path_prefix", Type: dispatch.ParamString, Description: "Match tasks whose path starts with this."},
+			{
+				Name:    "state",
+				Type:    dispatch.ParamEnum,
+				Enum:    []string{"all", "ready", "running", "disabled", "queued", "unknown"},
+				Default: "all",
+			},
+			limitParam(300, 1, 2000),
+		},
+	}, taskList)
 }
 
 func taskList(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
@@ -32,7 +46,7 @@ func taskList(ctx context.Context, args map[string]json.RawMessage) (interface{}
 	if v, ok := args["state"]; ok {
 		_ = json.Unmarshal(v, &state)
 	}
-	if v, ok := args["max_results"]; ok {
+	if v, ok := args["limit"]; ok {
 		_ = json.Unmarshal(v, &maxResults)
 	}
 

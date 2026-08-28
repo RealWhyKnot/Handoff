@@ -98,7 +98,7 @@ func New(args []string) {
 	fmt.Printf("ready -- %d capabilities registered\n\n", len(router.Kinds()))
 
 	hostname, _ := os.Hostname()
-	if err := bridge.SendHello(ctx, hostname, Version, router.Kinds()); err != nil {
+	if err := bridge.SendHello(ctx, hostname, Version, router.Kinds(), router.Specs()); err != nil {
 		supportlog.Printf("hello failed sid=%s: %v", sid, err)
 		fmt.Fprintln(os.Stderr, "hello failed:", err)
 		os.Exit(1)
@@ -281,7 +281,7 @@ func (r *jobRunner) Start(cmd *relay.Command) {
 		}
 
 		r.writeAudit(cmd, out)
-		if err := r.bridge.SendCommandResult(r.rootCtx, cmd.ID, out.OK, out.Result, out.Error, out.ElapsedMs); err != nil {
+		if err := r.bridge.SendCommandResult(r.rootCtx, cmd.ID, out); err != nil {
 			supportlog.Printf("send result failed sid=%s id=%s: %v", r.sid, cmd.ID, err)
 			fmt.Fprintln(os.Stderr, "could not send result:", err)
 			return

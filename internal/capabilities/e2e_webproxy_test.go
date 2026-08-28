@@ -54,7 +54,7 @@ func TestE2EWebProxyServesLocalSite(t *testing.T) {
 	// The stub above is installed before RegisterAll resets the gate, so put it back.
 	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) { return true, nil })
 
-	if err := bridge.SendHello(ctx, "e2e-host", "v2026.5.22.3", router.Kinds()); err != nil {
+	if err := bridge.SendHello(ctx, "e2e-host", "v2026.5.22.3", router.Kinds(), router.Specs()); err != nil {
 		t.Fatalf("hello: %v", err)
 	}
 
@@ -128,7 +128,7 @@ func TestE2EOperatorCLIForwardsLocalSite(t *testing.T) {
 	router := dispatch.New()
 	RegisterAll(router, bridge)
 	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) { return true, nil })
-	if err := bridge.SendHello(ctx, "e2e-host", "v2026.5.22.3", router.Kinds()); err != nil {
+	if err := bridge.SendHello(ctx, "e2e-host", "v2026.5.22.3", router.Kinds(), router.Specs()); err != nil {
 		t.Fatalf("hello: %v", err)
 	}
 	go runHostLoop(ctx, bridge, router)
@@ -245,7 +245,7 @@ func runHostLoop(ctx context.Context, bridge *relay.Bridge, router *dispatch.Rou
 		}
 		go func(c *relay.Command) {
 			out := router.Dispatch(ctx, c.Kind, c.Extras)
-			_ = bridge.SendCommandResult(ctx, c.ID, out.OK, out.Result, out.Error, out.ElapsedMs)
+			_ = bridge.SendCommandResult(ctx, c.ID, out)
 		}(cmd)
 	}
 }

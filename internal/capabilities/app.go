@@ -17,7 +17,15 @@ import (
 // listing; max_results caps the response so large fleets don't ship
 // thousands of rows.
 func RegisterApp(r *dispatch.Router) {
-	r.Register("app.list", appList)
+	r.RegisterSpec(dispatch.Spec{
+		Kind:        "app.list",
+		Label:       "Installed apps",
+		Description: "List installed applications.",
+		Params: []dispatch.Param{
+			{Name: "name_prefix", Type: dispatch.ParamString, Description: "Match applications whose name starts with this."},
+			limitParam(300, 1, 5000),
+		},
+	}, appList)
 }
 
 func appList(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
@@ -26,7 +34,7 @@ func appList(ctx context.Context, args map[string]json.RawMessage) (interface{},
 	if v, ok := args["name_prefix"]; ok {
 		_ = json.Unmarshal(v, &prefix)
 	}
-	if v, ok := args["max_results"]; ok {
+	if v, ok := args["limit"]; ok {
 		_ = json.Unmarshal(v, &maxResults)
 	}
 	prefix = strings.TrimSpace(prefix)
