@@ -11,83 +11,35 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
+	"github.com/RealWhyKnot/Handoff/internal/consent"
 	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 )
 
-func TestRiskConsentGatePromptsOnceForConcurrentRequests(t *testing.T) {
-	var calls atomic.Int32
-	gate := newRiskConsentGate(func(context.Context, riskRequest) (bool, error) {
-		calls.Add(1)
-		time.Sleep(25 * time.Millisecond)
-		return true, nil
-	})
-
-	var wg sync.WaitGroup
-	errs := make(chan error, 8)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs <- gate.Require(context.Background(), riskRequest{
-				Kind:    "ps.exec",
-				Summary: "test",
-			})
-		}()
-	}
-	wg.Wait()
-	close(errs)
-
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("Require returned error: %v", err)
-		}
-	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("prompt calls = %d, want 1", got)
-	}
-}
-
-func TestRiskConsentGateCachesDenial(t *testing.T) {
-	var calls atomic.Int32
-	gate := newRiskConsentGate(func(context.Context, riskRequest) (bool, error) {
-		calls.Add(1)
-		return false, nil
-	})
-
-	for i := 0; i < 2; i++ {
-		err := gate.Require(context.Background(), riskRequest{Kind: "fs.delete"})
-		if !errors.Is(err, errRiskDenied) {
-			t.Fatalf("Require error = %v, want errRiskDenied", err)
-		}
-	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("prompt calls = %d, want 1", got)
-	}
-}
-
-func TestRiskPromptTextEnumeratesGrantedPowers(t *testing.T) {
+func TestRiskPromptTextNamesOnlyTheCategoryBeingAskedFor(t *testing.T) {
 	text := riskPromptText(riskRequest{
-		Kind:    "ps.exec",
-		Summary: "Runs arbitrary code.",
+		Kind:     "ps.exec",
+		Category: consent.Exec,
+		Summary:  "Runs arbitrary code.",
 	})
-	// The single per-session prompt must spell out every power a Yes grants and
-	// name the LAN reach, so the host understands the scope of one decision.
 	for _, want := range []string{
 		"Runs arbitrary code.",
-		"rest of this session",
-		"PowerShell",
-		"delete your files",
-		"local network",
-		"router",
+		"run PowerShell commands",
 		"Only choose Yes if you trust this person",
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("riskPromptText missing %q in %q", want, text)
+			t.Fatalf("prompt missing %q in %q", want, text)
+		}
+	}
+
+	// Approving one category must not read as approving the rest. The old
+	// prompt listed every power on every request, so a host approving a device
+	// reboot was really handing over file deletion too.
+	for _, unwanted := range []string{"delete your files", "Windows services", "local network"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("an exec prompt should not mention %q: %q", unwanted, text)
 		}
 	}
 }
@@ -591,15 +543,8 @@ func TestAppListRejectsOverLongPrefix(t *testing.T) {
 
 func withSessionRiskPrompt(t *testing.T, prompt riskPrompt) {
 	t.Helper()
-	sessionRiskMu.Lock()
-	old := sessionRiskConsent
-	sessionRiskConsent = newRiskConsentGate(prompt)
-	sessionRiskMu.Unlock()
-	t.Cleanup(func() {
-		sessionRiskMu.Lock()
-		sessionRiskConsent = old
-		sessionRiskMu.Unlock()
-	})
+	old := setSessionLedger(consent.NewLedger(prompt))
+	t.Cleanup(func() { setSessionLedger(old) })
 }
 
 func rawArgs(t *testing.T, in map[string]interface{}) map[string]json.RawMessage {
@@ -613,4 +558,41 @@ func rawArgs(t *testing.T, in map[string]interface{}) map[string]json.RawMessage
 		out[k] = b
 	}
 	return out
+}
+
+func TestConsentIsRequestedBeforeProbingTheFilesystem(t *testing.T) {
+	// A denied operator must not learn whether a path exists. Both handlers
+	// used to stat the target first and report the result before asking.
+	missing := filepath.Join(t.TempDir(), "does-not-exist.txt")
+	var order []string
+	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) {
+		order = append(order, "prompt")
+		return false, nil
+	})
+
+	if _, err := fsDelete(context.Background(), rawArgs(t, map[string]interface{}{"path": missing})); !errors.Is(err, errRiskDenied) {
+		t.Fatalf("fsDelete err = %v, want the consent refusal, not a stat error", err)
+	}
+	if len(order) != 1 {
+		t.Fatalf("fsDelete did not prompt before touching the path: %v", order)
+	}
+
+	// A fresh ledger: both kinds share the "files" category, so reusing the
+	// first one would hand back its cached denial without prompting again.
+	order = nil
+	withSessionRiskPrompt(t, func(context.Context, riskRequest) (bool, error) {
+		order = append(order, "prompt")
+		return false, nil
+	})
+
+	_, err := fsUpload(context.Background(), rawArgs(t, map[string]interface{}{
+		"path":        missing,
+		"data_base64": "aGk=",
+	}))
+	if !errors.Is(err, errRiskDenied) {
+		t.Fatalf("fsUpload err = %v, want the consent refusal", err)
+	}
+	if len(order) != 1 {
+		t.Fatalf("fsUpload did not prompt before touching the path: %v", order)
+	}
 }

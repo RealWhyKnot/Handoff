@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //go:build windows
 
-package capabilities
+package consent
 
 import (
 	"context"
@@ -23,16 +23,16 @@ var (
 	messageBoxProc = user32.NewProc("MessageBoxW")
 )
 
-func promptRiskConsent(ctx context.Context, req riskRequest) (bool, error) {
+func SystemPrompt(ctx context.Context, req Request) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 
-	title, err := syscall.UTF16PtrFromString("Allow risky Handoff commands?")
+	title, err := syscall.UTF16PtrFromString("Allow this Handoff request?")
 	if err != nil {
 		return false, err
 	}
-	text, err := syscall.UTF16PtrFromString(riskPromptText(req))
+	text, err := syscall.UTF16PtrFromString(PromptText(req))
 	if err != nil {
 		return false, err
 	}
@@ -44,7 +44,7 @@ func promptRiskConsent(ctx context.Context, req riskRequest) (bool, error) {
 		uintptr(messageBoxYesNo|messageBoxIconWarning|messageBoxSetForeground|messageBoxTopMost),
 	)
 	if ret == 0 {
-		return false, fmt.Errorf("risk consent prompt failed: %w", callErr)
+		return false, fmt.Errorf("consent prompt failed: %w", callErr)
 	}
 	return ret == messageBoxResultYes, nil
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //go:build !windows
 
-package capabilities
+package consent
 
 import (
 	"bufio"
@@ -11,12 +11,12 @@ import (
 	"strings"
 )
 
-func promptRiskConsent(ctx context.Context, req riskRequest) (bool, error) {
+func SystemPrompt(ctx context.Context, req Request) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	fmt.Fprintln(os.Stderr, riskPromptText(req))
-	fmt.Fprint(os.Stderr, "Allow risky commands for this session? [y/N]: ")
+	fmt.Fprintln(os.Stderr, PromptText(req))
+	fmt.Fprint(os.Stderr, "Allow? [y/N]: ")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil {
 		return false, err

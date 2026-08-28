@@ -3,115 +3,74 @@ package capabilities
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"strings"
 	"sync"
+
+	"github.com/RealWhyKnot/Handoff/internal/consent"
 )
 
-type riskRequest struct {
-	Kind    string
-	Summary string
-}
+type riskRequest = consent.Request
 
-type riskPrompt func(context.Context, riskRequest) (bool, error)
+type riskPrompt = consent.Prompt
 
-type riskConsentGate struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	prompt  riskPrompt
-	asking  bool
-	decided bool
-	allowed bool
-}
+var errRiskDenied = consent.ErrDenied
+
+func riskPromptText(req riskRequest) string { return consent.PromptText(req) }
 
 var (
-	errRiskDenied = errors.New("host denied risky commands for this session")
-
-	sessionRiskMu      sync.Mutex
-	sessionRiskConsent = newRiskConsentGate(promptRiskConsent)
+	sessionConsentMu     sync.Mutex
+	sessionConsentLedger = consent.NewLedger(consent.SystemPrompt)
+	lastDecisionMu       sync.Mutex
+	lastDecision         = map[string]consent.Decision{}
 )
 
-func newRiskConsentGate(prompt riskPrompt) *riskConsentGate {
-	g := &riskConsentGate{prompt: prompt}
-	g.cond = sync.NewCond(&g.mu)
-	return g
+// setSessionLedger swaps the session ledger. Tests use it to stub the prompt;
+// there is deliberately no environment variable that bypasses consent in a
+// shipping build.
+func setSessionLedger(l *consent.Ledger) *consent.Ledger {
+	sessionConsentMu.Lock()
+	defer sessionConsentMu.Unlock()
+	old := sessionConsentLedger
+	sessionConsentLedger = l
+	return old
 }
 
 func resetRiskConsent() {
-	sessionRiskMu.Lock()
-	sessionRiskConsent = newRiskConsentGate(promptRiskConsent)
-	sessionRiskMu.Unlock()
+	sessionConsentMu.Lock()
+	sessionConsentLedger = consent.NewLedger(consent.SystemPrompt)
+	sessionConsentMu.Unlock()
+	lastDecisionMu.Lock()
+	lastDecision = map[string]consent.Decision{}
+	lastDecisionMu.Unlock()
+}
+
+// Ledger exposes the session's consent state so the host session loop can show
+// and revoke grants without importing this package's internals.
+func Ledger() *consent.Ledger {
+	sessionConsentMu.Lock()
+	defer sessionConsentMu.Unlock()
+	return sessionConsentLedger
+}
+
+// DenyAllRisky puts the session in read-only mode for the whole run.
+func DenyAllRisky() {
+	Ledger().DenyEverything()
+}
+
+// LastConsentDecision reports what the gate decided for a command id, so the
+// audit log can record an actual outcome instead of a fixed string.
+func LastConsentDecision(kind string) consent.Decision {
+	lastDecisionMu.Lock()
+	defer lastDecisionMu.Unlock()
+	if d, ok := lastDecision[kind]; ok {
+		return d
+	}
+	return consent.NotRequired
 }
 
 func requireRiskConsent(ctx context.Context, kind, summary string) error {
-	req := riskRequest{Kind: kind, Summary: summary}
-	sessionRiskMu.Lock()
-	gate := sessionRiskConsent
-	sessionRiskMu.Unlock()
-	return gate.Require(ctx, req)
-}
-
-func (g *riskConsentGate) Require(ctx context.Context, req riskRequest) error {
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		g.mu.Lock()
-		if g.decided {
-			allowed := g.allowed
-			g.mu.Unlock()
-			if allowed {
-				return nil
-			}
-			return errRiskDenied
-		}
-		if !g.asking {
-			g.asking = true
-			g.mu.Unlock()
-
-			allowed, err := g.prompt(ctx, req)
-
-			g.mu.Lock()
-			if err == nil {
-				g.decided = true
-				g.allowed = allowed
-			}
-			g.asking = false
-			g.cond.Broadcast()
-			g.mu.Unlock()
-
-			if err != nil {
-				return err
-			}
-			if allowed {
-				return nil
-			}
-			return errRiskDenied
-		}
-		for g.asking && !g.decided {
-			g.cond.Wait()
-		}
-		g.mu.Unlock()
-	}
-}
-
-func riskPromptText(req riskRequest) string {
-	summary := strings.TrimSpace(req.Summary)
-	if summary == "" {
-		summary = "Run a command that can change this computer."
-	}
-	return fmt.Sprintf(
-		"Your helper is asking for permission to do more on this computer.\n\n"+
-			"What they asked for now:\n%s\n\n"+
-			"Choosing Yes lets the person with your view link, for the rest of this session, without asking again:\n"+
-			"  - run PowerShell commands\n"+
-			"  - read, add, change, and delete your files\n"+
-			"  - list and stop programs and Windows services\n"+
-			"  - read the Windows registry\n"+
-			"  - open network connections to this PC and to devices on your local network (for example your router)\n\n"+
-			"Only choose Yes if you trust this person and asked them for help. Choose No to keep these blocked.",
-		summary,
-	)
+	decision, err := Ledger().Require(ctx, consent.Request{Kind: kind, Summary: summary})
+	lastDecisionMu.Lock()
+	lastDecision[kind] = decision
+	lastDecisionMu.Unlock()
+	return err
 }

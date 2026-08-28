@@ -68,13 +68,15 @@ func fsUpload(ctx context.Context, args map[string]json.RawMessage) (interface{}
 		return nil, fmt.Errorf("fs.upload: sha256 mismatch (got %s, expected %s)", gotShaHex, expectSha)
 	}
 
+	// Ask before touching the filesystem: probing for the file first would tell
+	// a denied operator whether that path exists.
+	if err := requireRiskConsent(ctx, "fs.upload", "Writes operator-supplied file content to this computer. Uploaded content can replace files when overwrite=true."); err != nil {
+		return nil, err
+	}
 	if !overwrite {
 		if _, err := os.Stat(path); err == nil {
 			return nil, fmt.Errorf("fs.upload: %s already exists (pass overwrite=true to replace)", path)
 		}
-	}
-	if err := requireRiskConsent(ctx, "fs.upload", "Writes operator-supplied file content to this computer. Uploaded content can replace files when overwrite=true."); err != nil {
-		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -144,15 +146,17 @@ func fsDelete(ctx context.Context, args map[string]json.RawMessage) (interface{}
 	if err := guardDeletePath(path); err != nil {
 		return nil, err
 	}
+	// Ask before stat'ing: the error from a missing path would otherwise tell a
+	// denied operator what does and does not exist on this machine.
+	if err := requireRiskConsent(ctx, "fs.delete", "Deletes a file or directory from this computer. Directory deletion requires recursive=true and cannot be undone by Handoff."); err != nil {
+		return nil, err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
 	if info.IsDir() && !recursive {
 		return nil, fmt.Errorf("fs.delete: %s is a directory (pass recursive=true to remove it)", path)
-	}
-	if err := requireRiskConsent(ctx, "fs.delete", "Deletes a file or directory from this computer. Directory deletion requires recursive=true and cannot be undone by Handoff."); err != nil {
-		return nil, err
 	}
 	if info.IsDir() {
 		err = os.RemoveAll(path)
