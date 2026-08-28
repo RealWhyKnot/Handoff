@@ -85,6 +85,12 @@ func categoryOf(kind string) (Category, bool) {
 	return c, ok
 }
 
+// CategoryFor reports which permission category gates a kind, or empty when it
+// needs none.
+func CategoryFor(kind string) Category {
+	return kindCategories[kind]
+}
+
 var kindCategories = map[string]Category{
 	"fs.upload":    Files,
 	"fs.mkdir":     Files,

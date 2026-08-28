@@ -17,15 +17,42 @@ import (
 
 // Entry is one row in the audit log.
 type Entry struct {
-	Ts         string      `json:"ts"`      // RFC3339 with millis, UTC
-	SessionID  string      `json:"sid"`     // first 8 chars of view token
-	Operator   string      `json:"op"`      // remote ip seen at session start, may be empty
-	Capability string      `json:"cap"`     // command kind
-	Args       interface{} `json:"args"`    // command extras (may be trimmed for very large payloads)
-	Consent    string      `json:"consent"` // session | prompt_allow | prompt_deny | auto
-	Result     string      `json:"result"`  // ok | err | denied
-	ElapsedMs  int64       `json:"elapsed_ms"`
-	Detail     string      `json:"detail,omitempty"`
+	Ts           string      `json:"ts"`
+	SessionID    string      `json:"sid"`
+	Operator     string      `json:"op"`
+	Capability   string      `json:"cap"`
+	Args         interface{} `json:"args"`
+	Consent      string      `json:"consent"`
+	ConsentScope string      `json:"consent_scope,omitempty"`
+	Result       string      `json:"result"`
+	ElapsedMs    int64       `json:"elapsed_ms"`
+	Detail       string      `json:"detail,omitempty"`
+}
+
+// maxArgValueBytes keeps one oversized value from swamping the log. An
+// fs.upload used to write its entire base64 payload into every line.
+const maxArgValueBytes = 512
+
+// TrimArgs replaces bulky values with a size note so the log stays readable
+// and stays a record of what was asked for rather than a copy of the payload.
+func TrimArgs(args map[string]json.RawMessage) map[string]interface{} {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(args))
+	for k, raw := range args {
+		if len(raw) > maxArgValueBytes {
+			out[k] = fmt.Sprintf("<elided %d bytes>", len(raw))
+			continue
+		}
+		var v interface{}
+		if err := json.Unmarshal(raw, &v); err != nil {
+			out[k] = "<unreadable>"
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // Logger is goroutine-safe; multiple capability handlers writing
@@ -39,17 +66,26 @@ type Logger struct {
 
 // New returns a Logger backed by the standard %PROGRAMDATA% audit dir.
 // If PROGRAMDATA is unset (rare), falls back to %TEMP%.
-func New() (*Logger, error) {
-	root := os.Getenv("PROGRAMDATA")
-	if root == "" {
-		root = os.TempDir()
+func New() (*Logger, error) { return NewInDir("") }
+
+// NewInDir backs the logger with an explicit directory, falling back to the
+// standard %PROGRAMDATA% location when empty.
+func NewInDir(dir string) (*Logger, error) {
+	if dir == "" {
+		root := os.Getenv("PROGRAMDATA")
+		if root == "" {
+			root = os.TempDir()
+		}
+		dir = filepath.Join(root, "whyknot", "handoff", "audit")
 	}
-	dir := filepath.Join(root, "whyknot", "handoff", "audit")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir audit dir: %w", err)
 	}
 	return &Logger{dir: dir}, nil
 }
+
+// Dir is where entries are being written, for the session banner.
+func (l *Logger) Dir() string { return l.dir }
 
 // Write appends one entry. Ts is filled in if empty.
 func (l *Logger) Write(e Entry) error {

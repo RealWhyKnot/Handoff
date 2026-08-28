@@ -21,16 +21,33 @@ var version = "dev"
 func main() {
 	cmd.Version = version
 
-	if logPath, err := supportlog.Init(); err != nil {
-		fmt.Fprintln(os.Stderr, "warning: support log unavailable:", err)
-	} else {
-		defer supportlog.Close()
-		fmt.Println("log:", logPath)
+	// Only the long-running subcommands need a support log, and its path is a
+	// diagnostic rather than output: printing it on `version` or `--json`
+	// corrupts anything parsing stdout.
+	if wantsSupportLog(os.Args[1:]) {
+		if logPath, err := supportlog.Init(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning: support log unavailable:", err)
+		} else {
+			defer supportlog.Close()
+			fmt.Fprintln(os.Stderr, "log:", logPath)
+		}
 	}
 
 	if code := run(os.Args[1:]); code != 0 {
 		os.Exit(code)
 	}
+}
+
+func wantsSupportLog(args []string) bool {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "", "new", "tunnel", "menu":
+		return true
+	}
+	return false
 }
 
 var (
@@ -47,14 +64,18 @@ func run(args []string) int {
 	switch args[0] {
 	case "new":
 		newCommand(args[1:])
+	case "menu":
+		menuCommand(args[1:])
 	case "connect":
 		cmd.Connect(args[1:])
 	case "tunnel":
 		cmd.Tunnel(args[1:])
+	case "exec":
+		return cmd.Exec(args[1:])
 	case "update":
 		cmd.Update(args[1:])
 	case "version", "-v", "--version":
-		fmt.Println("handoff", version)
+		return cmd.PrintVersion(args[1:], version)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -66,17 +87,27 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "handoff -- token-gated remote debug helper for Windows")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Running without a subcommand shows an interactive menu.")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Subcommands:")
-	fmt.Fprintln(os.Stderr, "  new                       start a host session, print the view URL")
-	fmt.Fprintln(os.Stderr, "  connect <url-or-token>    open an operator viewer (browser)")
-	fmt.Fprintln(os.Stderr, "  tunnel <connect-token>    forward a remote local port to this computer")
-	fmt.Fprintln(os.Stderr, "  update [--check]          fetch a newer handoff.exe from the relay")
-	fmt.Fprintln(os.Stderr, "  version                   print version")
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Env:")
-	fmt.Fprintln(os.Stderr, "  HANDOFF_RELAY  override the default relay URL (https://handoff.whyknot.dev)")
+	fmt.Println("handoff -- token-gated remote debug helper for Windows")
+	fmt.Println("")
+	fmt.Println("Running without a subcommand shows an interactive menu.")
+	fmt.Println("")
+	fmt.Println("Subcommands:")
+	fmt.Println("  new                        start a host session, print the view URL")
+	fmt.Println("  menu                       show the interactive launcher")
+	fmt.Println("  connect <url-or-token>     open an operator viewer (browser)")
+	fmt.Println("  exec <token> <kind>        run one command against a session, print the result")
+	fmt.Println("  tunnel <connect-token>     forward a remote local port to this computer")
+	fmt.Println("  update [--check]           fetch a newer handoff.exe from the relay")
+	fmt.Println("  version                    print version and file locations")
+	fmt.Println("")
+	fmt.Println("Common flags:")
+	fmt.Println("  --relay URL                relay base URL")
+	fmt.Println("  --json                     machine-readable output")
+	fmt.Println("  --config FILE              config file path")
+	fmt.Println("  --log-dir DIR              where to write the support log")
+	fmt.Println("")
+	fmt.Println("Env:")
+	fmt.Println("  HANDOFF_RELAY      override the default relay URL (https://handoff.whyknot.dev)")
+	fmt.Println("  HANDOFF_LOG_DIR    override the support log directory")
+	fmt.Println("  HANDOFF_CONFIG     override the config file path")
 }

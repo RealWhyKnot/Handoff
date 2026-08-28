@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,11 +15,11 @@ import (
 
 	"github.com/RealWhyKnot/Handoff/internal/audit"
 	"github.com/RealWhyKnot/Handoff/internal/capabilities"
+	"github.com/RealWhyKnot/Handoff/internal/consent"
 	"github.com/RealWhyKnot/Handoff/internal/dispatch"
 	"github.com/RealWhyKnot/Handoff/internal/relay"
 	"github.com/RealWhyKnot/Handoff/internal/stayawake"
 	"github.com/RealWhyKnot/Handoff/internal/supportlog"
-	"github.com/RealWhyKnot/Handoff/internal/visibility"
 )
 
 // Version is stamped from main.go.
@@ -27,12 +28,45 @@ var Version = "0.1.0"
 // New mints a fresh session on the relay, opens the bridge WebSocket,
 // and runs the host agent loop until Ctrl+C.
 func New(args []string) {
-	relayBase := defaultRelay()
+	var consentMode string
+	var noKeepAwake bool
+	opts, _, err := parseOptions("new", args, func(fs *flag.FlagSet) {
+		fs.StringVar(&consentMode, "consent", "ask", "ask or deny; deny runs a strictly read-only session")
+		fs.BoolVar(&noKeepAwake, "no-keep-awake", false, "let this computer sleep during the session")
+	})
+	if err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(2)
+	}
+	switch consentMode {
+	case "ask":
+	case "deny":
+		capabilities.DenyAllRisky()
+	default:
+		fmt.Fprintln(os.Stderr, "--consent must be ask or deny")
+		os.Exit(2)
+	}
+
+	relayBase := opts.Relay
 	supportlog.Printf("session start relay=%s version=%s", relayBase, Version)
-	fmt.Println("relay:", relayBase)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Audit log first: the banner reports where it lives, and a host who
+	// cannot see what was done has no way to check up on a session.
+	log, err := audit.NewInDir(opts.AuditDir)
+	if err != nil {
+		supportlog.Printf("audit log unavailable: %v", err)
+		fmt.Fprintln(os.Stderr, "warning: audit log unavailable:", err)
+	}
+	defer func() {
+		if log != nil {
+			_ = log.Close()
+		}
+	}()
 
 	// Mint a session.
 	mintCtx, mintCancel := context.WithTimeout(ctx, 10*time.Second)
@@ -44,25 +78,29 @@ func New(args []string) {
 		os.Exit(1)
 	}
 	sid := shortSid(mint.ViewToken)
-	supportlog.Printf("mint ok sid=%s view_url=%s", sid, mint.ViewURL)
+
+	// The view URL is this session's credential; keep it out of a file that
+	// outlives the session.
+	supportlog.Printf("mint ok sid=%s", sid)
+
+	logPath, _ := supportlog.Path()
+	fmt.Println("relay: ", relayBase)
+	fmt.Println("log:   ", logPath)
+	if log != nil {
+		fmt.Println("audit: ", log.Dir())
+	}
+	if !noKeepAwake && opts.KeepAwake {
+		fmt.Println("keeping this PC awake while the session runs (--no-keep-awake to turn off)")
+	}
+	if consentMode == "deny" {
+		fmt.Println("read-only session: every request that would change this PC is refused")
+	}
 	fmt.Println()
 	fmt.Println("session live -- share the view URL with your helper:")
 	fmt.Println("  ", mint.ViewURL)
 	fmt.Println()
-	fmt.Println("press Ctrl+C to end the session at any time.")
+	fmt.Println("press q then Enter to end the session, or ? for other keys.")
 	fmt.Println()
-
-	// Audit log.
-	log, err := audit.New()
-	if err != nil {
-		supportlog.Printf("audit log unavailable: %v", err)
-		fmt.Fprintln(os.Stderr, "warning: audit log unavailable:", err)
-	}
-	defer func() {
-		if log != nil {
-			_ = log.Close()
-		}
-	}()
 
 	// Handle Ctrl+C.
 	sig := make(chan os.Signal, 1)
@@ -74,9 +112,10 @@ func New(args []string) {
 		cancel()
 	}()
 
-	// Lifecycle hook for foreground-window policy. Currently a no-op.
-	visibility.StartWatcher(ctx)
-	stayawake.Start(ctx)
+	if !noKeepAwake && opts.KeepAwake {
+		stayawake.Start(ctx)
+	}
+	startKeyboardControl(ctx, cancel, log)
 
 	// Open the bridge WS.
 	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
@@ -155,7 +194,13 @@ func recvIteration(ctx context.Context, sid string, bridge *relay.Bridge, backof
 		capabilities.EnqueueTunnelFrame(cmd.Kind, cmd.Extras)
 		return true
 	}
-	fmt.Printf("[cmd] %s  kind=%s\n", cmd.ID, cmd.Kind)
+	// The owner of the machine should be able to see what is being done to it
+	// without opening the audit file.
+	if summary := summarizeArgs(cmd.Extras); summary != "" {
+		fmt.Printf("[cmd] %s  %s  %s\n", cmd.ID, cmd.Kind, summary)
+	} else {
+		fmt.Printf("[cmd] %s  %s\n", cmd.ID, cmd.Kind)
+	}
 	jobs.Start(cmd)
 	return true
 }
@@ -230,6 +275,8 @@ type jobRunner struct {
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
+
+	auditFailOnce sync.Once
 }
 
 func newJobRunner(rootCtx context.Context, sid string, router *dispatch.Router, bridge *relay.Bridge, auditLog *audit.Logger) *jobRunner {
@@ -287,7 +334,15 @@ func (r *jobRunner) Start(cmd *relay.Command) {
 			return
 		}
 		supportlog.Printf("command result sent sid=%s id=%s ok=%v elapsed_ms=%d", r.sid, cmd.ID, out.OK, out.ElapsedMs)
-		fmt.Printf("       -> ok=%v elapsed=%dms\n", out.OK, out.ElapsedMs)
+		status := "ok"
+		if !out.OK {
+			status = "failed"
+		}
+		if detail := summarizeResult(out); detail != "" {
+			fmt.Printf("       -> %s  %dms  %s\n", status, out.ElapsedMs, detail)
+		} else {
+			fmt.Printf("       -> %s  %dms\n", status, out.ElapsedMs)
+		}
 	}()
 }
 
@@ -322,15 +377,28 @@ func (r *jobRunner) writeAudit(cmd *relay.Command, out dispatch.Outcome) {
 	if !out.OK {
 		res = "err"
 	}
-	_ = r.audit.Write(audit.Entry{
-		SessionID:  r.sid,
-		Capability: cmd.Kind,
-		Args:       cmd.Extras,
-		Consent:    "session",
-		Result:     res,
-		ElapsedMs:  out.ElapsedMs,
-		Detail:     out.Error,
+	decision := capabilities.LastConsentDecision(cmd.Kind)
+	if decision == consent.PromptDeny {
+		res = "denied"
+	}
+	err := r.audit.Write(audit.Entry{
+		SessionID:    r.sid,
+		Capability:   cmd.Kind,
+		Args:         audit.TrimArgs(cmd.Extras),
+		Consent:      string(decision),
+		ConsentScope: string(consent.CategoryFor(cmd.Kind)),
+		Result:       res,
+		ElapsedMs:    out.ElapsedMs,
+		Detail:       out.Error,
 	})
+	if err != nil {
+		// A silently broken audit log is worse than a noisy one, but one line
+		// per command would be its own problem.
+		r.auditFailOnce.Do(func() {
+			supportlog.Printf("audit write failed sid=%s: %v", r.sid, err)
+			fmt.Fprintln(os.Stderr, "warning: audit log is not recording:", err)
+		})
+	}
 }
 
 func readStringExtra(extras map[string]json.RawMessage, name string) string {

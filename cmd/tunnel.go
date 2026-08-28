@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/RealWhyKnot/Handoff/internal/supportlog"
-	"github.com/RealWhyKnot/Handoff/internal/visibility"
 	"github.com/coder/websocket"
 )
 
@@ -86,7 +85,6 @@ func Tunnel(args []string) {
 	}
 
 	// Lifecycle hook for foreground-window policy. Currently a no-op.
-	visibility.StartWatcher(ctx)
 
 	fmt.Println("connecting to relay:", opts.relay)
 	runTunnelSessions(ctx, opts, wsURL, listener, boundPort)
