@@ -92,19 +92,19 @@ func CategoryFor(kind string) Category {
 }
 
 var kindCategories = map[string]Category{
-	"fs.upload":    Files,
-	"fs.mkdir":     Files,
-	"fs.delete":    Files,
-	"fs.write":     Files,
-	"pico.save":    Files,
-	"proc.kill":    Processes,
-	"proc.start":   Processes,
-	"svc.control":  Services,
-	"pico.bootsel": Devices,
-	"pico.flash":   Devices,
-	"pico.reset":   Devices,
-	"tunnel.open":  Network,
-	"net.repair":   Network,
+	"fs.upload":      Files,
+	"fs.mkdir":       Files,
+	"fs.delete":      Files,
+	"fs.write":       Files,
+	"pico.save":      Files,
+	"proc.kill":      Processes,
+	"proc.start":     Processes,
+	"svc.control":    Services,
+	"pico.bootsel":   Devices,
+	"pico.flash":     Devices,
+	"pico.reset":     Devices,
+	"tunnel.open":    Network,
+	"net.repair":     Network,
 	"sys.screenshot": Capture,
 	"clip.set":       Capture,
 	"ps.exec":        Exec,
@@ -118,11 +118,11 @@ type Ledger struct {
 	cond   *sync.Cond
 	prompt Prompt
 
-	grants   map[Category]Grant
-	denied   map[Category]time.Time
-	asking   map[Category]bool
-	denyAll  bool
-	now      func() time.Time
+	grants  map[Category]Grant
+	denied  map[Category]time.Time
+	asking  map[Category]bool
+	denyAll bool
+	now     func() time.Time
 }
 
 func NewLedger(prompt Prompt) *Ledger {
