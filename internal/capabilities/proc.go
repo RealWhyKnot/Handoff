@@ -37,6 +37,15 @@ func RegisterProc(r *dispatch.Router) {
 	}, procFind)
 
 	r.RegisterSpec(dispatch.Spec{
+		Kind:        "svc.status",
+		Label:       "Service status",
+		Description: "Look up one Windows service.",
+		Params: []dispatch.Param{
+			{Name: "name", Type: dispatch.ParamString, Required: true, Description: "Service name, for example Spooler."},
+		},
+	}, svcStatus)
+
+	r.RegisterSpec(dispatch.Spec{
 		Kind:        "svc.control",
 		Label:       "Control service",
 		Description: "Start, stop, or restart a Windows service.",
@@ -176,4 +185,36 @@ $after = Get-Service -Name $name -ErrorAction Stop
 
 func psSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// svcStatus answers a question about one service. Checking a single service
+// previously meant dumping every service on the machine and filtering client
+// side.
+func svcStatus(ctx context.Context, args map[string]json.RawMessage) (interface{}, error) {
+	var name string
+	if v, ok := args["name"]; ok {
+		_ = json.Unmarshal(v, &name)
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("svc.status: 'name' is required")
+	}
+
+	script := fmt.Sprintf(`
+$name = %s
+$svc = Get-Service -Name $name -ErrorAction Stop
+$cim = Get-CimInstance Win32_Service -Filter ("Name='" + $svc.Name.Replace("'","''") + "'") -ErrorAction SilentlyContinue
+[ordered]@{
+    name         = [string]$svc.Name
+    display_name = [string]$svc.DisplayName
+    status       = [string]$svc.Status
+    start_type   = [string]$svc.StartType
+    can_stop     = [bool]$svc.CanStop
+    start_name   = if ($cim) { [string]$cim.StartName } else { $null }
+    path         = if ($cim) { [string]$cim.PathName } else { $null }
+    process_id   = if ($cim) { [int]$cim.ProcessId } else { $null }
+    description  = if ($cim) { [string]$cim.Description } else { $null }
+} | ConvertTo-Json -Compress
+`, psSingleQuote(name))
+	return runPwshJSON(ctx, script)
 }

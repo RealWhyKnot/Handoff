@@ -19,6 +19,7 @@ func riskPromptText(req riskRequest) string { return consent.PromptText(req) }
 var (
 	sessionConsentMu     sync.Mutex
 	sessionConsentLedger = consent.NewLedger(consent.SystemPrompt)
+	denyAllRisky         bool
 	lastDecisionMu       sync.Mutex
 	lastDecision         = map[string]consent.Decision{}
 )
@@ -37,6 +38,11 @@ func setSessionLedger(l *consent.Ledger) *consent.Ledger {
 func resetRiskConsent() {
 	sessionConsentMu.Lock()
 	sessionConsentLedger = consent.NewLedger(consent.SystemPrompt)
+	// A read-only session is a property of the run, not of one ledger.
+	// Re-registering capabilities must not quietly re-arm the risky commands.
+	if denyAllRisky {
+		sessionConsentLedger.DenyEverything()
+	}
 	sessionConsentMu.Unlock()
 	lastDecisionMu.Lock()
 	lastDecision = map[string]consent.Decision{}
@@ -51,9 +57,14 @@ func Ledger() *consent.Ledger {
 	return sessionConsentLedger
 }
 
-// DenyAllRisky puts the session in read-only mode for the whole run.
+// DenyAllRisky puts the session in read-only mode for the whole run. The flag
+// is sticky so a later capability re-registration cannot undo it.
 func DenyAllRisky() {
-	Ledger().DenyEverything()
+	sessionConsentMu.Lock()
+	denyAllRisky = true
+	ledger := sessionConsentLedger
+	sessionConsentMu.Unlock()
+	ledger.DenyEverything()
 }
 
 // LastConsentDecision reports what the gate decided for a command id, so the
