@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -137,5 +138,80 @@ func TestExecRequiresAKind(t *testing.T) {
 	t.Setenv("HANDOFF_CONFIG", "")
 	if code := Exec([]string{"--relay", "https://example.test", "n1_token"}); code != execExitUsage {
 		t.Fatalf("exit = %d, want a usage error", code)
+	}
+}
+
+func TestExecFallsBackWhenRelayHasNoRunEndpoint(t *testing.T) {
+	// A relay that predates /run answers 404. Giving up there would make a new
+	// client useless against a relay that has not been deployed yet.
+	var sawCmd, sawResult bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/run"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"Not Found"}`))
+		case strings.HasSuffix(r.URL.Path, "/cmd"):
+			sawCmd = true
+			_, _ = w.Write([]byte(`{"command_id":"c_fallback"}`))
+		case strings.Contains(r.URL.Path, "/cmd/c_fallback"):
+			sawResult = true
+			_, _ = w.Write([]byte(`{"id":"c_fallback","payload":{"id":"c_fallback","ok":true,"result":{"up":1},"elapsed_ms":7}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("HANDOFF_CONFIG", "")
+	if code := Exec([]string{"--relay", srv.URL, "--json", "n1_token", "sys.uptime"}); code != 0 {
+		t.Fatalf("Exec exit = %d, want 0 via the fallback", code)
+	}
+	if !sawCmd || !sawResult {
+		t.Fatalf("fallback path not used: cmd=%v result=%v", sawCmd, sawResult)
+	}
+}
+
+func TestExecDoesNotFallBackForAnUnknownSession(t *testing.T) {
+	// An unknown token also 404s. Retrying that against /cmd would turn a clear
+	// error into a second confusing one.
+	var cmdCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/cmd") {
+			cmdCalls++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"unknown view token"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("HANDOFF_CONFIG", "")
+	if code := Exec([]string{"--relay", srv.URL, "--json", "n1_token", "sys.uptime"}); code != 1 {
+		t.Fatalf("Exec exit = %d, want 1", code)
+	}
+	if cmdCalls != 0 {
+		t.Fatalf("fell back %d times for an unknown session", cmdCalls)
+	}
+}
+
+func TestExecFallbackReportsHostFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/run"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"Not Found"}`))
+		case strings.HasSuffix(r.URL.Path, "/cmd"):
+			_, _ = w.Write([]byte(`{"command_id":"c_bad"}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"c_bad","payload":{"id":"c_bad","ok":false,"error":"boom"}}`))
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("HANDOFF_CONFIG", "")
+	if code := Exec([]string{"--relay", srv.URL, "--json", "n1_token", "ps.exec"}); code != execExitFailed {
+		t.Fatalf("Exec exit = %d, want %d", code, execExitFailed)
 	}
 }
