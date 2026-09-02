@@ -36,6 +36,7 @@ jobs:
           ./.github/scripts/Test-WorkflowSyntax.ps1
           ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
           ./.github/scripts/Test-ReleaseVersionSequence.ps1
+          ./.github/scripts/Test-NewReleaseNotes.ps1
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -112,109 +113,10 @@ jobs:
           EXE_SHA256: ${{ steps.manifest.outputs.sha256 }}
         shell: pwsh
         run: |
-          # Build the release body. Top section is a conventional-commit
-          # changelog grouped by type, extracted from `git log $prev..$tag`.
-          # Bottom section is the static install snippet.
-
-          $prevTag = & ./.github/scripts/Resolve-ReleaseBaseTag.ps1 -Tag $env:TAG_NAME
-
-          $sections = [ordered]@{
-              feat     = 'Features'
-              fix      = 'Bug Fixes'
-              perf     = 'Performance'
-              refactor = 'Refactors'
-              docs     = 'Documentation'
-              test     = 'Tests'
-              ci       = 'CI'
-              build    = 'Build'
-              chore    = 'Chores'
-              style    = 'Style'
-              revert   = 'Reverts'
-              other    = 'Other'
-          }
-          $groups = @{}
-          $breaking = @()
-
-          if ($prevTag) {
-              $range = "$prevTag..$env:TAG_NAME"
-              $logLines = git log $range --pretty=format:"%h%x09%s" --no-merges
-              foreach ($line in $logLines) {
-                  if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                  $parts = $line -split "`t", 2
-                  $sha = $parts[0]
-                  $subject = $parts[1]
-                  if ($subject -match '^(?<type>\w+)(\((?<scope>[^)]+)\))?(?<bang>!)?:\s*(?<desc>.+)$') {
-                      $type = $matches['type'].ToLowerInvariant()
-                      $scope = $matches['scope']
-                      $isBreaking = -not [string]::IsNullOrEmpty($matches['bang'])
-                      $desc = $matches['desc']
-                      if (-not $sections.Contains($type)) { $type = 'other' }
-                      if ($scope) {
-                          $entry = "- ``$sha`` **${scope}**: $desc"
-                      } else {
-                          $entry = "- ``$sha`` $desc"
-                      }
-                      if ($isBreaking) {
-                          if ($scope) {
-                              $breaking += "- ``$sha`` **${scope}**: $desc"
-                          } else {
-                              $breaking += "- ``$sha`` $desc"
-                          }
-                      }
-                      if (-not $groups.ContainsKey($type)) { $groups[$type] = @() }
-                      $groups[$type] += $entry
-                  } else {
-                      if (-not $groups.ContainsKey('other')) { $groups['other'] = @() }
-                      $groups['other'] += "- ``$sha`` $subject"
-                  }
-              }
-          }
-
-          $out = New-Object System.Collections.Generic.List[string]
-          if ($prevTag) {
-              $out.Add("## Changes since $prevTag")
-              $out.Add("")
-              if ($breaking.Count -gt 0) {
-                  $out.Add("### Breaking Changes")
-                  $out.Add("")
-                  foreach ($e in $breaking) { $out.Add($e) }
-                  $out.Add("")
-              }
-              $emitted = $false
-              foreach ($key in $sections.Keys) {
-                  if ($groups.ContainsKey($key) -and $groups[$key].Count -gt 0) {
-                      $emitted = $true
-                      $out.Add("### $($sections[$key])")
-                      $out.Add("")
-                      foreach ($e in $groups[$key]) { $out.Add($e) }
-                      $out.Add("")
-                  }
-              }
-              if (-not $emitted) {
-                  $out.Add("_No conventional-commit changes since $prevTag._")
-                  $out.Add("")
-              }
-              $out.Add("**Full diff:** https://github.com/$env:GITHUB_REPOSITORY/compare/$prevTag...$env:TAG_NAME")
-              $out.Add("")
-          } else {
-              $out.Add("Initial release.")
-              $out.Add("")
-          }
-
-          $out.Add("## Install")
-          $out.Add("")
-          $out.Add("Download ``handoff.exe`` from the assets below and run it from anywhere on PATH (or wherever you keep portable tools).")
-          $out.Add("")
-          $out.Add("SHA256: ``$env:EXE_SHA256``")
-          $out.Add("")
-          $out.Add("Auto-update clients can poll ``handoff-version.json`` next to the binary in the assets list.")
-          $out.Add("")
-          $out.Add("Getting started: https://github.com/$env:GITHUB_REPOSITORY#readme")
-
-          $notes = $out -join "`n"
+          $notes = (& ./.github/scripts/New-ReleaseNotes.ps1 -Tag $env:TAG_NAME -Repo $env:GITHUB_REPOSITORY -ExeSha256 $env:EXE_SHA256) -join "`n"
+          if (-not $notes) { throw "New-ReleaseNotes.ps1 returned an empty body" }
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
-          Set-Content -LiteralPath $notesPath -Value $notes -Encoding UTF8
-
+          [System.IO.File]::WriteAllText($notesPath, $notes, (New-Object System.Text.UTF8Encoding($false)))
           # Draft-first: create as draft, upload assets, only then promote
           # to published. If anything between create and promote fails the
           # release stays as a draft, which is more visible than a live
