@@ -106,14 +106,22 @@ jobs:
           Get-Content handoff-version.json
           "sha256=$sha" >> $env:GITHUB_OUTPUT
 
+      - name: Build the changelog
+        id: changelog
+        uses: RealWhyKnot/workflows/release-notes@v1
+        with:
+          tag: ${{ steps.ver.outputs.tag }}
+          title: Handoff ${{ steps.ver.outputs.tag }}
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.ver.outputs.tag }}
           EXE_SHA256: ${{ steps.manifest.outputs.sha256 }}
+          CHANGELOG_PATH: ${{ steps.changelog.outputs.file }}
         shell: pwsh
         run: |
-          $notes = (& ./.github/scripts/New-ReleaseNotes.ps1 -Tag $env:TAG_NAME -Repo $env:GITHUB_REPOSITORY -ExeSha256 $env:EXE_SHA256) -join "`n"
+          $notes = (& ./.github/scripts/New-ReleaseNotes.ps1 -Tag $env:TAG_NAME -Repo $env:GITHUB_REPOSITORY -ChangelogPath $env:CHANGELOG_PATH -ExeSha256 $env:EXE_SHA256) -join "`n"
           if (-not $notes) { throw "New-ReleaseNotes.ps1 returned an empty body" }
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
           [System.IO.File]::WriteAllText($notesPath, $notes, (New-Object System.Text.UTF8Encoding($false)))
