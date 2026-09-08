@@ -32,7 +32,6 @@ jobs:
           ./.github/scripts/Test-WorkflowSyntax.ps1
           ./.github/scripts/Test-NightlyBetaPlan.ps1
           ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
-          ./.github/scripts/Test-ReleaseVersionSequence.ps1
 
       - name: Plan nightly beta
         id: plan

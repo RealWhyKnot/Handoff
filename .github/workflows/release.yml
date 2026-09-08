@@ -35,7 +35,6 @@ jobs:
         run: |
           ./.github/scripts/Test-WorkflowSyntax.ps1
           ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
-          ./.github/scripts/Test-ReleaseVersionSequence.ps1
           ./.github/scripts/Test-NewReleaseNotes.ps1
 
       - name: Set up Go
@@ -69,8 +68,9 @@ jobs:
           Write-Host "tag=$tag version=$version is_pre=$isPre"
 
       - name: Validate release version sequence
-        shell: pwsh
-        run: ./.github/scripts/Assert-ReleaseVersionSequence.ps1 -Tag '${{ steps.ver.outputs.tag }}'
+        uses: RealWhyKnot/workflows/version-sequence@v1
+        with:
+          tag: '${{ steps.ver.outputs.tag }}'
 
       - name: Fetch picotool
         shell: pwsh
