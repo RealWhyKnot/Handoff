@@ -46,26 +46,10 @@ jobs:
 
       - name: Resolve version from tag
         id: ver
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if (-not $tag) { $tag = "${{ github.ref_name }}" }
-          # Strip leading 'v' from the tag to land the family YYYY.M.D.N
-          # scheme into the binary version string. Tags MUST start with 'v'.
-          if (-not $tag.StartsWith('v')) {
-              throw "tag '$tag' does not start with 'v'"
-          }
-          $version = $tag.Substring(1)
-          # Sanity-check the YYYY.M.D.N(-XXXX) shape so a fat-fingered
-          # tag fails the release rather than shipping a broken version.
-          if ($version -notmatch '^\d{4}\.\d+\.\d+\.\d+(-([A-Fa-f0-9]{4}|beta))?$') {
-              throw "version '$version' does not match the YYYY.M.D.N, YYYY.M.D.N-XXXX, or YYYY.M.D.N-beta shape"
-          }
-          $isPre = $version -like '*-*'
-          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "is_pre=$($isPre.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "tag=$tag version=$version is_pre=$isPre"
+        uses: RealWhyKnot/workflows/resolve-tag@v1
+        with:
+          tag: ${{ github.event.inputs.tag }}
+          prerelease-pattern: '^v\d{4}\.\d+\.\d+\.\d+-.+$'
 
       - name: Validate release version sequence
         uses: RealWhyKnot/workflows/version-sequence@v1
@@ -113,9 +97,9 @@ jobs:
           tag: ${{ steps.ver.outputs.tag }}
           title: Handoff ${{ steps.ver.outputs.tag }}
 
-      - name: Publish GitHub release
+      - name: Compose release notes
+        id: body
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.ver.outputs.tag }}
           EXE_SHA256: ${{ steps.manifest.outputs.sha256 }}
           CHANGELOG_PATH: ${{ steps.changelog.outputs.file }}
@@ -125,27 +109,15 @@ jobs:
           if (-not $notes) { throw "New-ReleaseNotes.ps1 returned an empty body" }
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
           [System.IO.File]::WriteAllText($notesPath, $notes, (New-Object System.Text.UTF8Encoding($false)))
-          # Draft-first: create as draft, upload assets, only then promote
-          # to published. If anything between create and promote fails the
-          # release stays as a draft, which is more visible than a live
-          # release missing one of its assets.
-          $extra = @('--draft')
-          if ('${{ steps.ver.outputs.is_pre }}' -eq 'true') { $extra += @('--prerelease','--latest=false') }
-          gh release create $env:TAG_NAME handoff.exe handoff-version.json --title $env:TAG_NAME --notes-file $notesPath @extra
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE)" }
+          "file=$notesPath" >> $env:GITHUB_OUTPUT
 
-          # Verify the assets actually attached -- gh release create can
-          # succeed with the metadata but fail mid-upload on the asset
-          # stage; the draft would then be live with missing files.
-          $json = gh release view $env:TAG_NAME --json assets,isDraft
-          if ($LASTEXITCODE -ne 0) { throw "gh release view failed (exit $LASTEXITCODE)" }
-          $info = $json | ConvertFrom-Json
-          $expected = @('handoff.exe', 'handoff-version.json')
-          foreach ($e in $expected) {
-              if (-not ($info.assets.name -contains $e)) {
-                  throw "Asset '$e' did not attach to draft release $env:TAG_NAME -- leaving as draft for manual inspection."
-              }
-          }
-          Write-Host "Draft release $env:TAG_NAME has all expected assets, promoting to published."
-          gh release edit $env:TAG_NAME --draft=false
-          if ($LASTEXITCODE -ne 0) { throw "gh release edit --draft=false failed (exit $LASTEXITCODE)" }
+      - name: Publish GitHub release
+        uses: RealWhyKnot/workflows/publish-release@v1
+        with:
+          tag: ${{ steps.ver.outputs.tag }}
+          notes-file: ${{ steps.body.outputs.file }}
+          prerelease: ${{ steps.ver.outputs.prerelease }}
+          draft-first: 'true'
+          assets: |
+            handoff.exe
+            handoff-version.json
