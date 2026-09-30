@@ -5,7 +5,7 @@ runs `handoff new`, which mints a one-time session on the relay and starts a
 local bridge loop. The view URL is passed to an operator, who opens it in a
 browser (or runs `handoff connect <url>`) to queue diagnostic commands.
 Commands run on the host and results stream back through the relay in real
-time -- no inbound firewall rules, no VPN, no shared credentials beyond the
+time. No inbound firewall rules, no VPN, no shared credentials beyond the
 view token.
 
 Risky commands, such as arbitrary PowerShell execution, file deletion, process
@@ -13,8 +13,8 @@ termination, service control, and Pico flashing/reset actions, require a host
 yes/no warning prompt. A yes allows risky commands for the remainder of that
 session; a no blocks them for that session.
 
-**Flow:** host runs `handoff new` and shares the printed URL -- operator opens
-the URL and queues commands -- host console shows each command and result --
+The host runs `handoff new` and shares the printed URL. The operator opens it
+and queues commands, and the host console shows each command and result. The
 host presses Ctrl+C or types `q` to end the session.
 
 ### Install
