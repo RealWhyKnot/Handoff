@@ -1,31 +1,18 @@
-## Handoff
+# Handoff
 
-Handoff is a Windows CLI tool for token-gated remote debug sessions. The host
-runs `handoff new`, which mints a one-time session on the relay and starts a
-local bridge loop. The view URL is passed to an operator, who opens it in a
-browser (or runs `handoff connect <url>`) to queue diagnostic commands.
-Commands run on the host and results stream back through the relay in real
-time. No inbound firewall rules, no VPN, no shared credentials beyond the
-view token.
+Handoff is a Windows command-line tool for remote debugging through a relay. The person with the problem (the host) runs `handoff new`, which creates a one-time session on the relay, prints a view URL and starts a local bridge. Whoever is helping opens that URL in a browser or runs `handoff connect <url>`. Then they queue diagnostic commands. Each one runs on the host's machine and its output streams back as it comes in.
 
-Risky commands, such as arbitrary PowerShell execution, file deletion, process
-termination, service control, and Pico flashing/reset actions, require a host
-yes/no warning prompt. A yes allows risky commands for the remainder of that
-session; a no blocks them for that session.
+The host doesn't need to open firewall ports or set up a VPN. The view token in the URL is the only credential that gets shared.
 
-The host runs `handoff new` and shares the printed URL. The operator opens it
-and queues commands, and the host console shows each command and result. The
-host presses Ctrl+C or types `q` to end the session.
+Risky commands ask the host first: arbitrary PowerShell, deleting files, killing processes, service control, and Pico flash or reset. A yes allows them for the rest of the session and a no blocks them until it ends.
 
-### Install
+The host console shows every command and its result. Ctrl+C or `q` in that console ends the session.
 
-Download the latest `handoff.exe` from
-[Releases](https://github.com/RealWhyKnot/Handoff/releases) and run it from a
-terminal. No installer. The default relay is
-[https://handoff.whyknot.dev/](https://handoff.whyknot.dev/); set
-`HANDOFF_RELAY` to point at a different one.
+## Install
 
-### Build from source
+Download `handoff.exe` from [Releases](https://github.com/RealWhyKnot/Handoff/releases) and run it from a terminal. There's no installer. It uses the relay at [https://handoff.whyknot.dev/](https://handoff.whyknot.dev/) unless you set `HANDOFF_RELAY` to another one.
+
+## Build from source
 
 ```powershell
 git clone https://github.com/RealWhyKnot/Handoff
@@ -33,22 +20,20 @@ cd Handoff
 go build -o handoff.exe .
 ```
 
-The default build calls into the system-installed `picotool` for the `pico.*`
-commands. To bundle picotool into the binary (so the host doesn't need to
-install it separately):
+The `pico.*` commands call the `picotool` installed on the host. To build it into the exe instead:
 
 ```powershell
 ./scripts/fetch-picotool.ps1
 go build -tags embed_picotool -o handoff.exe .
 ```
 
-### Update
+## Update
 
 ```powershell
 ./handoff.exe update --check    # check the relay for a newer release
 ./handoff.exe update            # download it next to the running exe
 ```
 
-### License
+## License
 
 GPL-3.0-or-later. Source at <https://github.com/RealWhyKnot/Handoff>.

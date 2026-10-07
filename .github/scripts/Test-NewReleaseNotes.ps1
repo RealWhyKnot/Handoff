@@ -43,7 +43,7 @@ try {
     Assert-Contains $body '# Handoff v2026.1.2.0'
     Assert-Contains $body '- feat: a thing by @RealWhyKnot in abc1234'
     Assert-Contains $body 'SHA256 of `handoff.exe`: `abc123`'
-    Assert-Contains $body "- **Source:** commit ``$sha`` on ``main``"
+    Assert-Contains $body "Built from commit ``$sha`` on ``main``"
     Assert-Contains $body '## Install (fresh)'
     Assert-Contains $body '## Uninstall'
     Assert-Contains $body '## What you need to do'
