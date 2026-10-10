@@ -10,7 +10,7 @@ The host console shows every command and its result. Ctrl+C or `q` in that conso
 
 ## Install
 
-Download `handoff.exe` from [Releases](https://github.com/RealWhyKnot/Handoff/releases) and run it from a terminal. There's no installer. It uses the relay at [https://handoff.whyknot.dev/](https://handoff.whyknot.dev/) unless you set `HANDOFF_RELAY` to another one.
+Download `handoff.exe` from [Releases](https://github.com/RealWhyKnot/Handoff/releases) and run it from a terminal. It uses the relay at [https://handoff.whyknot.dev/](https://handoff.whyknot.dev/) unless you set `HANDOFF_RELAY` to another one.
 
 ## Build from source
 
