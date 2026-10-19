@@ -868,8 +868,7 @@ fn search(args: Args, cancel: &tokio_util::sync::CancellationToken, visit_cap: u
 fn fs_stat(args: Args) -> CapResult {
     let path = local_path("fs.stat", &str_arg(&args, "path").unwrap_or_default())?;
 
-    let info =
-        lstat(&path).map_err(|e| read_err("fs.stat", "GetFileAttributesEx", &path, &e))?;
+    let info = lstat(&path).map_err(|e| read_err("fs.stat", "GetFileAttributesEx", &path, &e))?;
     let mut target = String::new();
     if info.symlink {
         if let Ok(dest) = fs::read_link(&path) {

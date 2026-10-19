@@ -17,8 +17,8 @@ pub enum Tone {
 }
 
 pub fn init() -> bool {
-    let on = color_wanted(&util::env_var("NO_COLOR"), std::io::stdout().is_terminal())
-        && enable_vt();
+    let on =
+        color_wanted(&util::env_var("NO_COLOR"), std::io::stdout().is_terminal()) && enable_vt();
     COLOR.store(on, Ordering::SeqCst);
     on
 }

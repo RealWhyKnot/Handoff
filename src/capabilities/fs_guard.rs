@@ -697,7 +697,10 @@ mod tests {
             ("F:\\Apps86.\\Tool\\x.dll", "installed programs need it"),
             ("G:\\Shared Data\\ssh\\sshd_config", "SSH keys"),
             ("C:\\Windows\\Tasks\\evil.job", "installed programs need it"),
-            ("C:\\Windows\\Sysnative\\x.dll", "installed programs need it"),
+            (
+                "C:\\Windows\\Sysnative\\x.dll",
+                "installed programs need it",
+            ),
         ] {
             for deleting in [false, true] {
                 let msg = refusal(&rules, "fs.upload", path, deleting);

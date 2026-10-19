@@ -589,9 +589,8 @@ mod tests {
         }
         let out = guard_write_path("fs.upload", &format!("{short}\\Evil\\x.dll"));
         assert!(
-            out.as_ref().is_err_and(|e| e
-                .message
-                .contains("installed programs need it")),
+            out.as_ref()
+                .is_err_and(|e| e.message.contains("installed programs need it")),
             "{out:?}"
         );
     }
