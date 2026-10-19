@@ -1,0 +1,56 @@
+name: Bug report
+description: A command fails, a session won't start or connect, or the session page misbehaves.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Handoff version
+      description: Run `handoff version` and copy the first line.
+      placeholder: "handoff 2026.10.19.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Press Windows + R, type `winver` and press Enter.
+      placeholder: "Windows 11 26200"
+    validations:
+      required: false
+
+  - type: input
+    id: kind
+    attributes:
+      label: Command
+      description: The command that failed, such as `net.ping`. Write `n/a` if it isn't about one command.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Host console output
+      description: The lines the Handoff console printed around the failure, pasted as they appeared.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Support log
+      description: The end of `%LOCALAPPDATA%\whyknot\handoff\logs\handoff.log`. Remove anything you don't want public.
+      render: text
+    validations:
+      required: false
