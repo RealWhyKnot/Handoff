@@ -8,11 +8,8 @@ Set-Location $RepoRoot
 
 & git config --local core.hooksPath .githooks
 
-$goFiles = & git ls-files '*.go'
-if ($goFiles) {
-    & gofmt -w @goFiles
-    if ($LASTEXITCODE -ne 0) { throw "gofmt failed with exit code $LASTEXITCODE" }
-}
+& cargo fmt
+if ($LASTEXITCODE -ne 0) { throw "cargo fmt failed with exit code $LASTEXITCODE" }
 
 if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
     Import-Module PSScriptAnalyzer

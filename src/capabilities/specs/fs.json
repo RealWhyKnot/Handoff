@@ -1,0 +1,1 @@
+[{"kind":"fs.head"},{"kind":"fs.ls"},{"kind":"fs.read"},{"kind":"fs.search"},{"kind":"fs.stat"},{"kind":"fs.tail"},{"kind":"fs.tree"}]

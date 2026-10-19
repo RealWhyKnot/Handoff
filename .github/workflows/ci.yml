@@ -30,12 +30,22 @@ jobs:
           ./.github/scripts/Test-NightlyBetaPlan.ps1
           ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Install PowerShell analyzer
         shell: pwsh
@@ -45,12 +55,9 @@ jobs:
         shell: pwsh
         run: ./scripts/lint.ps1
 
-      - name: go build (default)
-        run: go build -v ./...
-
       - name: Fetch picotool
         shell: pwsh
         run: ./scripts/fetch-picotool.ps1
 
-      - name: go build (embedded)
-        run: go build -tags embed_picotool -v ./...
+      - name: cargo build (embedded)
+        run: cargo build --release --locked --features embed_picotool

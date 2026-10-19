@@ -1,0 +1,1 @@
+[{"kind":"net.resolve","label":"Resolve name","description":"Look up a hostname's current DNS answer.","params":[{"name":"name","type":"string","required":true,"description":"Hostname to resolve."},{"name":"type","type":"enum","default":"any","enum":["a","aaaa","any"]}]}]

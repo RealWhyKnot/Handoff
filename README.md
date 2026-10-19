@@ -6,7 +6,7 @@ The host doesn't need to open firewall ports or set up a VPN. The view token in 
 
 Risky commands ask the host first: arbitrary PowerShell, deleting files, killing processes, service control, and Pico flash or reset. A yes allows them for the rest of the session and a no blocks them until it ends.
 
-The host console shows every command and its result. Ctrl+C or `q` in that console ends the session.
+The host console lists every command and whether it worked. Ctrl+C or `q` in that console ends the session.
 
 ## Install
 
@@ -17,14 +17,16 @@ Download `handoff.exe` from [Releases](https://github.com/RealWhyKnot/Handoff/re
 ```powershell
 git clone https://github.com/RealWhyKnot/Handoff
 cd Handoff
-go build -o handoff.exe .
+cargo build --release
 ```
+
+The exe ends up at `target/release/handoff.exe`. You need a Rust toolchain; `rust-toolchain.toml` pins the version.
 
 The `pico.*` commands call the `picotool` installed on the host. To build it into the exe instead:
 
 ```powershell
 ./scripts/fetch-picotool.ps1
-go build -tags embed_picotool -o handoff.exe .
+cargo build --release --features embed_picotool
 ```
 
 ## Update

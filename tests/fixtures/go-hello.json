@@ -1,0 +1,682 @@
+{
+ "capabilities": [
+  "app.list",
+  "control.cancel",
+  "defender.status",
+  "drv.list",
+  "evt.providers",
+  "evt.snapshot",
+  "fs.delete",
+  "fs.download",
+  "fs.head",
+  "fs.ls",
+  "fs.mkdir",
+  "fs.read",
+  "fs.search",
+  "fs.stat",
+  "fs.tail",
+  "fs.tree",
+  "fs.upload",
+  "fs.write",
+  "hw.cpu",
+  "hw.disks",
+  "hw.gpu",
+  "hw.ram",
+  "hw.usb",
+  "net.adapters",
+  "net.arp",
+  "net.connections",
+  "net.curl",
+  "net.dns-cache",
+  "net.firewall",
+  "net.listeners",
+  "net.ping",
+  "net.resolve",
+  "net.routes",
+  "net.shares",
+  "net.tcp-test",
+  "net.tls",
+  "net.trace",
+  "net.wlan",
+  "pico.bootsel",
+  "pico.flash",
+  "pico.info",
+  "pico.list",
+  "pico.reset",
+  "pico.save",
+  "pico.verify",
+  "proc.find",
+  "proc.kill",
+  "proc.list",
+  "ps.exec",
+  "reg.query",
+  "sec.local-admins",
+  "startup.list",
+  "storage.volumes",
+  "svc.control",
+  "svc.list",
+  "svc.status",
+  "sys.env",
+  "sys.hotfixes",
+  "sys.info",
+  "sys.reboot-required",
+  "sys.resources",
+  "sys.screenshot",
+  "sys.timezone",
+  "sys.uptime",
+  "sys.users",
+  "task.list",
+  "tunnel.close",
+  "tunnel.open",
+  "update.history"
+ ],
+ "command_specs": [
+  {
+   "kind": "app.list",
+   "label": "Installed apps",
+   "description": "List installed applications.",
+   "params": [
+    {
+     "name": "name_prefix",
+     "type": "string",
+     "description": "Match applications whose name starts with this."
+    },
+    {
+     "name": "limit",
+     "type": "int",
+     "default": 300,
+     "min": 1,
+     "max": 5000,
+     "aliases": [
+      "max_results"
+     ],
+     "description": "Maximum rows to return."
+    }
+   ]
+  },
+  {
+   "kind": "control.cancel",
+   "label": "Cancel command",
+   "description": "Ask the host to stop a running command.",
+   "params": [
+    {
+     "name": "target_id",
+     "type": "string",
+     "required": true,
+     "description": "Id of the command to stop."
+    }
+   ]
+  },
+  {
+   "kind": "defender.status"
+  },
+  {
+   "kind": "drv.list"
+  },
+  {
+   "kind": "evt.providers"
+  },
+  {
+   "kind": "evt.snapshot"
+  },
+  {
+   "kind": "fs.delete"
+  },
+  {
+   "kind": "fs.download"
+  },
+  {
+   "kind": "fs.head"
+  },
+  {
+   "kind": "fs.ls"
+  },
+  {
+   "kind": "fs.mkdir"
+  },
+  {
+   "kind": "fs.read"
+  },
+  {
+   "kind": "fs.search"
+  },
+  {
+   "kind": "fs.stat"
+  },
+  {
+   "kind": "fs.tail"
+  },
+  {
+   "kind": "fs.tree"
+  },
+  {
+   "kind": "fs.upload"
+  },
+  {
+   "kind": "fs.write",
+   "label": "Write text file",
+   "description": "Write or append text to a file on the host.",
+   "risky": true,
+   "params": [
+    {
+     "name": "path",
+     "type": "string",
+     "required": true,
+     "description": "Absolute path to write."
+    },
+    {
+     "name": "content",
+     "type": "string",
+     "required": true,
+     "max_bytes": 1048576
+    },
+    {
+     "name": "encoding",
+     "type": "enum",
+     "default": "utf8",
+     "enum": [
+      "utf8",
+      "utf8bom",
+      "ascii"
+     ]
+    },
+    {
+     "name": "newline",
+     "type": "enum",
+     "default": "crlf",
+     "enum": [
+      "lf",
+      "crlf"
+     ]
+    },
+    {
+     "name": "overwrite",
+     "type": "bool",
+     "default": false
+    },
+    {
+     "name": "append",
+     "type": "bool",
+     "default": false
+    }
+   ]
+  },
+  {
+   "kind": "hw.cpu"
+  },
+  {
+   "kind": "hw.disks"
+  },
+  {
+   "kind": "hw.gpu"
+  },
+  {
+   "kind": "hw.ram"
+  },
+  {
+   "kind": "hw.usb"
+  },
+  {
+   "kind": "net.adapters"
+  },
+  {
+   "kind": "net.arp"
+  },
+  {
+   "kind": "net.connections"
+  },
+  {
+   "kind": "net.curl"
+  },
+  {
+   "kind": "net.dns-cache"
+  },
+  {
+   "kind": "net.firewall"
+  },
+  {
+   "kind": "net.listeners"
+  },
+  {
+   "kind": "net.ping"
+  },
+  {
+   "kind": "net.resolve",
+   "label": "Resolve name",
+   "description": "Look up a hostname's current DNS answer.",
+   "params": [
+    {
+     "name": "name",
+     "type": "string",
+     "required": true,
+     "description": "Hostname to resolve."
+    },
+    {
+     "name": "type",
+     "type": "enum",
+     "default": "any",
+     "enum": [
+      "a",
+      "aaaa",
+      "any"
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "net.routes"
+  },
+  {
+   "kind": "net.shares"
+  },
+  {
+   "kind": "net.tcp-test"
+  },
+  {
+   "kind": "net.tls"
+  },
+  {
+   "kind": "net.trace"
+  },
+  {
+   "kind": "net.wlan"
+  },
+  {
+   "kind": "pico.bootsel",
+   "label": "Reboot to BOOTSEL",
+   "description": "Reboot an attached Pico into BOOTSEL mode.",
+   "risky": true,
+   "params": [
+    {
+     "name": "serial",
+     "type": "string",
+     "description": "Target a specific board when more than one is attached."
+    },
+    {
+     "name": "cpu",
+     "type": "enum",
+     "enum": [
+      "arm",
+      "riscv"
+     ],
+     "description": "RP2350 architecture."
+    },
+    {
+     "name": "partition",
+     "type": "string",
+     "description": "RP2350 partition to target."
+    }
+   ]
+  },
+  {
+   "kind": "pico.flash",
+   "label": "Flash UF2",
+   "description": "Write a UF2 image to an attached Pico.",
+   "risky": true,
+   "params": [
+    {
+     "name": "uf2_path",
+     "type": "string",
+     "required": true,
+     "description": "Path to the UF2 file on the host."
+    },
+    {
+     "name": "family",
+     "type": "enum",
+     "enum": [
+      "rp2040",
+      "rp2350-arm-s",
+      "rp2350-arm-ns",
+      "rp2350-riscv",
+      "absolute",
+      "data"
+     ]
+    },
+    {
+     "name": "serial",
+     "type": "string",
+     "description": "Target a specific board when more than one is attached."
+    }
+   ]
+  },
+  {
+   "kind": "pico.info",
+   "label": "Pico info",
+   "description": "Read details from an attached Pico.",
+   "params": [
+    {
+     "name": "serial",
+     "type": "string",
+     "description": "Target a specific board when more than one is attached."
+    }
+   ]
+  },
+  {
+   "kind": "pico.list",
+   "label": "List Pico devices",
+   "description": "List attached Raspberry Pi Pico boards."
+  },
+  {
+   "kind": "pico.reset",
+   "label": "Reset Pico",
+   "description": "Reboot an attached Pico normally.",
+   "risky": true,
+   "params": [
+    {
+     "name": "serial",
+     "type": "string",
+     "description": "Target a specific board when more than one is attached."
+    },
+    {
+     "name": "cpu",
+     "type": "enum",
+     "enum": [
+      "arm",
+      "riscv"
+     ],
+     "description": "RP2350 architecture."
+    },
+    {
+     "name": "partition",
+     "type": "string",
+     "description": "RP2350 partition to target."
+    }
+   ]
+  },
+  {
+   "kind": "pico.save",
+   "label": "Save flash",
+   "description": "Save Pico flash to a host file.",
+   "risky": true,
+   "params": [
+    {
+     "name": "out_path",
+     "type": "string",
+     "required": true
+    },
+    {
+     "name": "serial",
+     "type": "string",
+     "description": "Target a specific board when more than one is attached."
+    }
+   ]
+  },
+  {
+   "kind": "pico.verify",
+   "label": "Verify flash",
+   "description": "Compare a file against the flash contents.",
+   "params": [
+    {
+     "name": "file_path",
+     "type": "string",
+     "required": true
+    },
+    {
+     "name": "family",
+     "type": "enum",
+     "enum": [
+      "rp2040",
+      "rp2350-arm-s",
+      "rp2350-arm-ns",
+      "rp2350-riscv",
+      "absolute",
+      "data"
+     ]
+    },
+    {
+     "name": "serial",
+     "type": "string",
+     "description": "Target a specific board when more than one is attached."
+    }
+   ]
+  },
+  {
+   "kind": "proc.find",
+   "label": "Find process",
+   "description": "Find processes whose name or path matches a query.",
+   "params": [
+    {
+     "name": "query",
+     "type": "string",
+     "required": true,
+     "max_bytes": 128
+    },
+    {
+     "name": "limit",
+     "type": "int",
+     "default": 100,
+     "min": 1,
+     "max": 500,
+     "aliases": [
+      "max_results"
+     ],
+     "description": "Maximum rows to return."
+    }
+   ]
+  },
+  {
+   "kind": "proc.kill",
+   "label": "Stop process",
+   "description": "Terminate a process by id.",
+   "risky": true,
+   "params": [
+    {
+     "name": "pid",
+     "type": "int",
+     "required": true,
+     "min": 1,
+     "description": "Process id to terminate."
+    }
+   ]
+  },
+  {
+   "kind": "proc.list",
+   "label": "Processes",
+   "description": "List running processes."
+  },
+  {
+   "kind": "ps.exec",
+   "label": "Run script",
+   "description": "Run arbitrary PowerShell on the host.",
+   "risky": true,
+   "params": [
+    {
+     "name": "script",
+     "type": "string",
+     "required": true,
+     "max_bytes": 65536,
+     "description": "PowerShell 5.1 script to run as the current user."
+    }
+   ]
+  },
+  {
+   "kind": "reg.query"
+  },
+  {
+   "kind": "sec.local-admins"
+  },
+  {
+   "kind": "startup.list",
+   "label": "Startup items",
+   "description": "List programs configured to run at sign-in.",
+   "params": [
+    {
+     "name": "limit",
+     "type": "int",
+     "default": 300,
+     "min": 1,
+     "max": 2000,
+     "aliases": [
+      "max_results"
+     ],
+     "description": "Maximum rows to return."
+    }
+   ]
+  },
+  {
+   "kind": "storage.volumes",
+   "label": "Volumes",
+   "description": "List drives and their free space.",
+   "params": [
+    {
+     "name": "drive_letter",
+     "type": "string",
+     "description": "Limit to one drive, for example C."
+    }
+   ]
+  },
+  {
+   "kind": "svc.control",
+   "label": "Control service",
+   "description": "Start, stop, or restart a Windows service.",
+   "risky": true,
+   "params": [
+    {
+     "name": "name",
+     "type": "string",
+     "required": true
+    },
+    {
+     "name": "action",
+     "type": "enum",
+     "required": true,
+     "enum": [
+      "start",
+      "stop",
+      "restart"
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "svc.list",
+   "label": "Services",
+   "description": "List Windows services."
+  },
+  {
+   "kind": "svc.status",
+   "label": "Service status",
+   "description": "Look up one Windows service.",
+   "params": [
+    {
+     "name": "name",
+     "type": "string",
+     "required": true,
+     "description": "Service name, for example Spooler."
+    }
+   ]
+  },
+  {
+   "kind": "sys.env"
+  },
+  {
+   "kind": "sys.hotfixes"
+  },
+  {
+   "kind": "sys.info"
+  },
+  {
+   "kind": "sys.reboot-required"
+  },
+  {
+   "kind": "sys.resources"
+  },
+  {
+   "kind": "sys.screenshot",
+   "label": "Screenshot",
+   "description": "Capture the host's screen.",
+   "risky": true,
+   "params": [
+    {
+     "name": "display",
+     "type": "int",
+     "default": 0,
+     "min": -1,
+     "max": 16,
+     "description": "0 for the primary screen, -1 for all screens together."
+    },
+    {
+     "name": "format",
+     "type": "enum",
+     "default": "jpeg",
+     "enum": [
+      "jpeg",
+      "png"
+     ]
+    },
+    {
+     "name": "quality",
+     "type": "int",
+     "default": 70,
+     "min": 1,
+     "max": 100,
+     "description": "JPEG quality; ignored for PNG."
+    },
+    {
+     "name": "max_width",
+     "type": "int",
+     "default": 1600,
+     "min": 320,
+     "max": 3840,
+     "description": "Scale the capture down to at most this width."
+    }
+   ]
+  },
+  {
+   "kind": "sys.timezone"
+  },
+  {
+   "kind": "sys.uptime"
+  },
+  {
+   "kind": "sys.users"
+  },
+  {
+   "kind": "task.list",
+   "label": "Scheduled tasks",
+   "description": "List Windows scheduled tasks.",
+   "params": [
+    {
+     "name": "path_prefix",
+     "type": "string",
+     "description": "Match tasks whose path starts with this."
+    },
+    {
+     "name": "state",
+     "type": "enum",
+     "default": "all",
+     "enum": [
+      "all",
+      "ready",
+      "running",
+      "disabled",
+      "queued",
+      "unknown"
+     ]
+    },
+    {
+     "name": "limit",
+     "type": "int",
+     "default": 300,
+     "min": 1,
+     "max": 2000,
+     "aliases": [
+      "max_results"
+     ],
+     "description": "Maximum rows to return."
+    }
+   ]
+  },
+  {
+   "kind": "tunnel.close"
+  },
+  {
+   "kind": "tunnel.open"
+  },
+  {
+   "kind": "update.history"
+  }
+ ],
+ "os": "windows",
+ "protocol_version": 2
+}

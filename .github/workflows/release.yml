@@ -37,12 +37,10 @@ jobs:
           ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
           ./.github/scripts/Test-NewReleaseNotes.ps1
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
+          toolchain: "1.99.1"
 
       - name: Resolve version from tag
         id: ver
@@ -64,12 +62,11 @@ jobs:
       - name: Build with embedded picotool
         shell: pwsh
         env:
-          GOOS: windows
-          GOARCH: amd64
-          CGO_ENABLED: '0'
           HANDOFF_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          go build -trimpath -ldflags="-s -w -X main.version=$env:HANDOFF_VERSION" -tags embed_picotool -o handoff.exe .
+          cargo build --release --locked --features embed_picotool
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+          Copy-Item target/release/handoff.exe handoff.exe
           ./handoff.exe version
 
       - name: Write release manifest

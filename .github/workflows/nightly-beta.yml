@@ -23,4 +23,4 @@ jobs:
         ./.github/scripts/Test-NightlyBetaPlan.ps1
         ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
       ignore-paths: |
-        **/*_test.go
+        tests/**

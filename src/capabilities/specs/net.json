@@ -1,0 +1,1 @@
+[{"kind":"net.adapters"},{"kind":"net.arp"},{"kind":"net.connections"},{"kind":"net.dns-cache"},{"kind":"net.firewall"},{"kind":"net.listeners"},{"kind":"net.routes"},{"kind":"net.tls"},{"kind":"net.wlan"}]

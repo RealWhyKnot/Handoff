@@ -34,16 +34,6 @@ if ($psFiles) {
     }
 }
 
-$goFiles = & git ls-files '*.go'
-if ($goFiles) {
-    Write-Host '== gofmt check'
-    $unformatted = & gofmt -l @goFiles
-    if ($LASTEXITCODE -ne 0) { throw "gofmt failed with exit code $LASTEXITCODE" }
-    if ($unformatted) {
-        $unformatted | ForEach-Object { Write-Host "  $_" }
-        throw 'Go files need gofmt.'
-    }
-}
-
-Invoke-Native 'go vet' { go vet ./... }
-Invoke-Native 'go test' { go test ./... }
+Invoke-Native 'cargo fmt' { cargo fmt --check }
+Invoke-Native 'cargo clippy' { cargo clippy --all-targets --locked -- -D warnings }
+Invoke-Native 'cargo test' { cargo test --locked }

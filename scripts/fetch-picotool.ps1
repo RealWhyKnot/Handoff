@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Downloads picotool.exe into internal/picotool/binaries/ so a tagged
-# build (`go build -tags embed_picotool`) can embed it. Default builds
-# don't need this -- they fall back to the host PATH.
+# Downloads picotool.exe into assets/picotool/ so a
+# `cargo build --features embed_picotool` build can embed it. Default builds
+# don't need this; they fall back to the host PATH.
 #
 # Resolution order:
 #   1. -AssetUrl <url>   -- direct download URL (skips API lookup).
@@ -21,7 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$binariesDir = Join-Path $repoRoot 'internal\picotool\binaries'
+$binariesDir = Join-Path $repoRoot 'assets\picotool'
 $outExe = Join-Path $binariesDir 'picotool.exe'
 
 if ((Test-Path -LiteralPath $outExe) -and (-not $Force)) {

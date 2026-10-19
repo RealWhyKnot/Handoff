@@ -1,27 +1,20 @@
-# Go build output
+# Build output
+/target/
 *.exe
 *.exe~
 *.dll
-*.so
-*.dylib
-*.test
-*.out
-
-# Go module cache / vendor
-vendor/
+*.pdb
 
 # JSONL audit logs that handoff writes at runtime under
-# %PROGRAMDATA%\whyknot\handoff\audit\. Never committed to the repo;
-# the literal-anchor /audit/ matches the root only and leaves
-# internal/audit/ (the source package) alone.
+# %PROGRAMDATA%\whyknot\handoff\audit\. Never committed to the repo.
 /audit/
 
 # Temp unpacked tools
 .handoff-bin/
 
 # Bundled picotool binary downloaded by scripts/fetch-picotool.ps1.
-# Embedded only into -tags embed_picotool builds; default builds use PATH.
-internal/picotool/binaries/picotool.exe
+# Embedded only into --features embed_picotool builds; default builds use PATH.
+assets/picotool/picotool.exe
 version.txt
 
 # Log files

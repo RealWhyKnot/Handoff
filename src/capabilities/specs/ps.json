@@ -1,0 +1,1 @@
+[{"kind":"ps.exec","label":"Run script","description":"Run arbitrary PowerShell on the host.","risky":true,"params":[{"name":"script","type":"string","required":true,"max_bytes":65536,"description":"PowerShell 5.1 script to run as the current user."}]}]
