@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value};
 
 use crate::capabilities::pwsh::normalize_numbers;
+use crate::console;
 use crate::dispatch::Outcome;
 use crate::util;
 
@@ -107,41 +108,60 @@ fn summary_value(value: &Value) -> String {
     s
 }
 
+const NAME_KEYS: [&str; 8] = [
+    "Name", "name", "Caption", "Model", "Product", "hostname", "title", "path",
+];
+
+fn cut(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.len() > MAX_SUMMARY_VALUE {
+        return format!("{}...", truncate_bytes(&text, MAX_SUMMARY_VALUE));
+    }
+    text
+}
+
+fn items(n: usize) -> String {
+    console::plural(n, "item", "items")
+}
+
 pub fn summarize_result(out: &Outcome) -> String {
     if !out.ok {
-        let msg = out.error.replace('\n', " ");
-        if msg.len() > MAX_SUMMARY_VALUE {
-            return format!("{}...", truncate_bytes(&msg, MAX_SUMMARY_VALUE));
-        }
-        return msg;
+        return cut(&console::plain_error(&out.error));
     }
 
     match &out.result {
         Value::Object(res) => {
             if let Some(code) = res.get("exit_code") {
-                let stdout_len = res
+                let printed = res
                     .get("stdout")
                     .and_then(Value::as_str)
                     .map(str::len)
                     .unwrap_or(0);
                 return format!(
-                    "exit={} stdout={} bytes",
+                    "Exit code {}, {} of output",
                     util::go_value_string(code),
-                    stdout_len
+                    console::human_bytes(printed as u64)
                 );
             }
-            if let Some(n) = res.get("count") {
-                return format!("{} row(s)", util::go_value_string(n));
+            if let Some(n) = res.get("count").and_then(Value::as_u64) {
+                return items(n as usize);
             }
-            if let Some(size) = res.get("size") {
-                return format!("{} bytes", util::go_value_string(size));
+            if let Some(size) = res.get("size").and_then(Value::as_u64) {
+                return console::human_bytes(size);
             }
             if let Some(Value::Array(entries)) = res.get("entries") {
-                return format!("{} row(s)", entries.len());
+                return items(entries.len());
+            }
+            for key in NAME_KEYS {
+                if let Some(Value::String(name)) = res.get(key) {
+                    if !name.trim().is_empty() {
+                        return cut(name);
+                    }
+                }
             }
             String::new()
         }
-        Value::Array(items) => format!("{} row(s)", items.len()),
+        Value::Array(list) => items(list.len()),
         _ => String::new(),
     }
 }
@@ -228,24 +248,36 @@ mod tests {
     fn results_are_described_by_shape() {
         assert_eq!(
             summarize_result(&ok(json!({"exit_code": 0, "stdout": "hello"}))),
-            "exit=0 stdout=5 bytes"
+            "Exit code 0, 5 bytes of output"
         );
-        assert_eq!(summarize_result(&ok(json!({"count": 3}))), "3 row(s)");
-        assert_eq!(summarize_result(&ok(json!({"size": 2048}))), "2048 bytes");
-        assert_eq!(
-            summarize_result(&ok(json!({"entries": [1, 2]}))),
-            "2 row(s)"
-        );
-        assert_eq!(summarize_result(&ok(json!([1, 2, 3]))), "3 row(s)");
+        assert_eq!(summarize_result(&ok(json!({"count": 3}))), "3 items");
+        assert_eq!(summarize_result(&ok(json!({"count": 1}))), "1 item");
+        assert_eq!(summarize_result(&ok(json!({"size": 2048}))), "2.0 KB");
+        assert_eq!(summarize_result(&ok(json!({"entries": [1, 2]}))), "2 items");
+        assert_eq!(summarize_result(&ok(json!([1, 2, 3]))), "3 items");
         assert_eq!(summarize_result(&ok(json!({"other": 1}))), "");
         assert_eq!(summarize_result(&ok(json!("text"))), "");
+    }
+
+    #[test]
+    fn a_name_field_is_shown_when_nothing_else_fits() {
+        assert_eq!(
+            summarize_result(&ok(json!({
+                "Manufacturer": "AuthenticAMD",
+                "Name": "AMD Ryzen 7 5800X3D 8-Core Processor           ",
+                "NumberOfCores": 8
+            }))),
+            "AMD Ryzen 7 5800X3D 8-Core Processor"
+        );
     }
 
     #[test]
     fn failures_report_the_error_on_one_line() {
         let out = Outcome {
             ok: false,
-            error: "line one\nline two".into(),
+            error: "line one
+line two"
+                .into(),
             ..Outcome::default()
         };
         assert_eq!(summarize_result(&out), "line one line two");
@@ -255,5 +287,11 @@ mod tests {
             ..Outcome::default()
         };
         assert_eq!(summarize_result(&out), format!("{}...", "e".repeat(120)));
+        let out = Outcome {
+            ok: false,
+            error: "Post x: context deadline exceeded".into(),
+            ..Outcome::default()
+        };
+        assert_eq!(summarize_result(&out), "Post x: it took too long");
     }
 }

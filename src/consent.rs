@@ -7,8 +7,13 @@ use futures_util::future::BoxFuture;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use crate::dispatch::for_display;
+
 pub const EXEC_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
+pub const FILES_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 pub const DENY_BACKOFF: Duration = Duration::from_secs(60);
+pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+const PROMPT_CLOSE_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Category {
@@ -88,6 +93,7 @@ impl Decision {
 pub enum ConsentError {
     Denied,
     Cancelled,
+    TimedOut,
     Other(String),
 }
 
@@ -95,7 +101,12 @@ impl fmt::Display for ConsentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConsentError::Denied => f.write_str("the host declined this request"),
-            ConsentError::Cancelled => f.write_str("context canceled"),
+            ConsentError::Cancelled => {
+                f.write_str("the request was cancelled before anyone answered")
+            }
+            ConsentError::TimedOut => {
+                f.write_str("nobody answered the permission question in time")
+            }
             ConsentError::Other(s) => f.write_str(s),
         }
     }
@@ -125,6 +136,40 @@ pub type Prompt = Arc<
         + Send
         + Sync,
 >;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    Asking,
+    Allowed,
+    Denied,
+    TimedOut,
+    Withdrawn,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub request: Request,
+    pub step: Step,
+}
+
+pub type Observer = Arc<dyn Fn(&Event) + Send + Sync>;
+
+static OBSERVER: Mutex<Option<Observer>> = Mutex::new(None);
+
+pub fn set_observer(observer: Option<Observer>) {
+    *OBSERVER.lock().unwrap_or_else(|e| e.into_inner()) = observer;
+}
+
+fn tell(request: &Request, step: Step) {
+    let observer = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(observer) = observer {
+        observer(&Event {
+            request: request.clone(),
+            step,
+        });
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Grant {
@@ -184,6 +229,7 @@ impl State {
 
 pub struct Ledger {
     prompt: Prompt,
+    timeout: Duration,
     state: Mutex<State>,
     notify: Notify,
 }
@@ -209,10 +255,38 @@ type Gate = (Decision, Result<(), ConsentError>);
 
 impl Ledger {
     pub fn new(prompt: Prompt) -> Ledger {
+        Ledger::with_timeout(prompt, PROMPT_TIMEOUT)
+    }
+
+    pub fn with_timeout(prompt: Prompt, timeout: Duration) -> Ledger {
         Ledger {
             prompt,
+            timeout,
             state: Mutex::new(State::default()),
             notify: Notify::new(),
+        }
+    }
+
+    pub fn prompt_timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    async fn ask(&self, cancel: &CancellationToken, req: &Request) -> Result<bool, ConsentError> {
+        let ask_cancel = cancel.child_token();
+        let prompt = (self.prompt)(ask_cancel.clone(), req.clone());
+        tokio::pin!(prompt);
+        tokio::select! {
+            answer = &mut prompt => answer,
+            _ = tokio::time::sleep(self.timeout) => {
+                ask_cancel.cancel();
+                let _ = tokio::time::timeout(PROMPT_CLOSE_WAIT, &mut prompt).await;
+                Err(ConsentError::TimedOut)
+            }
+            _ = cancel.cancelled() => {
+                ask_cancel.cancel();
+                let _ = tokio::time::timeout(PROMPT_CLOSE_WAIT, &mut prompt).await;
+                Err(ConsentError::Cancelled)
+            }
         }
     }
 
@@ -297,7 +371,19 @@ impl Ledger {
                 category,
                 armed: true,
             };
-            let answer = (self.prompt)(cancel.clone(), req.clone()).await;
+            tell(&req, Step::Asking);
+            let answer = self.ask(cancel, &req).await;
+            tell(
+                &req,
+                match &answer {
+                    Ok(true) => Step::Allowed,
+                    Ok(false) => Step::Denied,
+                    Err(ConsentError::TimedOut) => Step::TimedOut,
+                    Err(ConsentError::Cancelled) => Step::Withdrawn,
+                    Err(ConsentError::Denied) => Step::Denied,
+                    Err(ConsentError::Other(msg)) => Step::Failed(msg.clone()),
+                },
+            );
             {
                 let mut st = self.lock();
                 st.asking.remove(&category);
@@ -347,9 +433,27 @@ impl Ledger {
     }
 }
 
+pub fn grant_ttl(category: Category) -> Option<Duration> {
+    match category {
+        Category::Exec => Some(EXEC_GRANT_TTL),
+        Category::Files => Some(FILES_GRANT_TTL),
+        Category::Power => Some(Duration::ZERO),
+        _ => None,
+    }
+}
+
+pub fn scope_text(category: Option<Category>) -> String {
+    match category.and_then(grant_ttl) {
+        Some(ttl) if ttl.is_zero() => "this one time".to_string(),
+        Some(ttl) => format!("for the next {} minutes", ttl.as_secs() / 60),
+        None => "until this session ends".to_string(),
+    }
+}
+
 fn new_grant(category: Category, now: Instant) -> Grant {
     let expires_at = match category {
         Category::Exec => Some(now + EXEC_GRANT_TTL),
+        Category::Files => Some(now + FILES_GRANT_TTL),
         Category::Power => Some(now),
         _ => None,
     };
@@ -360,30 +464,33 @@ fn new_grant(category: Category, now: Instant) -> Grant {
     }
 }
 
+const SUMMARY_CHARS: usize = 2000;
+const SUMMARY_LINES: usize = 40;
+
 pub fn prompt_text(req: &Request) -> String {
-    let summary = req.summary.trim();
-    let summary = if summary.is_empty() {
-        "Run a command that can change this computer."
+    let shown = for_display(&req.summary, SUMMARY_CHARS, SUMMARY_LINES);
+    let mut summary = if shown.text.trim().is_empty() {
+        "Run a command that can change this computer.".to_string()
     } else {
-        summary
+        shown.text.trim().to_string()
     };
+    if shown.cut {
+        summary.push_str("\n(The rest is too long to show here.)");
+    }
     let granted = req
         .category
         .map(Category::label)
         .unwrap_or("run this kind of command");
-
-    let scope = match req.category {
-        Some(Category::Exec) => format!("for the next {} minutes", EXEC_GRANT_TTL.as_secs() / 60),
-        Some(Category::Power) => "this one time".to_string(),
-        _ => "for the rest of this session".to_string(),
-    };
+    let scope = scope_text(req.category);
+    let minutes = PROMPT_TIMEOUT.as_secs() / 60;
 
     format!(
-        "Your helper is asking for permission to do something on this computer.\n\n\
-         What they asked for now:\n{summary}\n\n\
-         Choosing Yes lets the person with your view link {scope}:\n  - {granted}\n\n\
-         This does not give them anything else. They will have to ask again for a different kind of change.\n\n\
-         Only choose Yes if you trust this person and asked them for help."
+        "The person helping you wants to make a change on this computer.\n\n\
+         They asked to:\n{summary}\n\n\
+         If you choose Yes, they can {granted} {scope}. \
+         For any other kind of change they have to ask you again.\n\n\
+         Choose Yes only if you know this person and asked them for help. \
+         If you don't answer within {minutes} minutes, Handoff answers No for you."
     )
 }
 
@@ -392,18 +499,44 @@ pub fn system_prompt() -> Prompt {
 }
 
 #[cfg(windows)]
+fn close_prompt_windows(thread_id: u32) {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumThreadWindows, PostMessageW, IDNO, WM_COMMAND,
+    };
+
+    unsafe extern "system" fn press_no(hwnd: HWND, _: LPARAM) -> BOOL {
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0)) };
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumThreadWindows(thread_id, Some(press_no), LPARAM(0));
+    }
+}
+
+#[cfg(windows)]
 async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<bool, ConsentError> {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use windows::core::HSTRING;
     use windows::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
     };
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
 
     if cancel.is_cancelled() {
         return Err(ConsentError::Cancelled);
     }
     let text = HSTRING::from(prompt_text(&req));
     let title = HSTRING::from("Allow this Handoff request?");
-    tokio::task::spawn_blocking(move || {
+    let thread = Arc::new(AtomicU32::new(0));
+    let seen = thread.clone();
+    let mut task = tokio::task::spawn_blocking(move || {
+        seen.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
         let ret = unsafe {
             MessageBoxW(
                 None,
@@ -419,9 +552,32 @@ async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<b
             )));
         }
         Ok(ret == IDYES)
-    })
-    .await
-    .map_err(|e| ConsentError::Other(format!("consent prompt failed: {e}")))?
+    });
+    tokio::select! {
+        joined = &mut task => {
+            joined.map_err(|e| ConsentError::Other(format!("consent prompt failed: {e}")))?
+        }
+        _ = cancel.cancelled() => {
+            let deadline = Instant::now() + PROMPT_CLOSE_WAIT;
+            let mut closed = false;
+            loop {
+                let id = thread.load(Ordering::SeqCst);
+                if id != 0 {
+                    close_prompt_windows(id);
+                }
+                match tokio::time::timeout(Duration::from_millis(100), &mut task).await {
+                    Ok(_) => {
+                        closed = true;
+                        break;
+                    }
+                    Err(_) if Instant::now() >= deadline => break,
+                    Err(_) => {}
+                }
+            }
+            crate::slog!("consent prompt withdrawn kind={} closed={closed}", req.kind);
+            Err(ConsentError::Cancelled)
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -430,20 +586,22 @@ async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<b
         return Err(ConsentError::Cancelled);
     }
     eprintln!("{}", prompt_text(&req));
-    eprint!("Allow? [y/N]: ");
-    tokio::task::spawn_blocking(|| {
+    eprint!("Type y and press Enter to allow it. Press Enter on its own to say no: ");
+    let read = tokio::task::spawn_blocking(|| {
         let mut line = String::new();
         match std::io::stdin().read_line(&mut line) {
-            Ok(0) => Err(ConsentError::Other("EOF".into())),
+            Ok(0) => Err(ConsentError::Other("no answer could be read".into())),
             Ok(_) => {
                 let line = line.trim().to_lowercase();
                 Ok(line == "y" || line == "yes")
             }
             Err(e) => Err(ConsentError::Other(e.to_string())),
         }
-    })
-    .await
-    .map_err(|e| ConsentError::Other(e.to_string()))?
+    });
+    tokio::select! {
+        joined = read => joined.map_err(|e| ConsentError::Other(e.to_string()))?,
+        _ = cancel.cancelled() => Err(ConsentError::Cancelled),
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +812,33 @@ mod tests {
     }
 
     #[test]
+    fn prompt_text_strips_hidden_characters_from_any_summary() {
+        let text = prompt_text(&Request {
+            kind: "svc.control".into(),
+            category: Some(Category::Services),
+            summary: "Stop \u{202E}exe.ssecorp\u{202C} spooler\u{200B}\u{7}".into(),
+        });
+        assert!(text.contains("Stop exe.ssecorp spooler"), "{text}");
+        for c in ['\u{202E}', '\u{202C}', '\u{200B}', '\u{7}'] {
+            assert!(!text.contains(c));
+        }
+
+        let text = prompt_text(&Request {
+            kind: "svc.control".into(),
+            category: Some(Category::Services),
+            summary: "\u{200B}\u{202E}".into(),
+        });
+        assert!(text.contains("Run a command that can change this computer."));
+
+        let text = prompt_text(&Request {
+            kind: "svc.control".into(),
+            category: Some(Category::Services),
+            summary: "x\n".repeat(80),
+        });
+        assert!(text.contains("(The rest is too long to show here.)"));
+    }
+
+    #[test]
     fn prompt_text_names_the_scope_and_what_is_granted() {
         let text = prompt_text(&Request {
             kind: "ps.exec".into(),
@@ -671,5 +856,128 @@ mod tests {
         });
         assert!(text.contains("this one time"));
         assert!(text.contains("Run a command that can change this computer."));
+        assert!(text.contains("within 2 minutes"));
+
+        let text = prompt_text(&Request {
+            kind: "fs.delete".into(),
+            category: Some(Category::Files),
+            summary: "Delete C:\\x".into(),
+        });
+        assert!(text.contains("read, add, change, and delete your files for the next 15 minutes"));
+
+        let text = prompt_text(&Request {
+            kind: "tunnel.open".into(),
+            category: Some(Category::Network),
+            summary: String::new(),
+        });
+        assert!(text.contains("until this session ends"));
+    }
+
+    #[tokio::test]
+    async fn files_grant_expires_after_fifteen_minutes() {
+        let (p, calls) = counting(true, 0);
+        let l = Ledger::new(p);
+        assert_eq!(
+            l.require(&tok(), req("fs.delete")).await.0,
+            Decision::PromptAllow
+        );
+        l.advance(FILES_GRANT_TTL - Duration::from_secs(60));
+        assert_eq!(
+            l.require(&tok(), req("fs.mkdir")).await.0,
+            Decision::GrantCached
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(l.grants().iter().all(|g| g.expires()));
+
+        l.advance(Duration::from_secs(120));
+        assert!(l.grants().is_empty());
+        assert_eq!(
+            l.require(&tok(), req("fs.upload")).await.0,
+            Decision::PromptAllow
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    fn waits_for_cancel() -> (Prompt, Arc<AtomicUsize>) {
+        let closed = Arc::new(AtomicUsize::new(0));
+        let c = closed.clone();
+        let prompt: Prompt = Arc::new(move |cancel: CancellationToken, _| {
+            let c = c.clone();
+            Box::pin(async move {
+                cancel.cancelled().await;
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(ConsentError::Cancelled)
+            })
+        });
+        (prompt, closed)
+    }
+
+    #[tokio::test]
+    async fn unanswered_prompt_is_closed_and_refused_after_the_timeout() {
+        let (p, closed) = waits_for_cancel();
+        let l = Ledger::with_timeout(p, Duration::from_millis(50));
+        let (decision, res) = within(l.require(&tok(), req("ps.exec"))).await;
+        assert_eq!(decision, Decision::PromptDeny);
+        assert_eq!(res, Err(ConsentError::TimedOut));
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+        assert!(!l.lock().denied.contains_key(&Category::Exec));
+        assert!(!l.lock().asking.contains(&Category::Exec));
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_command_closes_the_prompt() {
+        let (p, closed) = waits_for_cancel();
+        let l = Arc::new(Ledger::new(p));
+        let cancel = tok();
+        let l2 = l.clone();
+        let c2 = cancel.clone();
+        let task = tokio::spawn(async move { l2.require(&c2, req("fs.delete")).await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel.cancel();
+        let (decision, res) = within(task).await.unwrap();
+        assert_eq!(decision, Decision::PromptDeny);
+        assert_eq!(res, Err(ConsentError::Cancelled));
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+        assert!(!l.lock().asking.contains(&Category::Files));
+    }
+
+    #[tokio::test]
+    async fn prompt_that_ignores_cancel_does_not_hang_the_command() {
+        let (slow, _) = counting(true, 60_000);
+        let l = Ledger::new(slow);
+        let cancel = tok();
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            c2.cancel();
+        });
+        let started = Instant::now();
+        let (_, res) = l.require(&cancel, req("ps.exec")).await;
+        assert_eq!(res, Err(ConsentError::Cancelled));
+        assert!(started.elapsed() < PROMPT_CLOSE_WAIT + Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn observer_hears_the_question_and_the_answer() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        set_observer(Some(Arc::new(move |e: &Event| {
+            if e.request.summary == "observer-test" {
+                s2.lock().unwrap().push(e.step.clone());
+            }
+        })));
+        let (p, _) = counting(false, 0);
+        let l = Ledger::new(p);
+        let _ = l
+            .require(&tok(), Request::for_kind("proc.kill", "observer-test"))
+            .await;
+        set_observer(None);
+        assert_eq!(*seen.lock().unwrap(), vec![Step::Asking, Step::Denied]);
+    }
+
+    async fn within<F: std::future::Future>(f: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), f)
+            .await
+            .expect("timed out")
     }
 }

@@ -3,15 +3,43 @@ use serde_json::Value;
 use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router, Spec};
 
 use super::consent::require_risk_consent;
-use super::pwsh::{json_script_handler, ps_single_quote, run_pwsh_json};
+use super::pwsh::ps_single_quote;
+use super::pwsh_out::run_pwsh_json;
 
-const LIST: &str = r##"
-$procs = Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,CommandLine,@{n='WorkingSetMB';e={[math]::Round($_.WorkingSetSize/1MB,1)}},CreationDate
-$procs | ConvertTo-Json -Compress -Depth 4
+const LIST_TEMPLATE: &str = r##"
+$name = @@NAME@@
+$procs = Get-CimInstance Win32_Process
+if ($name) {
+    $pattern = '*' + [WildcardPattern]::Escape($name) + '*'
+    $procs = $procs | Where-Object { $_.Name -like $pattern }
+}
+$procs = $procs | Select-Object ProcessId,Name,@@COLUMNS@@@{n='WorkingSetMB';e={[math]::Round($_.WorkingSetSize/1MB,1)}},CreationDate
+$procs = switch (@@SORT@@) {
+    'memory' { $procs | Sort-Object WorkingSetMB -Descending }
+    'pid' { $procs | Sort-Object ProcessId }
+    'newest' { $procs | Sort-Object CreationDate -Descending }
+    default { $procs | Sort-Object Name, ProcessId }
+}
+ConvertTo-Json -InputObject @($procs | Select-Object -First @@LIMIT@@) -Compress -Depth 4
 "##;
 
-const SVC_LIST: &str =
-    r##"Get-Service | Select-Object Name,DisplayName,Status,StartType | ConvertTo-Json -Compress"##;
+const SVC_LIST_TEMPLATE: &str = r##"
+$name = @@NAME@@
+$state = @@STATE@@
+$startType = @@START_TYPE@@
+$svc = Get-Service
+if ($name) {
+    $pattern = '*' + [WildcardPattern]::Escape($name) + '*'
+    $svc = $svc | Where-Object { $_.Name -like $pattern -or $_.DisplayName -like $pattern }
+}
+if ($state -ne 'all') {
+    $svc = $svc | Where-Object { [string]$_.Status -eq $state }
+}
+if ($startType -ne 'all') {
+    $svc = $svc | Where-Object { [string]$_.StartType -eq $startType }
+}
+ConvertTo-Json -InputObject @($svc | Select-Object Name,DisplayName,@{n='Status';e={[string]$_.Status}},@{n='StartType';e={[string]$_.StartType}}) -Compress
+"##;
 
 const KILL_TEMPLATE: &str = r##"
 $targetPid = @@PID@@
@@ -56,20 +84,33 @@ $after = Get-Service -Name $name -ErrorAction Stop
 "##;
 
 const STATUS_TEMPLATE: &str = r##"
-$name = @@NAME@@
-$svc = Get-Service -Name $name -ErrorAction Stop
-$cim = Get-CimInstance Win32_Service -Filter ("Name='" + $svc.Name.Replace("'","''") + "'") -ErrorAction SilentlyContinue
-[ordered]@{
-    name         = [string]$svc.Name
-    display_name = [string]$svc.DisplayName
-    status       = [string]$svc.Status
-    start_type   = [string]$svc.StartType
-    can_stop     = [bool]$svc.CanStop
-    start_name   = if ($cim) { [string]$cim.StartName } else { $null }
-    path         = if ($cim) { [string]$cim.PathName } else { $null }
-    process_id   = if ($cim) { [int]$cim.ProcessId } else { $null }
-    description  = if ($cim) { [string]$cim.Description } else { $null }
-} | ConvertTo-Json -Compress
+$names = @(@@NAMES@@)
+$single = $names.Count -eq 1
+$rows = @(foreach ($name in $names) {
+    $svc = Get-Service -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $svc) {
+        if ($single) {
+            [Console]::Error.WriteLine("There is no service named '$name' on this PC.")
+            exit 1
+        }
+        [ordered]@{ name = $name; found = $false }
+        continue
+    }
+    $cim = Get-CimInstance Win32_Service -Filter ("Name='" + $svc.Name.Replace("'","''") + "'") -ErrorAction SilentlyContinue
+    [ordered]@{
+        name         = [string]$svc.Name
+        found        = $true
+        display_name = [string]$svc.DisplayName
+        status       = [string]$svc.Status
+        start_type   = [string]$svc.StartType
+        can_stop     = [bool]$svc.CanStop
+        start_name   = if ($cim) { [string]$cim.StartName } else { $null }
+        path         = if ($cim) { [string]$cim.PathName } else { $null }
+        process_id   = if ($cim) { [int]$cim.ProcessId } else { $null }
+        description  = if ($cim) { [string]$cim.Description } else { $null }
+    }
+})
+if ($single) { $rows[0] | ConvertTo-Json -Compress } else { ConvertTo-Json -InputObject $rows -Compress }
 "##;
 
 pub(super) fn load_specs(json: &str) -> Vec<Spec> {
@@ -144,8 +185,8 @@ pub(super) fn go_quote(s: &str) -> String {
 pub fn register(r: &mut Router) {
     for spec in load_specs(include_str!("specs/proc.json")) {
         let h = match spec.kind.as_str() {
-            "proc.list" => json_script_handler(LIST),
-            "svc.list" => json_script_handler(SVC_LIST),
+            "proc.list" => handler(proc_list),
+            "svc.list" => handler(svc_list),
             "proc.kill" => handler(proc_kill),
             "proc.find" => handler(proc_find),
             "svc.status" => handler(svc_status),
@@ -182,6 +223,85 @@ async fn proc_kill(ctx: Ctx, args: Args) -> CapResult {
     )
     .await?;
     let script = fill(KILL_TEMPLATE, &[("@@PID@@", &pid.to_string())]);
+    run_pwsh_json(&ctx.cancel, &script)
+        .await
+        .map_err(HandlerError::from)
+}
+
+fn filter_arg(kind: &str, args: &Args, name: &str) -> Result<String, HandlerError> {
+    let value = string_arg(args, name, "").trim().to_string();
+    if value.len() > 128 {
+        return Err(HandlerError::plain(format!("{kind}: '{name}' is too long")));
+    }
+    Ok(value)
+}
+
+pub fn list_script(args: &Args) -> Result<String, HandlerError> {
+    let name = filter_arg("proc.list", args, "name")?;
+    let sort = string_arg(args, "sort", "memory").to_lowercase();
+    if !["memory", "name", "pid", "newest"].contains(&sort.as_str()) {
+        return Err(HandlerError::plain(
+            "proc.list: sort must be memory, name, pid, or newest",
+        ));
+    }
+    let limit = int_arg(args, "limit", 1000).clamp(1, 5000);
+    let mut columns = String::new();
+    if bool_arg(args, "include_path", false) {
+        columns.push_str("ExecutablePath,");
+    }
+    if bool_arg(args, "include_command_line", false) {
+        columns.push_str("CommandLine,");
+    }
+    Ok(fill(
+        LIST_TEMPLATE,
+        &[
+            ("@@NAME@@", &ps_single_quote(&name)),
+            ("@@COLUMNS@@", &columns),
+            ("@@SORT@@", &ps_single_quote(&sort)),
+            ("@@LIMIT@@", &limit.to_string()),
+        ],
+    ))
+}
+
+async fn proc_list(ctx: Ctx, args: Args) -> CapResult {
+    let script = list_script(&args)?;
+    run_pwsh_json(&ctx.cancel, &script)
+        .await
+        .map_err(HandlerError::from)
+}
+
+pub fn svc_list_script(args: &Args) -> Result<String, HandlerError> {
+    let name = filter_arg("svc.list", args, "name")?;
+    let state = string_arg(args, "state", "all").to_lowercase();
+    if !["all", "running", "stopped"].contains(&state.as_str()) {
+        return Err(HandlerError::plain(
+            "svc.list: state must be all, running, or stopped",
+        ));
+    }
+    let start_type = string_arg(args, "start_type", "all").trim().to_lowercase();
+    let start_type = if start_type.is_empty() {
+        "all".to_string()
+    } else {
+        start_type
+    };
+    if !["all", "automatic", "manual", "disabled", "boot", "system"].contains(&start_type.as_str())
+    {
+        return Err(HandlerError::plain(
+            "svc.list: start_type must be all, automatic, manual, disabled, boot, or system",
+        ));
+    }
+    Ok(fill(
+        SVC_LIST_TEMPLATE,
+        &[
+            ("@@NAME@@", &ps_single_quote(&name)),
+            ("@@STATE@@", &ps_single_quote(&state)),
+            ("@@START_TYPE@@", &ps_single_quote(&start_type)),
+        ],
+    ))
+}
+
+async fn svc_list(ctx: Ctx, args: Args) -> CapResult {
+    let script = svc_list_script(&args)?;
     run_pwsh_json(&ctx.cancel, &script)
         .await
         .map_err(HandlerError::from)
@@ -259,15 +379,37 @@ async fn svc_control(ctx: Ctx, args: Args) -> CapResult {
         .map_err(HandlerError::from)
 }
 
-pub fn status_script(args: &Args) -> Result<String, HandlerError> {
-    let name = string_arg(args, "name", "").trim().to_string();
-    if name.is_empty() {
+pub fn service_names(raw: &str) -> Result<Vec<String>, HandlerError> {
+    let mut names: Vec<String> = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        if part.len() > 256 || part.chars().any(|c| c.is_control() || "*?[]".contains(c)) {
+            return Err(HandlerError::plain(format!(
+                "svc.status: {} is not a valid service name",
+                go_quote(part)
+            )));
+        }
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(part)) {
+            names.push(part.to_string());
+        }
+    }
+    if names.is_empty() {
         return Err(HandlerError::plain("svc.status: 'name' is required"));
     }
-    Ok(fill(
-        STATUS_TEMPLATE,
-        &[("@@NAME@@", &ps_single_quote(&name))],
-    ))
+    if names.len() > 32 {
+        return Err(HandlerError::plain(
+            "svc.status: give at most 32 service names",
+        ));
+    }
+    Ok(names)
+}
+
+pub fn status_script(args: &Args) -> Result<String, HandlerError> {
+    let names = service_names(&string_arg(args, "name", ""))?
+        .iter()
+        .map(|n| ps_single_quote(n))
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(fill(STATUS_TEMPLATE, &[("@@NAMES@@", &names)]))
 }
 
 async fn svc_status(ctx: Ctx, args: Args) -> CapResult {
@@ -363,6 +505,35 @@ mod tests {
     }
 
     #[test]
+    fn proc_list_filters_sorts_and_limits() {
+        let script = list_script(&args(json!({}))).unwrap();
+        assert!(script.contains("$name = ''"));
+        assert!(script.contains("switch ('memory')"));
+        assert!(script.contains("-First 1000"));
+        let script = list_script(&args(
+            json!({"name": "it's", "sort": "newest", "limit": 9000}),
+        ))
+        .unwrap();
+        assert!(script.contains("$name = 'it''s'"));
+        assert!(script.contains("switch ('newest')"));
+        assert!(script.contains("-First 5000"));
+        assert!(!script.contains("@@"));
+        assert!(list_script(&args(json!({"sort": "size"}))).is_err());
+        assert!(list_script(&args(json!({"name": "x".repeat(129)}))).is_err());
+    }
+
+    #[test]
+    fn svc_list_filters_by_name_and_state() {
+        let script = svc_list_script(&args(json!({}))).unwrap();
+        assert!(script.contains("$state = 'all'"));
+        let script = svc_list_script(&args(json!({"name": "spool", "state": "Running"}))).unwrap();
+        assert!(script.contains("$name = 'spool'"));
+        assert!(script.contains("$state = 'running'"));
+        assert!(!script.contains("@@"));
+        assert!(svc_list_script(&args(json!({"state": "paused"}))).is_err());
+    }
+
+    #[test]
     fn svc_status_requires_a_name() {
         let err = status_script(&args(json!({"name": " "}))).unwrap_err();
         assert!(
@@ -371,7 +542,50 @@ mod tests {
             err.message
         );
         let script = status_script(&args(json!({"name": "Spooler"}))).unwrap();
-        assert!(script.contains("$name = 'Spooler'"));
+        assert!(script.contains("$names = @('Spooler')"));
+        assert!(!script.contains("@@"));
+    }
+
+    #[test]
+    fn svc_status_takes_several_names() {
+        let script = status_script(&args(
+            json!({"name": " Spooler, W32Time ,spooler,,O'Brien "}),
+        ))
+        .unwrap();
+        assert!(script.contains("$names = @('Spooler','W32Time','O''Brien')"));
+        for bad in ["Spool*", "a?b", "x[1]", "a\nb"] {
+            assert!(status_script(&args(json!({"name": bad}))).is_err(), "{bad}");
+        }
+        let many = (0..33)
+            .map(|n| format!("s{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(status_script(&args(json!({"name": many}))).is_err());
+        assert!(status_script(&args(json!({"name": " , "}))).is_err());
+    }
+
+    #[test]
+    fn svc_list_filters_by_start_type_and_names_enums() {
+        let script = svc_list_script(&args(json!({}))).unwrap();
+        assert!(script.contains("$startType = 'all'"));
+        assert!(script.contains("@{n='StartType';e={[string]$_.StartType}}"));
+        let script = svc_list_script(&args(json!({"start_type": "Disabled"}))).unwrap();
+        assert!(script.contains("$startType = 'disabled'"));
+        assert!(svc_list_script(&args(json!({"start_type": "delayed"}))).is_err());
+    }
+
+    #[test]
+    fn proc_list_paths_and_command_lines_are_opt_in() {
+        let script = list_script(&Args::new()).unwrap();
+        assert!(!script.contains("ExecutablePath") && !script.contains("CommandLine"));
+        assert!(script.contains("Select-Object ProcessId,Name,@{n='WorkingSetMB'"));
+        let script = list_script(&args(json!({"include_path": true}))).unwrap();
+        assert!(script.contains("ProcessId,Name,ExecutablePath,@{n="));
+        let script = list_script(&args(
+            json!({"include_path": true, "include_command_line": true}),
+        ))
+        .unwrap();
+        assert!(script.contains("ProcessId,Name,ExecutablePath,CommandLine,@{n="));
     }
 
     #[test]

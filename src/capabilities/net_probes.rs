@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
@@ -9,32 +10,57 @@ use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
 
 use super::net::{arg_int, arg_string};
 use super::net_resolve::{ip_string, is_v4, lookup_ip_addrs};
-use super::pwsh::run_pwsh_json;
+use super::pwsh::{parse_pwsh_json, ps_single_quote, run_pwsh_echo, run_pwsh_json, Echo};
+
+const TCP_TEST_LIMIT: usize = 30;
+const TCP_TEST_WINDOW: Duration = Duration::from_secs(60);
+
+static TCP_TESTS: LazyLock<Mutex<Vec<Instant>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub fn register(r: &mut Router) {
-    r.register("net.ping", handler(net_ping));
-    r.register("net.trace", handler(net_trace));
-    r.register("net.tcp-test", handler(net_tcp_test));
+    super::register_specs(
+        r,
+        include_str!("specs/net_probes.json"),
+        vec![
+            ("net.ping", handler(net_ping)),
+            ("net.trace", handler(net_trace)),
+            ("net.tcp-test", handler(net_tcp_test)),
+        ],
+    );
 }
 
 pub fn valid_target(s: &str) -> bool {
-    if s.is_empty() {
+    s.parse::<IpAddr>().is_ok() || valid_hostname(s)
+}
+
+fn valid_hostname(s: &str) -> bool {
+    let name = s.strip_suffix('.').unwrap_or(s);
+    if name.is_empty() || name.len() > 253 {
         return false;
     }
-    if s.parse::<IpAddr>().is_ok() {
-        return true;
+    let labels_ok = name.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    });
+    let last = name.rsplit('.').next().unwrap_or(name);
+    labels_ok && !last.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn take_tcp_test_slot(now: Instant) -> Result<(), HandlerError> {
+    let mut history = TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    history.retain(|t| now.saturating_duration_since(*t) < TCP_TEST_WINDOW);
+    if history.len() >= TCP_TEST_LIMIT {
+        return Err(HandlerError::plain(format!(
+            "net.tcp-test: rate limit reached ({TCP_TEST_LIMIT} per minute)"
+        )));
     }
-    for c in s.chars() {
-        if (c as u32) < 0x20
-            || matches!(
-                c,
-                ' ' | '"' | '\'' | '&' | '|' | ';' | '`' | '$' | '<' | '>'
-            )
-        {
-            return false;
-        }
-    }
-    s.len() <= 253
+    history.push(now);
+    Ok(())
 }
 
 pub fn ping_script(args: &Args) -> Result<String, HandlerError> {
@@ -46,8 +72,9 @@ pub fn ping_script(args: &Args) -> Result<String, HandlerError> {
     if !valid_target(&target) {
         return Err(HandlerError::plain("net.ping: invalid 'target'"));
     }
+    let target = ps_single_quote(&target);
     Ok(format!(
-        "Test-Connection -ComputerName '{target}' -Count {count} -ErrorAction SilentlyContinue |\n\t\tSelect-Object Address,@{{n='ResponseTimeMs';e={{$_.ResponseTime}}}},StatusCode |\n\t\tConvertTo-Json -Compress"
+        "Test-Connection -ComputerName {target} -Count {count} -ErrorAction SilentlyContinue |\n\t\tForEach-Object {{ [Console]::Error.WriteLine(('Reply from {{0}}: {{1}} ms' -f $_.Address, $_.ResponseTime)); $_ }} |\n\t\tSelect-Object Address,@{{n='ResponseTimeMs';e={{$_.ResponseTime}}}},StatusCode |\n\t\tConvertTo-Json -Compress"
     ))
 }
 
@@ -56,16 +83,18 @@ pub fn trace_script(args: &Args) -> Result<String, HandlerError> {
     if !valid_target(&target) {
         return Err(HandlerError::plain("net.trace: invalid 'target'"));
     }
+    let target = ps_single_quote(&target);
     Ok(format!(
-        "Test-NetConnection -ComputerName '{target}' -TraceRoute -InformationLevel Detailed -WarningAction SilentlyContinue |\n\t\tSelect-Object ComputerName,RemoteAddress,PingSucceeded,PingReplyDetails,TraceRoute |\n\t\tConvertTo-Json -Compress -Depth 4"
+        "Test-NetConnection -ComputerName {target} -TraceRoute -InformationLevel Detailed -WarningAction SilentlyContinue |\n\t\tSelect-Object ComputerName,RemoteAddress,PingSucceeded,PingReplyDetails,TraceRoute |\n\t\tConvertTo-Json -Compress -Depth 4"
     ))
 }
 
 async fn net_ping(ctx: Ctx, args: Args) -> CapResult {
     let script = ping_script(&args)?;
-    run_pwsh_json(&ctx.cancel, &script)
+    let res = run_pwsh_echo(&ctx.cancel, &script, ctx.progress.clone(), Echo::Stderr)
         .await
-        .map_err(HandlerError::from)
+        .map_err(|(_, failure)| HandlerError::from(failure))?;
+    parse_pwsh_json(&res.stdout).map_err(HandlerError::from)
 }
 
 async fn net_trace(ctx: Ctx, args: Args) -> CapResult {
@@ -287,12 +316,15 @@ pub async fn tcp_test(cancel: &CancellationToken, opts: &TcpTestOptions) -> Valu
 
 async fn net_tcp_test(ctx: Ctx, args: Args) -> CapResult {
     let opts = parse_tcp_test_options(&args)?;
+    take_tcp_test_slot(Instant::now())?;
     Ok(tcp_test(&ctx.cancel, &opts).await)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static LIMIT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn args(v: Value) -> Args {
         v.as_object().cloned().unwrap_or_default()
@@ -311,7 +343,7 @@ mod tests {
         register(&mut r);
         assert_eq!(r.kinds(), vec!["net.ping", "net.tcp-test", "net.trace"]);
         for spec in r.specs() {
-            assert!(spec.params.is_empty() && spec.label.is_empty());
+            assert!(!spec.label.is_empty(), "{} has no label", spec.kind);
         }
     }
 
@@ -319,22 +351,120 @@ mod tests {
     fn valid_target_accepts_hosts_and_ips() {
         for ok in [
             "example.com",
+            "example.com.",
             "1.1.1.1",
             "::1",
             "2001:db8::1",
+            "::ffff:10.0.0.1",
             "host-name.local",
             "a_b",
+            "_sip._tcp.example.com",
+            "localhost",
+            "xn--bcher-kva.example",
         ] {
             assert!(valid_target(ok), "{ok}");
         }
         for bad in [
-            "", "a b", "a;b", "a'b", "a\"b", "a&b", "a|b", "a`b", "a$b", "a<b", "a>b", "a\nb",
+            "",
+            "a b",
+            "a;b",
+            "a'b",
+            "a\"b",
+            "a&b",
+            "a|b",
+            "a`b",
+            "a$b",
+            "a<b",
+            "a>b",
+            "a\nb",
             "a\tb",
+            "a..b",
+            ".a",
+            "-a.com",
+            "a-.com",
+            "a/b",
+            "a\\b",
+            "a:b",
+            "a%b",
+            "a(b)",
+            "a{b}",
+            "a@b",
+            "a,b",
+            "1.2.3",
+            "127.1",
+            "999.1.1.1",
+            "[::1]",
+            "fe80::1%12",
         ] {
             assert!(!valid_target(bad), "{bad:?}");
         }
-        assert!(valid_target(&"a".repeat(253)));
-        assert!(!valid_target(&"a".repeat(254)));
+        for q in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            let hostile = format!("x{q};calc;{q}");
+            assert!(!valid_target(&hostile), "{hostile:?}");
+            assert!(!valid_target(&format!("ex{q}ample.com")), "{q:?}");
+        }
+        assert!(!valid_target("b\u{fc}cher.example"));
+        let label = "a".repeat(63);
+        assert!(valid_target(&label));
+        assert!(!valid_target(&"a".repeat(64)));
+        let long = format!("{label}.{label}.{label}.{}", "a".repeat(61));
+        assert_eq!(long.len(), 253);
+        assert!(valid_target(&long));
+        assert!(!valid_target(&format!("{long}a")));
+    }
+
+    #[test]
+    fn scripts_quote_the_target() {
+        let s = ping_script(&args(json!({"target": "2001:db8::1"}))).unwrap();
+        assert!(s.starts_with("Test-Connection -ComputerName '2001:db8::1' -Count 4 "));
+        let s = trace_script(&args(json!({"target": "_sip._tcp.example.com"}))).unwrap();
+        assert!(
+            s.starts_with("Test-NetConnection -ComputerName '_sip._tcp.example.com' -TraceRoute")
+        );
+        for q in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            let target = format!("x{q};calc;{q}");
+            assert!(ping_script(&args(json!({ "target": target }))).is_err());
+            assert!(trace_script(&args(json!({ "target": target }))).is_err());
+        }
+    }
+
+    #[test]
+    fn tcp_tests_are_rate_limited() {
+        let _serial = LIMIT_TESTS.blocking_lock();
+        TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let start = Instant::now();
+        for _ in 0..TCP_TEST_LIMIT {
+            take_tcp_test_slot(start).unwrap();
+        }
+        let err = take_tcp_test_slot(start).unwrap_err();
+        assert_eq!(
+            err.message,
+            "net.tcp-test: rate limit reached (30 per minute)"
+        );
+        take_tcp_test_slot(start + TCP_TEST_WINDOW).unwrap();
+        TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    #[tokio::test]
+    async fn the_handler_refuses_once_the_limit_is_hit() {
+        let _serial = LIMIT_TESTS.lock().await;
+        let mut r = Router::new();
+        register(&mut r);
+        {
+            let mut h = TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+            h.clear();
+            h.extend(std::iter::repeat(Instant::now()).take(TCP_TEST_LIMIT));
+        }
+        let out = r
+            .dispatch(
+                Ctx::default(),
+                "net.tcp-test",
+                args(json!({"target": "127.0.0.1", "port": 9})),
+            )
+            .await;
+        TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        assert!(!out.ok);
+        assert!(out.error.contains("rate limit"), "{}", out.error);
     }
 
     #[test]
@@ -346,6 +476,7 @@ mod tests {
         assert!(s.contains(
             "Select-Object Address,@{n='ResponseTimeMs';e={$_.ResponseTime}},StatusCode |"
         ));
+        assert!(s.contains("[Console]::Error.WriteLine(('Reply from {0}: {1} ms'"));
         let s = ping_script(&args(json!({"target": "1.1.1.1", "count": 99}))).unwrap();
         assert!(s.contains("-Count 4 "));
         let s = ping_script(&args(json!({"target": "1.1.1.1", "count": 0}))).unwrap();

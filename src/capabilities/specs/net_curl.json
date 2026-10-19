@@ -1,1 +1,1 @@
-[{"kind":"net.curl"}]
+[{"kind":"net.curl","label":"Fetch URL","description":"Send a GET or HEAD request to a public HTTP or HTTPS URL.","params":[{"name":"url","type":"string","required":true},{"name":"method","type":"enum","default":"GET","enum":["GET","HEAD"]}]}]

@@ -21,7 +21,11 @@ const MAX_VIA: usize = 5;
 const USER_AGENT_VALUE: &str = "Handoff/0.1 (+https://github.com/RealWhyKnot/Handoff)";
 
 pub fn register(r: &mut Router) {
-    r.register("net.curl", handler(net_curl));
+    super::register_specs(
+        r,
+        include_str!("specs/net_curl.json"),
+        vec![("net.curl", handler(net_curl))],
+    );
 }
 
 pub fn is_public_unicast(ip: IpAddr) -> bool {
@@ -651,7 +655,7 @@ mod tests {
         let cases = [
             (
                 json!({"url": "http://1.1.1.1", "method": "post"}),
-                "net.curl: method must be GET or HEAD (got \"POST\")",
+                "net.curl: 'method' must be one of: GET, HEAD",
             ),
             (json!({}), "net.curl: 'url' is required"),
             (

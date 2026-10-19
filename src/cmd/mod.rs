@@ -1,6 +1,7 @@
 pub mod connect;
 pub mod exec;
 pub mod flags;
+pub mod host;
 pub mod keys;
 pub mod menu;
 pub mod new;

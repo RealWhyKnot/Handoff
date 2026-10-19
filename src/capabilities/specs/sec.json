@@ -1,1 +1,1 @@
-[{"kind":"defender.status"},{"kind":"sec.local-admins"},{"kind":"update.history"}]
+[{"kind":"defender.status","label":"Defender status","description":"Defender protection state, signature age and last scans."},{"kind":"sec.local-admins","label":"Local admins","description":"Members of the local Administrators group."},{"kind":"update.history","label":"Update history","description":"The last 50 Windows Update entries with result codes."}]

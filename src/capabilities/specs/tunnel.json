@@ -1,1 +1,1 @@
-[{"kind":"tunnel.close"},{"kind":"tunnel.open"}]
+[{"kind":"tunnel.close","label":"Close port tunnel","description":"Close a port tunnel."},{"kind":"tunnel.open","label":"Open port tunnel","description":"Forward a local TCP port to whoever runs handoff tunnel with the connect token.","risky":true}]

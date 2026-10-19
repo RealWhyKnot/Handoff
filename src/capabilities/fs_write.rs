@@ -5,66 +5,100 @@ use std::path::Path;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::dispatch::{handler, CapResult, HandlerError, Router};
+use crate::dispatch::{for_display, handler, CapResult, HandlerError, Router};
 
 use super::consent::require_risk_consent;
 use super::fs::{
-    blocking_handler, bool_arg, err, fmt_time, go_clean, go_is_abs, hex, lstat, path_err,
-    run_blocking, stat, str_arg, volume_len,
+    bool_arg, err, fmt_time, hex, local_path, lstat, path_err, run_blocking, stat, str_arg,
+    volume_len,
 };
+pub(crate) use super::fs_guard::{guard_delete_path, guard_write_path};
 
 pub fn register(r: &mut Router) {
-    r.register(
-        "fs.upload",
-        handler(|ctx, args| async move {
-            let prep = run_blocking(move || upload_prepare(&args)).await?;
-            require_risk_consent(
-                &ctx.cancel,
+    super::register_specs(
+        r,
+        include_str!("specs/fs_write.json"),
+        vec![
+            (
                 "fs.upload",
-                "Writes operator-supplied file content to this computer. Uploaded content can replace files when overwrite=true.",
-            )
-            .await?;
-            run_blocking(move || upload_commit(prep)).await
-        }),
-    );
-    r.register("fs.download", blocking_handler(super::fs::fs_read));
-    r.register(
-        "fs.mkdir",
-        handler(|ctx, args| async move {
-            let path = str_arg(&args, "path").unwrap_or_default();
-            if path.is_empty() {
-                return Err(err("fs.mkdir: 'path' is required"));
-            }
-            let path = go_clean(&path);
-            guard_write_path(&path)?;
-            require_risk_consent(
-                &ctx.cancel,
+                handler(|ctx, args| async move {
+                    let prep = run_blocking(move || upload_prepare(&args)).await?;
+                    let summary = upload_summary(&prep);
+                    require_risk_consent(&ctx.cancel, "fs.upload", &summary).await?;
+                    guard_write_path("fs.upload", &prep.path)?;
+                    run_blocking(move || upload_commit(prep)).await
+                }),
+            ),
+            (
+                "fs.download",
+                handler(|ctx, args| async move {
+                    let cancel = ctx.cancel.clone();
+                    run_blocking(move || super::fs::download(args, &cancel)).await
+                }),
+            ),
+            (
                 "fs.mkdir",
-                "Creates a directory on this computer. This changes the host filesystem.",
-            )
-            .await?;
-            run_blocking(move || mkdir(&path)).await
-        }),
-    );
-    r.register(
-        "fs.delete",
-        handler(|ctx, args| async move {
-            let path = str_arg(&args, "path").unwrap_or_default();
-            let recursive = bool_arg(&args, "recursive").unwrap_or(false);
-            if path.is_empty() {
-                return Err(err("fs.delete: 'path' is required"));
-            }
-            let path = go_clean(&path);
-            guard_delete_path(&path)?;
-            require_risk_consent(
-                &ctx.cancel,
+                handler(|ctx, args| async move {
+                    let path = local_path("fs.mkdir", &str_arg(&args, "path").unwrap_or_default())?;
+                    guard_write_path("fs.mkdir", &path)?;
+                    let summary = format!(
+                        "Creates the folder {} on this computer, along with any missing parent folders.",
+                        shown_path(&path)
+                    );
+                    require_risk_consent(&ctx.cancel, "fs.mkdir", &summary).await?;
+                    guard_write_path("fs.mkdir", &path)?;
+                    run_blocking(move || mkdir(&path)).await
+                }),
+            ),
+            (
                 "fs.delete",
-                "Deletes a file or directory from this computer. Directory deletion requires recursive=true and cannot be undone by Handoff.",
-            )
-            .await?;
-            run_blocking(move || delete(&path, recursive)).await
-        }),
+                handler(|ctx, args| async move {
+                    let recursive = bool_arg(&args, "recursive").unwrap_or(false);
+                    let path =
+                        local_path("fs.delete", &str_arg(&args, "path").unwrap_or_default())?;
+                    guard_delete_path(&path)?;
+                    require_risk_consent(
+                        &ctx.cancel,
+                        "fs.delete",
+                        &delete_summary(&path, recursive),
+                    )
+                    .await?;
+                    guard_delete_path(&path)?;
+                    run_blocking(move || delete(&path, recursive)).await
+                }),
+            ),
+        ],
     );
+}
+
+pub(crate) fn shown_path(path: &str) -> String {
+    let shown = for_display(path, 400, 1);
+    if shown.cut {
+        format!("{}...", shown.text)
+    } else {
+        shown.text
+    }
+}
+
+fn upload_summary(up: &Upload) -> String {
+    let mut text = format!(
+        "Saves a file from your helper to {} on this computer ({} bytes).",
+        shown_path(&up.path),
+        up.data.len()
+    );
+    if up.overwrite {
+        text.push_str(" If a file is already there, it will be replaced.");
+    }
+    text
+}
+
+fn delete_summary(path: &str, recursive: bool) -> String {
+    let mut text = format!("Deletes {} from this computer.", shown_path(path));
+    if recursive {
+        text.push_str(" If this is a folder, everything inside it is deleted too.");
+    }
+    text.push_str(" Handoff can't undo this.");
+    text
 }
 
 struct Upload {
@@ -79,15 +113,12 @@ fn upload_prepare(args: &crate::dispatch::Args) -> Result<Upload, HandlerError> 
     let data_b64 = str_arg(args, "data_base64").unwrap_or_default();
     let expect_sha = str_arg(args, "sha256").unwrap_or_default();
     let overwrite = bool_arg(args, "overwrite").unwrap_or(false);
-    if path.is_empty() {
-        return Err(err("fs.upload: 'path' is required"));
-    }
+    let path = local_path("fs.upload", &path)?;
     if data_b64.is_empty() {
         return Err(err("fs.upload: 'data_base64' is required"));
     }
-    let path = go_clean(&path);
 
-    guard_write_path(&path)?;
+    guard_write_path("fs.upload", &path)?;
 
     let data = go_base64_decode(&data_b64).map_err(|off| {
         err(format!(
@@ -198,63 +229,6 @@ fn delete(path: &str, recursive: bool) -> CapResult {
         "recursive": recursive,
         "deleted": true,
     }))
-}
-
-pub(crate) fn guard_write_path(p: &str) -> Result<(), HandlerError> {
-    guard_mutable_path("fs.upload", p)
-}
-
-pub(crate) fn guard_delete_path(p: &str) -> Result<(), HandlerError> {
-    if !go_is_abs(p) {
-        return Err(err("fs.delete: path must be absolute"));
-    }
-    if is_protected_root(p) {
-        return Err(err(format!(
-            "fs.delete: refusing to delete protected root {p}"
-        )));
-    }
-    guard_mutable_path("fs.delete", p)
-}
-
-fn guard_mutable_path(kind: &str, p: &str) -> Result<(), HandlerError> {
-    let mut lp = go_clean(p).replace('\\', "/").to_lowercase();
-    if let Some(rest) = lp.strip_prefix("c:") {
-        lp = rest.to_string();
-    }
-    let lp = lp.trim_end_matches('/');
-    for bad in [
-        "/windows/system32",
-        "/windows/syswow64",
-        "/program files",
-        "/program files (x86)",
-    ] {
-        if lp == bad || lp.starts_with(&format!("{bad}/")) {
-            return Err(err(format!("{kind}: refusing to modify under {bad}")));
-        }
-    }
-    Ok(())
-}
-
-fn is_protected_root(p: &str) -> bool {
-    let clean = go_clean(p);
-    let vol = volume_len(&clean);
-    if vol > 0 {
-        let rest = &clean[vol..];
-        if rest.is_empty() || rest == "\\" {
-            return true;
-        }
-    }
-    let mut protected: Vec<String> = ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .collect();
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        protected.push(home);
-    }
-    protected
-        .iter()
-        .filter(|r| !r.is_empty())
-        .any(|r| go_clean(r).to_lowercase() == clean.to_lowercase())
 }
 
 pub(crate) fn go_base64_decode(src: &str) -> Result<Vec<u8>, usize> {
@@ -428,13 +402,198 @@ mod tests {
             "C:\\Windows\\System32\\drivers\\etc\\hosts",
             "C:\\Program Files",
             "C:\\Program Files\\App",
+            "C:\\Program Files.\\App",
+            "C:\\Program Files \\App",
+            "D:\\Program Files\\App",
             "C:\\",
+            "C:\\.",
             "relative",
         ] {
             assert!(guard_delete_path(path).is_err(), "{path} was allowed");
         }
-        assert!(guard_write_path("C:\\Windows\\SysWOW64\\x.dll").is_err());
-        assert!(guard_write_path("C:\\Users\\someone\\x.txt").is_ok());
+        assert!(guard_write_path("fs.upload", "C:\\Windows\\SysWOW64\\x.dll").is_err());
+        assert!(guard_write_path("fs.upload", "C:\\Users\\someone\\x.txt").is_ok());
+        assert!(guard_write_path("fs.upload", "C:\\Program Files Extra\\x.txt").is_ok());
+    }
+
+    #[test]
+    fn delete_guard_sees_the_profile_through_trailing_dots() {
+        let home = std::env::var("USERPROFILE").unwrap();
+        for path in [
+            home.clone(),
+            format!("{home}\\"),
+            format!("{home}."),
+            format!("{home}. \\"),
+            home.to_uppercase(),
+        ] {
+            let out = guard_delete_path(&path);
+            assert!(
+                out.as_ref()
+                    .is_err_and(|e| e.message.contains("won't delete")),
+                "{path}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_guard_blocks_ssh_autostart_and_secrets() {
+        for (path, why) in [
+            ("C:\\Users\\bob\\.ssh\\authorized_keys", "SSH keys"),
+            ("C:\\Users\\bob\\.ssh", "SSH keys"),
+            ("C:\\Users\\bob\\.SSH.\\authorized_keys", "SSH keys"),
+            ("C:\\Users\\bob\\.ssh \\config", "SSH keys"),
+            ("C:\\Users\\bob\\.ssh\\new\\deeper\\authorized_keys", "SSH keys"),
+            ("C:\\ProgramData\\ssh\\administrators_authorized_keys", "SSH keys"),
+            ("C:\\ProgramData\\ssh\\sshd_config", "SSH keys"),
+            ("C:\\ProgramData\\ssh", "SSH keys"),
+            ("D:\\ProgramData\\SSH\\sshd_config", "SSH keys"),
+            (
+                "C:\\Users\\bob\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\run.lnk",
+                "Startup folder",
+            ),
+            (
+                "C:\\Users\\bob\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+                "Startup folder",
+            ),
+            (
+                "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp\\run.bat",
+                "Startup folder",
+            ),
+            (
+                "C:\\Users\\bob\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1",
+                "PowerShell runs",
+            ),
+            (
+                "C:\\Users\\bob\\OneDrive\\Documents\\PowerShell\\profile.ps1",
+                "PowerShell runs",
+            ),
+            (
+                "C:\\Users\\bob\\Documents\\PowerShell\\Microsoft.VSCode_profile.ps1",
+                "PowerShell runs",
+            ),
+            ("C:\\Users\\bob\\.aws\\credentials", "passwords or keys"),
+            ("C:\\Users\\bob\\.git-credentials", "passwords or keys"),
+            ("C:\\Users\\bob\\.docker\\config.json", "passwords or keys"),
+            ("C:\\Users\\bob\\Documents\\vault.kdbx", "passwords or keys"),
+        ] {
+            for kind in ["fs.upload", "fs.mkdir", "fs.write"] {
+                let out = guard_write_path(kind, path);
+                let msg = out.as_ref().err().map(|e| e.message.clone()).unwrap_or_default();
+                assert!(
+                    msg.starts_with(&format!("{kind}: ")) && msg.contains(why),
+                    "{kind} {path}: {out:?}"
+                );
+            }
+            let startup_entry = why == "Startup folder" && !path.ends_with("Startup");
+            assert_eq!(guard_delete_path(path).is_ok(), startup_entry, "delete {path}");
+        }
+        for path in [
+            "C:\\Users\\bob\\Documents\\ssh-notes.txt",
+            "C:\\Users\\bob\\sshkeys-backup\\readme.txt",
+            "C:\\Users\\bob\\Documents\\PowerShell\\Scripts\\fix.ps1",
+            "C:\\Users\\bob\\Documents\\profile.ps1",
+            "C:\\Users\\bob\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Tools\\x.lnk",
+            "C:\\ProgramData\\sshd-backup\\notes.txt",
+        ] {
+            assert!(guard_write_path("fs.upload", path).is_ok(), "{path} was blocked");
+            assert!(guard_delete_path(path).is_ok(), "delete {path} was blocked");
+        }
+    }
+
+    fn write_router() -> Router {
+        let mut r = router();
+        super::super::fs_text::register(&mut r);
+        r
+    }
+
+    fn write_attempts(path: &Path) -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "fs.upload",
+                json!({"path": path, "data_base64": "aGk=", "overwrite": true}),
+            ),
+            (
+                "fs.write",
+                json!({"path": path, "content": "ssh-ed25519 AAAA", "append": true}),
+            ),
+            ("fs.mkdir", json!({"path": path})),
+            ("fs.delete", json!({"path": path, "recursive": true})),
+        ]
+    }
+
+    #[tokio::test]
+    async fn every_write_kind_refuses_ssh_before_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        let keys = ssh.join("authorized_keys");
+        fs::write(&keys, "original").unwrap();
+        let (p, calls) = prompt(true);
+        let _guard = SessionGuard::with_prompt(p);
+        for target in [
+            keys.clone(),
+            ssh.join("sub").join("authorized_keys"),
+            ssh.clone(),
+        ] {
+            for (kind, a) in write_attempts(&target) {
+                let out = write_router().dispatch(Ctx::default(), kind, args(a)).await;
+                assert!(!out.ok, "{kind} {target:?} went through");
+                assert!(out.error.contains("SSH keys"), "{kind}: {}", out.error);
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read_to_string(&keys).unwrap(), "original");
+        assert!(!ssh.join("sub").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_junction_does_not_get_around_the_write_blocklist() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        let keys = ssh.join("authorized_keys");
+        fs::write(&keys, "original").unwrap();
+        let link = dir.path().join("innocent");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&ssh)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let (p, calls) = prompt(true);
+        let _guard = SessionGuard::with_prompt(p);
+        for target in [
+            link.join("authorized_keys"),
+            link.join("new").join("authorized_keys"),
+            link.clone(),
+        ] {
+            for (kind, a) in write_attempts(&target) {
+                let out = write_router().dispatch(Ctx::default(), kind, args(a)).await;
+                assert!(!out.ok, "{kind} {target:?} followed the junction");
+                assert!(out.error.contains("SSH keys"), "{kind}: {}", out.error);
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read_to_string(&keys).unwrap(), "original");
+        assert!(!ssh.join("new").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_names_resolve_before_the_check() {
+        let short = "C:\\PROGRA~1";
+        if fs::metadata(short).is_err() {
+            return;
+        }
+        let out = guard_write_path("fs.upload", &format!("{short}\\Evil\\x.dll"));
+        assert!(
+            out.as_ref().is_err_and(|e| e
+                .message
+                .contains("installed programs need it")),
+            "{out:?}"
+        );
     }
 
     #[tokio::test]
@@ -533,6 +692,100 @@ mod tests {
         let dl = run("fs.download", json!({"path": file})).await;
         assert!(dl.ok, "{}", dl.error);
         assert_eq!(dl.result["base64"], json!("aGk="));
+    }
+
+    fn recording_prompt() -> (Prompt, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let p: Prompt = Arc::new(move |_, req| {
+            s.lock().unwrap().push(req.summary.clone());
+            Box::pin(async move { Ok(false) })
+        });
+        (p, seen)
+    }
+
+    #[tokio::test]
+    async fn prompts_name_the_path_without_hidden_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_string_lossy().into_owned();
+        let sneaky = format!("{base}\\in\u{202E}voice\u{2066}.txt\u{7}");
+        let clean = format!("{base}\\invoice.txt");
+        let (p, seen) = recording_prompt();
+        let _guard = SessionGuard::with_prompt(p);
+
+        run(
+            "fs.upload",
+            json!({"path": sneaky, "data_base64": "aGk=", "overwrite": true}),
+        )
+        .await;
+        super::super::consent::set_session_ledger(Arc::new(crate::consent::Ledger::new(
+            recording_prompt_into(seen.clone()),
+        )));
+        run("fs.mkdir", json!({ "path": sneaky })).await;
+        super::super::consent::set_session_ledger(Arc::new(crate::consent::Ledger::new(
+            recording_prompt_into(seen.clone()),
+        )));
+        run("fs.delete", json!({"path": sneaky, "recursive": true})).await;
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                format!("Saves a file from your helper to {clean} on this computer (2 bytes). If a file is already there, it will be replaced."),
+                format!("Creates the folder {clean} on this computer, along with any missing parent folders."),
+                format!("Deletes {clean} from this computer. If this is a folder, everything inside it is deleted too. Handoff can't undo this."),
+            ]
+        );
+        assert!(!Path::new(&clean).exists());
+    }
+
+    fn recording_prompt_into(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Prompt {
+        Arc::new(move |_, req| {
+            seen.lock().unwrap().push(req.summary.clone());
+            Box::pin(async move { Ok(false) })
+        })
+    }
+
+    #[test]
+    fn delete_prompt_without_recursive_is_shorter() {
+        assert_eq!(
+            delete_summary("C:\\temp\\a.txt", false),
+            "Deletes C:\\temp\\a.txt from this computer. Handoff can't undo this."
+        );
+        let long = format!("C:\\{}", "d".repeat(1000));
+        assert!(shown_path(&long).ends_with("..."));
+        assert!(shown_path(&long).len() < 420);
+    }
+
+    #[tokio::test]
+    async fn write_kinds_refuse_network_paths_before_asking() {
+        let (p, calls) = prompt(true);
+        let _guard = SessionGuard::with_prompt(p);
+        for path in [
+            "\\\\attacker\\share\\x",
+            "\\\\?\\C:\\x",
+            "\\\\.\\C:",
+            "relative\\x",
+        ] {
+            for (kind, extra) in [
+                ("fs.upload", json!({"data_base64": "aGk="})),
+                ("fs.mkdir", json!({})),
+                ("fs.delete", json!({})),
+                ("fs.download", json!({})),
+            ] {
+                let mut a = extra.as_object().cloned().unwrap();
+                a.insert("path".into(), json!(path));
+                let out = router().dispatch(Ctx::default(), kind, a).await;
+                assert!(!out.ok, "{kind} {path}");
+                assert!(
+                    out.error.contains("network and device paths")
+                        || out.error.contains("must be absolute"),
+                    "{kind} {path}: {}",
+                    out.error
+                );
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -3,18 +3,23 @@ pub mod consent;
 pub mod drv;
 pub mod evt;
 pub mod fs;
+pub mod fs_guard;
+pub mod fs_lines;
 pub mod fs_text;
 pub mod fs_write;
 pub mod hw;
 pub mod net;
 pub mod net_curl;
+pub mod net_diag;
 pub mod net_probes;
 pub mod net_resolve;
 pub mod net_shares;
 pub mod pico;
+pub mod print;
 pub mod proc;
 pub mod ps;
 pub mod pwsh;
+pub mod pwsh_out;
 pub mod reg;
 pub mod screenshot;
 pub mod sec;
@@ -24,7 +29,9 @@ pub mod sys;
 pub mod task;
 pub mod tunnel;
 
-use crate::dispatch::{handler, HandlerError, Param, ParamType, Router, Spec};
+use std::time::Duration;
+
+use crate::dispatch::{handler, Ctx, Handler, HandlerError, Param, ParamType, Router, Spec};
 use crate::relay::Bridge;
 
 pub use consent::{deny_all_risky, last_consent_decision, ledger};
@@ -37,11 +44,13 @@ pub fn register_all(r: &mut Router, bridge: Option<Bridge>) {
     storage::register(r);
     net::register(r);
     net_shares::register(r);
+    net_diag::register(r);
     net_probes::register(r);
     net_curl::register(r);
     proc::register(r);
     evt::register(r);
     drv::register(r);
+    print::register(r);
     fs::register(r);
     fs_write::register(r);
     fs_text::register(r);
@@ -56,6 +65,49 @@ pub fn register_all(r: &mut Router, bridge: Option<Bridge>) {
     ps::register(r);
     tunnel::register(r, bridge);
     register_control(r);
+}
+
+pub(crate) fn register_specs(r: &mut Router, json: &str, handlers: Vec<(&str, Handler)>) {
+    let mut specs = proc::load_specs(json);
+    for (kind, h) in handlers {
+        let i = specs
+            .iter()
+            .position(|s| s.kind == kind)
+            .unwrap_or_else(|| panic!("no spec for {kind}"));
+        let spec = specs.swap_remove(i);
+        let h = match spec.default_timeout_ms {
+            0 => h,
+            ms => with_time_limit(&spec.kind, ms, h),
+        };
+        r.register_spec(spec, h);
+    }
+    let orphans: Vec<&str> = specs.iter().map(|s| s.kind.as_str()).collect();
+    assert!(orphans.is_empty(), "specs with no handler: {orphans:?}");
+}
+
+pub(crate) fn with_time_limit(kind: &str, ms: u32, h: Handler) -> Handler {
+    let kind = kind.to_string();
+    handler(move |ctx: Ctx, args| {
+        let h = h.clone();
+        let kind = kind.clone();
+        async move {
+            let child = ctx.cancel.child_token();
+            let inner = Ctx {
+                cancel: child.clone(),
+                ..ctx
+            };
+            match tokio::time::timeout(Duration::from_millis(u64::from(ms)), h(inner, args)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    child.cancel();
+                    Err(HandlerError::plain(format!(
+                        "{kind}: no answer within {} seconds",
+                        ms.div_ceil(1000)
+                    )))
+                }
+            }
+        }
+    })
 }
 
 pub fn register_control(r: &mut Router) {
@@ -92,6 +144,56 @@ mod tests {
 
     fn args(v: Value) -> Args {
         v.as_object().cloned().unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn time_limit_stops_a_slow_handler_and_cancels_it() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(
+            None::<tokio_util::sync::CancellationToken>,
+        ));
+        let s = seen.clone();
+        let slow = handler(move |ctx: Ctx, _args| {
+            *s.lock().unwrap() = Some(ctx.cancel.clone());
+            async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(json!("late"))
+            }
+        });
+        let limited = with_time_limit("x.slow", 50, slow);
+        let err = limited(Ctx::default(), Args::new()).await.unwrap_err();
+        assert_eq!(err.message, "x.slow: no answer within 1 seconds");
+        assert!(seen.lock().unwrap().as_ref().unwrap().is_cancelled());
+        let fast = with_time_limit(
+            "x.fast",
+            5000,
+            handler(|_ctx, _args| async { Ok(json!(1)) }),
+        );
+        assert_eq!(fast(Ctx::default(), Args::new()).await.unwrap(), json!(1));
+    }
+
+    #[test]
+    fn new_read_only_kinds_carry_time_limits() {
+        let r = spec_router();
+        for kind in [
+            "print.list",
+            "print.jobs",
+            "drv.problems",
+            "evt.crashes",
+            "net.wifi",
+            "net.proxy",
+            "net.profile",
+            "sys.time-sync",
+            "hw.disk-health",
+        ] {
+            let spec = r
+                .spec_for(kind)
+                .unwrap_or_else(|| panic!("{kind} is not registered"));
+            assert!(!spec.risky, "{kind}");
+            assert!(
+                spec.default_timeout_ms > 0 && spec.default_timeout_ms <= 30_000,
+                "{kind}"
+            );
+        }
     }
 
     #[test]
@@ -185,29 +287,33 @@ mod tests {
     }
 
     #[test]
-    fn risky_kinds_are_marked_risky_in_their_specs() {
+    fn gated_kinds_and_risky_specs_agree() {
         let _guard = SessionGuard::new();
         let r = spec_router();
-        for kind in [
-            "ps.exec",
-            "fs.upload",
-            "fs.mkdir",
-            "fs.delete",
-            "proc.kill",
-            "svc.control",
-            "tunnel.open",
-            "pico.bootsel",
-            "pico.flash",
-            "pico.save",
-            "pico.reset",
-        ] {
-            let spec = r
-                .spec_for(kind)
-                .unwrap_or_else(|| panic!("{kind} is not registered"));
-            if spec.params.is_empty() && spec.label.is_empty() {
-                continue;
+        for (kind, _) in crate::consent::GATED_KINDS {
+            if let Some(spec) = r.spec_for(kind) {
+                assert!(
+                    spec.risky,
+                    "{kind} asks for consent but is not marked risky"
+                );
             }
-            assert!(spec.risky, "{kind} must be advertised as risky");
+        }
+        for spec in r.specs() {
+            if spec.risky {
+                assert!(
+                    crate::consent::category_for(&spec.kind).is_some(),
+                    "{} is marked risky but has no consent category",
+                    spec.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_kind_has_a_label() {
+        let _guard = SessionGuard::new();
+        for spec in spec_router().specs() {
+            assert!(!spec.label.is_empty(), "{} has no label", spec.kind);
         }
     }
 
@@ -251,6 +357,7 @@ mod tests {
         let r = spec_router();
         for kind in [
             "fs.write",
+            "fs.grep",
             "net.resolve",
             "svc.status",
             "sys.screenshot",

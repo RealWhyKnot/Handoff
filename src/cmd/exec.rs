@@ -3,21 +3,30 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use super::flags::{parse_options, Def, FlagError};
-use crate::capabilities::pwsh::normalize_numbers;
+use crate::capabilities::{self, pwsh::normalize_numbers};
+use crate::consent::{self, category_for};
+use crate::console::{self, human_duration, plain_error};
+use crate::dispatch::{ParamType, Router, Spec};
 use crate::util;
 
 pub const EXIT_USAGE: i32 = 2;
 pub const EXIT_TIMEOUT: i32 = 3;
 pub const EXIT_FAILED: i32 = 4;
 
-const EXEC_FLAGS: [Def; 4] = [
+const EXEC_FLAGS: [Def; 5] = [
     Def::list("arg", "command argument as key=value (repeatable)"),
     Def::string("args-json", "command arguments as a JSON object", ""),
     Def::duration("timeout", "how long to wait for the result", "1m0s"),
     Def::boolean("list", "list the commands this session accepts"),
+    Def::string(
+        "describe",
+        "show what a command does, its arguments, and whether it changes the computer",
+        "",
+    ),
 ];
 
-const USAGE: &str = "usage: handoff exec <view-url-or-token> <kind> [--arg k=v]...";
+const USAGE: &str = "usage: handoff exec <view-url-or-token> <kind> [--arg k=v]...\n       handoff exec --describe <kind>";
+const MAX_CELL: usize = 60;
 
 type Reply = Map<String, Value>;
 
@@ -34,8 +43,15 @@ pub fn exec(args: &[String]) -> i32 {
     let args_json = parsed.string("args-json");
     let timeout = parsed.duration("timeout");
     let list = parsed.boolean("list");
+    let describe_kind = parsed.string("describe");
     let rest = parsed.args;
+    if !opts.json {
+        console::init();
+    }
 
+    if !describe_kind.trim().is_empty() {
+        return describe_command(describe_kind.trim());
+    }
     if rest.is_empty() {
         eprintln!("{USAGE}");
         return EXIT_USAGE;
@@ -80,7 +96,7 @@ pub fn exec(args: &[String]) -> i32 {
     let (body, status) = match result {
         Ok(v) => v,
         Err(err) => {
-            eprintln!("request failed: {err}");
+            eprintln!("request failed: {}", plain_error(&err));
             return 1;
         }
     };
@@ -116,8 +132,8 @@ pub fn exec(args: &[String]) -> i32 {
         202 => {
             if !opts.json {
                 eprintln!(
-                    "still running after {}; fetch it later at {}",
-                    util::go_duration_string(timeout),
+                    "Still running after {}. Fetch the result later at {}",
+                    human_duration(timeout),
                     reply_field(&reply, "result_url")
                 );
             }
@@ -141,7 +157,10 @@ fn reply_field(reply: &Reply, key: &str) -> String {
 
 fn print_exec_result(reply: &Reply, ok: bool) {
     if !ok {
-        eprintln!("command failed: {}", reply_field(reply, "error"));
+        eprintln!(
+            "command failed: {}",
+            plain_error(&reply_field(reply, "error"))
+        );
         if let Some(detail) = reply.get("detail") {
             if !detail.is_null() {
                 eprintln!("{}", util::go_pretty_json(detail));
@@ -152,8 +171,216 @@ fn print_exec_result(reply: &Reply, ok: bool) {
     match reply.get("result") {
         None | Some(Value::Null) => println!("ok"),
         Some(Value::String(s)) => println!("{s}"),
-        Some(other) => println!("{}", util::go_pretty_json(other)),
+        Some(other) => match render_table(other) {
+            Some(text) => println!("{text}"),
+            None => println!("{}", util::go_pretty_json(other)),
+        },
     }
+}
+
+fn cell(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(_) | Value::Bool(_) => util::go_value_string(v),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+fn rows_of(list: &[Value]) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    if list.is_empty() {
+        return None;
+    }
+    let mut headers: Vec<String> = Vec::new();
+    for item in list {
+        match item {
+            Value::Object(map) => {
+                for key in map.keys() {
+                    if !headers.contains(key) {
+                        headers.push(key.clone());
+                    }
+                }
+            }
+            Value::Null | Value::Array(_) => return None,
+            _ => {}
+        }
+    }
+    if headers.is_empty() {
+        let rows = list.iter().map(|v| vec![cell(v)]).collect();
+        return Some((vec!["Value".to_string()], rows));
+    }
+    let rows = list
+        .iter()
+        .map(|item| match item {
+            Value::Object(map) => headers
+                .iter()
+                .map(|h| map.get(h).map(cell).unwrap_or_default())
+                .collect(),
+            other => {
+                let mut row = vec![cell(other)];
+                row.resize(headers.len(), String::new());
+                row
+            }
+        })
+        .collect();
+    Some((headers, rows))
+}
+
+pub fn render_table(result: &Value) -> Option<String> {
+    match result {
+        Value::Array(list) => {
+            let (headers, rows) = rows_of(list)?;
+            Some(console::table(&headers, &rows, MAX_CELL))
+        }
+        Value::Object(map) => {
+            let lists: Vec<(&String, &Vec<Value>)> = map
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    Value::Array(list) if list.iter().any(Value::is_object) => Some((k, list)),
+                    _ => None,
+                })
+                .collect();
+            if lists.len() != 1 {
+                return None;
+            }
+            let (name, list) = lists[0];
+            if map
+                .iter()
+                .any(|(k, v)| k != name && (v.is_object() || v.is_array()))
+            {
+                return None;
+            }
+            let (headers, rows) = rows_of(list)?;
+            let mut out = Vec::new();
+            let width = map.keys().map(|k| k.len()).max().unwrap_or(0);
+            for (k, v) in map {
+                if k != name {
+                    out.push(format!("{}  {}", console::pad(k, width), cell(v)));
+                }
+            }
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            out.push(format!("{name}:"));
+            out.push(console::table(&headers, &rows, MAX_CELL));
+            Some(out.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+fn local_specs() -> Vec<Spec> {
+    let mut router = Router::new();
+    capabilities::register_all(&mut router, None);
+    let mut specs = router.specs();
+    specs.sort_by(|a, b| a.kind.cmp(&b.kind));
+    specs
+}
+
+fn describe_command(kind: &str) -> i32 {
+    let specs = local_specs();
+    match specs.iter().find(|s| s.kind == kind) {
+        Some(spec) => {
+            println!("{}", describe_spec(spec));
+            0
+        }
+        None => {
+            let close: Vec<&str> = specs
+                .iter()
+                .map(|s| s.kind.as_str())
+                .filter(|k| {
+                    let group = kind.split('.').next().unwrap_or(kind);
+                    k.starts_with(&format!("{group}."))
+                })
+                .collect();
+            if close.is_empty() {
+                eprintln!("There's no command called {kind}.");
+            } else {
+                eprintln!(
+                    "There's no command called {kind}. Similar ones: {}",
+                    close.join(", ")
+                );
+            }
+            EXIT_USAGE
+        }
+    }
+}
+
+fn param_type(kind: &ParamType) -> &'static str {
+    match kind {
+        ParamType::String => "text",
+        ParamType::Int => "number",
+        ParamType::Bool => "true/false",
+        ParamType::Enum => "choice",
+        ParamType::BytesBase64 => "file data",
+    }
+}
+
+pub fn describe_spec(spec: &Spec) -> String {
+    let mut out = Vec::new();
+    let title = if spec.label.is_empty() {
+        spec.kind.clone()
+    } else {
+        format!("{} ({})", spec.label, spec.kind)
+    };
+    out.push(console::paint(console::Tone::Bold, &title));
+    if !spec.description.is_empty() {
+        out.push(spec.description.clone());
+    }
+    out.push(String::new());
+    let category = category_for(&spec.kind);
+    match category {
+        Some(c) => out.push(format!(
+            "This changes the computer. Handoff asks the person at the computer first. A yes lets the helper {} {}.",
+            c.label(),
+            consent::scope_text(Some(c))
+        )),
+        None if spec.risky => out.push("This can change the computer.".to_string()),
+        None => out.push("This only reads information. It doesn't change anything.".to_string()),
+    }
+    if spec.default_timeout_ms > 0 {
+        out.push(format!(
+            "It stops on its own after {}.",
+            human_duration(Duration::from_millis(spec.default_timeout_ms as u64))
+        ));
+    }
+    out.push(String::new());
+    if spec.params.is_empty() {
+        out.push("It takes no arguments.".to_string());
+        return out.join("\n");
+    }
+    let headers: Vec<String> = [
+        "Argument", "Type", "Required", "Default", "Allowed", "About",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let rows: Vec<Vec<String>> = spec
+        .params
+        .iter()
+        .map(|p| {
+            let allowed = if !p.enum_values.is_empty() {
+                p.enum_values.join(", ")
+            } else {
+                match (p.min, p.max) {
+                    (Some(lo), Some(hi)) => format!("{lo} to {hi}"),
+                    (Some(lo), None) => format!("{lo} or more"),
+                    (None, Some(hi)) => format!("up to {hi}"),
+                    (None, None) => String::new(),
+                }
+            };
+            vec![
+                p.name.clone(),
+                param_type(&p.kind).to_string(),
+                if p.required { "yes" } else { "no" }.to_string(),
+                p.default.as_ref().map(cell).unwrap_or_default(),
+                allowed,
+                p.description.clone(),
+            ]
+        })
+        .collect();
+    out.push(console::table(&headers, &rows, MAX_CELL));
+    out.join("\n")
 }
 
 fn client() -> Result<reqwest::Client, String> {
@@ -169,7 +396,7 @@ fn remaining(deadline: Instant) -> Duration {
 
 fn describe(err: reqwest::Error, method: &str, url: &str) -> String {
     let reason = if err.is_timeout() {
-        "context deadline exceeded".to_string()
+        "it took too long to answer".to_string()
     } else {
         let mut text = err.to_string();
         let mut source = std::error::Error::source(&err);
@@ -194,7 +421,10 @@ async fn exec_list(relay: &str, token: &str, deadline: Instant) -> i32 {
     let resp = match http.get(&url).timeout(remaining(deadline)).send().await {
         Ok(r) => r,
         Err(err) => {
-            eprintln!("request failed: {}", describe(err, "Get", &url));
+            eprintln!(
+                "request failed: {}",
+                plain_error(&describe(err, "Get", &url))
+            );
             return 1;
         }
     };
@@ -243,16 +473,16 @@ pub fn build_exec_payload(
             Ok(Value::Null) => {}
             Ok(other) => {
                 let kind_name = match other {
-                    Value::Array(_) => "array",
-                    Value::String(_) => "string",
-                    Value::Number(_) => "number",
-                    _ => "bool",
+                    Value::Array(_) => "a list",
+                    Value::String(_) => "text",
+                    Value::Number(_) => "a number",
+                    _ => "true or false",
                 };
                 return Err(format!(
-                    "--args-json is not a JSON object: json: cannot unmarshal {kind_name} into Go value of type map[string]interface {{}}"
+                    "--args-json needs a JSON object such as {{\"count\": 4}}, but got {kind_name}"
                 ));
             }
-            Err(err) => return Err(format!("--args-json is not a JSON object: {err}")),
+            Err(err) => return Err(format!("--args-json isn't valid JSON: {err}")),
         }
     }
 
@@ -424,6 +654,7 @@ pub fn reshape_result(inner: &Map<String, Value>, kind: &str, command_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::consent::testing::SessionGuard;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -738,6 +969,61 @@ mod tests {
                 "detail": {"a": 1}
             })
         );
+    }
+
+    #[test]
+    fn array_results_print_as_a_table() {
+        console::set_color(false);
+        let t = render_table(&json!([
+            {"Name": "explorer.exe", "Id": 4120},
+            {"Name": "svchost.exe", "Id": 900, "Extra": true}
+        ]))
+        .unwrap();
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines[0], "Id    Name          Extra");
+        assert_eq!(lines[2], "4120  explorer.exe");
+        assert_eq!(lines[3], "900   svchost.exe   true");
+    }
+
+    #[test]
+    fn objects_with_one_list_print_their_fields_then_a_table() {
+        console::set_color(false);
+        let t = render_table(&json!({
+            "count": 1,
+            "entries": [{"name": "a.txt", "size": 5}]
+        }))
+        .unwrap();
+        assert_eq!(
+            t,
+            "count    1\n\nentries:\nname   size\n-----  ----\na.txt  5"
+        );
+        assert!(render_table(&json!({"a": 1})).is_none());
+        assert!(render_table(&json!("text")).is_none());
+        assert!(render_table(&json!([])).is_none());
+    }
+
+    #[test]
+    fn describe_says_whether_a_command_changes_the_computer() {
+        let _guard = SessionGuard::new();
+        console::set_color(false);
+        let specs = local_specs();
+        let delete = specs.iter().find(|s| s.kind == "fs.delete").unwrap();
+        let text = describe_spec(delete);
+        assert!(text.contains("This changes the computer."), "{text}");
+        assert!(text.contains("for the next 15 minutes"), "{text}");
+        assert!(text.contains("path"), "{text}");
+        let cpu = specs.iter().find(|s| s.kind == "hw.cpu").unwrap();
+        let text = describe_spec(cpu);
+        assert!(text.contains("This only reads information."), "{text}");
+        assert!(text.contains("It takes no arguments."), "{text}");
+    }
+
+    #[test]
+    fn describe_flag_needs_no_session() {
+        let _guard = SessionGuard::new();
+        quiet_env();
+        assert_eq!(exec(&strs(&["--describe", "hw.cpu"])), 0);
+        assert_eq!(exec(&strs(&["--describe", "hw.nothing"])), EXIT_USAGE);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
 
 use super::net::{arg_bool, arg_int};
-use super::pwsh::run_pwsh_json;
+use super::pwsh_out::run_pwsh_json;
 
 const SHARES_TEMPLATE: &str = r##"
 $includeHidden = $@@HIDDEN@@
@@ -91,7 +91,11 @@ if ($includeSessions) {
 "##;
 
 pub fn register(r: &mut Router) {
-    r.register("net.shares", handler(net_shares));
+    super::register_specs(
+        r,
+        include_str!("specs/net_shares.json"),
+        vec![("net.shares", handler(net_shares))],
+    );
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -2,7 +2,8 @@ use serde_json::Value;
 
 use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
 
-use super::pwsh::{json_script_handler, ps_single_quote, run_pwsh_json};
+use super::pwsh::ps_single_quote;
+use super::pwsh_out::{json_script_handler, run_pwsh_json};
 
 const ADAPTERS: &str = r##"
 Get-NetAdapter | ForEach-Object {
@@ -23,9 +24,19 @@ Get-NetAdapter | ForEach-Object {
 
 const ROUTES: &str = r##"Get-NetRoute | Select-Object DestinationPrefix,NextHop,InterfaceAlias,RouteMetric,InterfaceMetric | ConvertTo-Json -Compress"##;
 
-const ARP: &str = r##"Get-NetNeighbor | Where-Object {$_.State -ne 'Permanent'} | Select-Object IPAddress,LinkLayerAddress,State,InterfaceAlias | ConvertTo-Json -Compress"##;
+const ARP: &str = r##"Get-NetNeighbor | Where-Object {$_.State -ne 'Permanent'} | Select-Object IPAddress,LinkLayerAddress,@{n='State';e={[string]$_.State}},InterfaceAlias | ConvertTo-Json -Compress"##;
 
-const DNS_CACHE: &str = r##"Get-DnsClientCache | Select-Object Entry,Name,Type,Status,Section,TimeToLive,DataLength,Data | ConvertTo-Json -Compress"##;
+const DNS_CACHE: &str = r##"
+$types = @{ 1 = 'A'; 2 = 'NS'; 5 = 'CNAME'; 6 = 'SOA'; 12 = 'PTR'; 15 = 'MX'; 16 = 'TXT'; 28 = 'AAAA'; 33 = 'SRV'; 64 = 'SVCB'; 65 = 'HTTPS' }
+$statuses = @{ 0 = 'Success'; 9003 = 'NameError'; 9501 = 'NoRecords'; 9701 = 'RecordDoesNotExist' }
+$sections = @{ 1 = 'Answer'; 2 = 'Authority'; 3 = 'Additional' }
+function Name-Of($map, $v) { $k = [int]$v; if ($map.ContainsKey($k)) { $map[$k] } else { [string]$v } }
+Get-DnsClientCache | Select-Object Entry,Name,
+    @{n='Type';e={Name-Of $types $_.Type}},
+    @{n='Status';e={Name-Of $statuses $_.Status}},
+    @{n='Section';e={Name-Of $sections $_.Section}},
+    TimeToLive,DataLength,Data | ConvertTo-Json -Compress
+"##;
 
 const LISTENERS: &str = r##"
 $tcp = @()
@@ -46,7 +57,7 @@ try {
                 local_port = $_.LocalPort
                 remote_address = $_.RemoteAddress
                 remote_port = $_.RemotePort
-                state = $_.State
+                state = [string]$_.State
                 pid = $ownerPid
                 process_name = $procName
             }
@@ -86,7 +97,7 @@ try {
 
 const CONNECTIONS_TEMPLATE: &str = r##"
 $max_results = @@MAX@@
-Get-NetTCPConnection@@STATE@@ |
+Get-NetTCPConnection@@STATE@@@@PID@@ -ErrorAction SilentlyContinue |
     Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,CreationTime |
     ForEach-Object {
         $ownerPid = $_.OwningProcess
@@ -102,10 +113,10 @@ Get-NetTCPConnection@@STATE@@ |
             local_port = [int]$_.LocalPort
             remote_address = $_.RemoteAddress
             remote_port = [int]$_.RemotePort
-            state = $_.State
+            state = [string]$_.State
             pid = $ownerPid
             process_name = $procName
-            created_utc = $_.CreationTime.ToUniversalTime().ToString("o")
+            created_utc = if ($_.CreationTime.Year -gt 1601) { $_.CreationTime.ToUniversalTime().ToString("o") } else { $null }
         }
     } |
     Sort-Object state, local_address, local_port |
@@ -232,15 +243,21 @@ $out | ConvertTo-Json -Compress -Depth 5
 "##;
 
 pub fn register(r: &mut Router) {
-    r.register("net.adapters", json_script_handler(ADAPTERS));
-    r.register("net.routes", json_script_handler(ROUTES));
-    r.register("net.arp", json_script_handler(ARP));
-    r.register("net.dns-cache", json_script_handler(DNS_CACHE));
-    r.register("net.listeners", json_script_handler(LISTENERS));
-    r.register("net.connections", handler(net_connections));
-    r.register("net.firewall", json_script_handler(FIREWALL));
-    r.register("net.wlan", json_script_handler(WLAN));
-    r.register("net.tls", handler(net_tls));
+    super::register_specs(
+        r,
+        include_str!("specs/net.json"),
+        vec![
+            ("net.adapters", json_script_handler(ADAPTERS)),
+            ("net.routes", json_script_handler(ROUTES)),
+            ("net.arp", json_script_handler(ARP)),
+            ("net.dns-cache", json_script_handler(DNS_CACHE)),
+            ("net.listeners", json_script_handler(LISTENERS)),
+            ("net.connections", handler(net_connections)),
+            ("net.firewall", json_script_handler(FIREWALL)),
+            ("net.wlan", json_script_handler(WLAN)),
+            ("net.tls", handler(net_tls)),
+        ],
+    );
 }
 
 pub fn arg_string(args: &Args, name: &str) -> Option<String> {
@@ -266,11 +283,11 @@ pub fn is_allowed_connection_state(state: &str) -> bool {
     matches!(
         state,
         "all"
-            | "established"
+            | "closed"
             | "listen"
             | "synsent"
             | "synreceived"
-            | "establishing"
+            | "established"
             | "finwait1"
             | "finwait2"
             | "closewait"
@@ -278,7 +295,7 @@ pub fn is_allowed_connection_state(state: &str) -> bool {
             | "lastack"
             | "timewait"
             | "deletetcb"
-            | "delete-tcb"
+            | "bound"
     )
 }
 
@@ -298,6 +315,15 @@ pub fn resolve_connection_state(raw: &str) -> Result<String, HandlerError> {
 pub fn connections_script(args: &Args) -> Result<String, HandlerError> {
     let raw_state = arg_string(args, "state").unwrap_or_default();
     let mut max_results = arg_int(args, "max_results").unwrap_or(200);
+    let pid_filter = match arg_int(args, "pid") {
+        Some(pid) if (1..=u32::MAX as i64).contains(&pid) => format!(" -OwningProcess {pid}"),
+        Some(_) => {
+            return Err(HandlerError::plain(
+                "net.connections: pid must be a positive process id",
+            ))
+        }
+        None => String::new(),
+    };
 
     let state = resolve_connection_state(&raw_state)?;
     if max_results <= 0 {
@@ -315,7 +341,8 @@ pub fn connections_script(args: &Args) -> Result<String, HandlerError> {
 
     Ok(CONNECTIONS_TEMPLATE
         .replace("@@MAX@@", &max_results.to_string())
-        .replace("@@STATE@@", &state_filter))
+        .replace("@@STATE@@", &state_filter)
+        .replace("@@PID@@", &pid_filter))
 }
 
 async fn net_connections(ctx: Ctx, args: Args) -> CapResult {
@@ -393,7 +420,7 @@ mod tests {
             ]
         );
         for spec in r.specs() {
-            assert!(spec.params.is_empty() && spec.label.is_empty());
+            assert!(!spec.label.is_empty(), "{} has no label", spec.kind);
         }
     }
 
@@ -409,7 +436,16 @@ mod tests {
             )
             .await;
         assert!(!out.ok);
-        assert!(out.error.contains("state must"), "{}", out.error);
+        assert!(out.error.contains("must be one of"), "{}", out.error);
+    }
+
+    #[test]
+    fn connections_script_filters_by_pid() {
+        let script = connections_script(&args(json!({"pid": 4321}))).unwrap();
+        assert!(script.contains("-State 'established' -OwningProcess 4321"));
+        let script = connections_script(&args(json!({}))).unwrap();
+        assert!(!script.contains("-OwningProcess") && !script.contains("@@"));
+        assert!(connections_script(&args(json!({"pid": 0}))).is_err());
     }
 
     #[test]
@@ -423,16 +459,63 @@ mod tests {
     }
 
     #[test]
+    fn connection_states_are_the_real_tcp_state_names() {
+        for state in [
+            "Closed",
+            "Listen",
+            "SynSent",
+            "SynReceived",
+            "Established",
+            "FinWait1",
+            "FinWait2",
+            "CloseWait",
+            "Closing",
+            "LastAck",
+            "TimeWait",
+            "DeleteTCB",
+            "Bound",
+        ] {
+            assert!(resolve_connection_state(state).is_ok(), "{state}");
+        }
+        for gone in ["establishing", "delete-tcb"] {
+            assert!(resolve_connection_state(gone).is_err(), "{gone}");
+        }
+        let spec: Vec<crate::dispatch::Spec> =
+            serde_json::from_str(include_str!("specs/net.json")).unwrap();
+        let conn = spec.iter().find(|s| s.kind == "net.connections").unwrap();
+        let states = &conn
+            .params
+            .iter()
+            .find(|p| p.name == "state")
+            .unwrap()
+            .enum_values;
+        for state in states {
+            assert!(is_allowed_connection_state(state), "{state}");
+        }
+        assert_eq!(states.len(), 14);
+    }
+
+    #[test]
+    fn enum_columns_come_out_as_names() {
+        assert!(CONNECTIONS_TEMPLATE.contains("state = [string]$_.State"));
+        assert!(LISTENERS.contains("state = [string]$_.State"));
+        assert!(ARP.contains("[string]$_.State"));
+        assert!(DNS_CACHE.contains("28 = 'AAAA'") && DNS_CACHE.contains("9501 = 'NoRecords'"));
+    }
+
+    #[test]
     fn connections_script_embeds_state_filter_and_clamped_max() {
         let script =
             connections_script(&args(json!({"state": "Listen", "max_results": 5000}))).unwrap();
         assert!(script.contains("$max_results = 1000\n"));
-        assert!(script.contains("Get-NetTCPConnection -State 'listen' |"));
+        assert!(
+            script.contains("Get-NetTCPConnection -State 'listen' -ErrorAction SilentlyContinue |")
+        );
         assert!(!script.contains("@@"));
 
         let script = connections_script(&args(json!({"state": "all", "max_results": 0}))).unwrap();
         assert!(script.contains("$max_results = 1\n"));
-        assert!(script.contains("Get-NetTCPConnection |"));
+        assert!(script.contains("Get-NetTCPConnection -ErrorAction SilentlyContinue |"));
 
         let script = connections_script(&Args::new()).unwrap();
         assert!(script.contains("$max_results = 200\n"));

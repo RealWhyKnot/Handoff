@@ -1,7 +1,7 @@
 use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
 
 use super::proc::{fill, int_arg, load_specs};
-use super::pwsh::run_pwsh_json;
+use super::pwsh_out::run_pwsh_json;
 
 const TEMPLATE: &str = r##"
 $max = @@MAX@@

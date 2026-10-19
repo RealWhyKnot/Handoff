@@ -1,1 +1,1 @@
-[{"kind":"net.shares"}]
+[{"kind":"net.shares","label":"Shares","description":"Shared folders and who is connected to them.","params":[{"name":"include_hidden","type":"bool","default":false,"description":"Include admin shares such as C$."},{"name":"include_sessions","type":"bool","default":true},{"name":"max_results","type":"int","default":200,"min":1,"max":1000}]}]

@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -22,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use super::connect::default_relay;
 use super::new::{sleep_cancel, ReconnectBackoff};
 use crate::slog;
+use crate::zwire::{self, Packer, Unpacker};
 
 pub const DEFAULT_LOCAL_PORT: u16 = 47800;
 pub const PORT_SCAN_RANGE: u32 = 20;
@@ -352,18 +355,33 @@ async fn serve_session(
     let config = WebSocketConfig::default()
         .max_message_size(Some(READ_LIMIT))
         .max_frame_size(Some(READ_LIMIT));
-    let connect = tokio_tungstenite::connect_async_with_config(ws_url, Some(config), false);
-    let stream = tokio::select! {
+    let mut request = match ws_url.into_client_request() {
+        Ok(r) => r,
+        Err(err) => return (false, Some(err.to_string())),
+    };
+    request
+        .headers_mut()
+        .insert(zwire::HEADER, HeaderValue::from_static(zwire::ZSTD));
+    let connect = tokio_tungstenite::connect_async_with_config(request, Some(config), false);
+    let (stream, zipped) = tokio::select! {
         _ = cancel.cancelled() => return (false, Some("context canceled".to_string())),
         res = tokio::time::timeout(SESSION_DIAL_TIMEOUT, connect) => match res {
-            Ok(Ok((s, _))) => s,
+            Ok(Ok((s, resp))) => (s, zwire::offers_zstd(resp.headers().get(zwire::HEADER).and_then(|v| v.to_str().ok()))),
             Ok(Err(err)) => return (false, Some(err.to_string())),
             Err(_) => return (false, Some("context deadline exceeded".to_string())),
         },
     };
+    let (zip, mut unzip) = if zipped {
+        match (Packer::new(zwire::LEVEL), Unpacker::new(READ_LIMIT)) {
+            (Ok(p), Ok(u)) => (Some(p), Some(u)),
+            (Err(err), _) | (_, Err(err)) => return (false, Some(err.to_string())),
+        }
+    } else {
+        (None, None)
+    };
     let (sink, mut source) = stream.split();
 
-    let ready = match await_tunnel_ready(cancel, &mut source).await {
+    let ready = match await_tunnel_ready(cancel, &mut source, &mut unzip).await {
         Ok(r) => r,
         Err(err) => return (false, Some(err)),
     };
@@ -386,7 +404,7 @@ async fn serve_session(
         *announced = true;
     }
 
-    let client = Arc::new(TunnelClient::new(sink, http_host));
+    let client = Arc::new(TunnelClient::new(sink, zip, http_host));
     let session = cancel.child_token();
     tokio::spawn(
         client
@@ -394,7 +412,7 @@ async fn serve_session(
             .accept_loop(session.clone(), listener.clone()),
     );
 
-    let end = client.read_loop(&session, &mut source).await;
+    let end = client.read_loop(&session, &mut source, &mut unzip).await;
     session.cancel();
     client.shutdown("session ended").await;
     drop(source);
@@ -406,14 +424,29 @@ async fn serve_session(
     }
 }
 
+fn inflate(msg: Message, unzip: &mut Option<Unpacker>) -> Result<Message, String> {
+    match (msg, unzip.as_mut()) {
+        (Message::Binary(b), Some(u)) => {
+            let raw = u
+                .unpack(&b)
+                .map_err(|e| format!("bad compressed frame: {e}"))?;
+            String::from_utf8(raw)
+                .map(Message::text)
+                .map_err(|e| format!("bad compressed frame: {e}"))
+        }
+        (m, _) => Ok(m),
+    }
+}
+
 async fn await_tunnel_ready(
     cancel: &CancellationToken,
     source: &mut WsSource,
+    unzip: &mut Option<Unpacker>,
 ) -> Result<TunnelReady, String> {
     let wait = async {
         loop {
             let msg = match source.next().await {
-                Some(Ok(m)) => m,
+                Some(Ok(m)) => inflate(m, unzip)?,
                 Some(Err(err)) => return Err(err.to_string()),
                 None => return Err("EOF".to_string()),
             };
@@ -471,15 +504,15 @@ struct StreamEntry {
 }
 
 struct TunnelClient {
-    sink: tokio::sync::Mutex<Option<WsSink>>,
+    sink: tokio::sync::Mutex<Option<(WsSink, Option<Packer>)>>,
     http_host: String,
     streams: Mutex<HashMap<String, StreamEntry>>,
 }
 
 impl TunnelClient {
-    fn new(sink: WsSink, http_host: String) -> TunnelClient {
+    fn new(sink: WsSink, zip: Option<Packer>, http_host: String) -> TunnelClient {
         TunnelClient {
-            sink: tokio::sync::Mutex::new(Some(sink)),
+            sink: tokio::sync::Mutex::new(Some((sink, zip))),
             http_host,
             streams: Mutex::new(HashMap::new()),
         }
@@ -529,14 +562,20 @@ impl TunnelClient {
         }
     }
 
-    async fn read_loop(&self, session: &CancellationToken, source: &mut WsSource) -> LoopEnd {
+    async fn read_loop(
+        &self,
+        session: &CancellationToken,
+        source: &mut WsSource,
+        unzip: &mut Option<Unpacker>,
+    ) -> LoopEnd {
         loop {
             let next = tokio::select! {
                 _ = session.cancelled() => return LoopEnd::Cancelled,
                 n = source.next() => n,
             };
-            let msg = match next {
-                Some(Ok(m)) => m,
+            let msg = match next.map(|r| r.map(|m| inflate(m, unzip))) {
+                Some(Ok(Ok(m))) => m,
+                Some(Ok(Err(err))) => return LoopEnd::Failed(err),
                 Some(Err(err)) => return LoopEnd::Failed(err.to_string()),
                 None => return LoopEnd::Failed("EOF".to_string()),
             };
@@ -652,7 +691,13 @@ impl TunnelClient {
         let data = serde_json::to_string(frame).map_err(|e| e.to_string())?;
         let mut sink = self.sink.lock().await;
         match sink.as_mut() {
-            Some(s) => s.send(Message::text(data)).await.map_err(|e| e.to_string()),
+            Some((s, Some(z))) => {
+                let packed = z.pack(data.as_bytes()).map_err(|e| e.to_string())?;
+                s.send(Message::binary(packed))
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Some((s, None)) => s.send(Message::text(data)).await.map_err(|e| e.to_string()),
             None => Err("tunnel client closed".to_string()),
         }
     }
@@ -1326,6 +1371,103 @@ mod tests {
             .decode(data["data_base64"].as_str().unwrap())
             .unwrap();
         assert_eq!(sent, b"GET / HTTP/1.1\r\nHost: fritz.repeater\r\n\r\n");
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn a_relay_that_echoes_zstd_gets_compressed_frames_both_ways() {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/api/tunnel/tk", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let record = seen.clone();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let echo = |req: &Request, mut resp: Response| {
+                let asked = zwire::offers_zstd(
+                    req.headers()
+                        .get(zwire::HEADER)
+                        .and_then(|v| v.to_str().ok()),
+                );
+                if asked {
+                    resp.headers_mut()
+                        .insert(zwire::HEADER, HeaderValue::from_static(zwire::ZSTD));
+                }
+                Ok(resp)
+            };
+            let mut ws = tokio_tungstenite::accept_hdr_async(tcp, echo)
+                .await
+                .unwrap();
+            let mut zip = Packer::new(3).unwrap();
+            let mut unzip = Unpacker::new(READ_LIMIT).unwrap();
+            let mut send =
+                |v: serde_json::Value| Message::binary(zip.pack(v.to_string().as_bytes()).unwrap());
+            let _ = ws
+                .send(send(serde_json::json!({"kind": "tunnel_ready", "tunnel_id": "tn1", "host_addr": "127.0.0.1", "host_port": 80})))
+                .await;
+            while let Some(Ok(msg)) = ws.next().await {
+                let Message::Binary(b) = msg else { continue };
+                let frame: serde_json::Value =
+                    serde_json::from_slice(&unzip.unpack(&b).unwrap()).unwrap();
+                record.lock().unwrap().push(frame.clone());
+                if frame["kind"] == "data" {
+                    let sid = frame["stream_id"].as_str().unwrap().to_string();
+                    let body = base64::engine::general_purpose::STANDARD.encode(
+                        b"HTTP/1.1 204 No Content
+
+",
+                    );
+                    let _ = ws
+                        .send(send(serde_json::json!({"kind": "data", "tunnel_id": "tn1", "stream_id": sid, "data_base64": body})))
+                        .await;
+                    let _ = ws
+                        .send(send(serde_json::json!({"kind": "stream_close", "tunnel_id": "tn1", "stream_id": sid, "reason": "eof"})))
+                        .await;
+                }
+            }
+        });
+
+        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let cancel = CancellationToken::new();
+        let run = tokio::spawn(run_sessions(
+            opts(""),
+            url,
+            tcp,
+            addr.port(),
+            cancel.clone(),
+        ));
+        let mut conn = TcpStream::connect(addr).await.unwrap();
+        conn.write_all(
+            b"GET / HTTP/1.1
+Host: 127.0.0.1
+
+",
+        )
+        .await
+        .unwrap();
+        let mut got = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), conn.read_to_end(&mut got))
+            .await
+            .expect("response did not arrive")
+            .unwrap();
+        assert_eq!(
+            got,
+            b"HTTP/1.1 204 No Content
+
+"
+        );
+        let kinds: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|f| f["kind"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(&kinds[..2], ["stream_open", "data"]);
 
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;

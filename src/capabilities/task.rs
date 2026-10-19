@@ -1,7 +1,8 @@
 use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
 
 use super::proc::{fill, int_arg, load_specs, string_arg};
-use super::pwsh::{ps_single_quote, run_pwsh_json};
+use super::pwsh::ps_single_quote;
+use super::pwsh_out::run_pwsh_json;
 
 const TEMPLATE: &str = r##"
 $prefix = @@PREFIX@@

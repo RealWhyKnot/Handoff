@@ -1,7 +1,8 @@
 use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
 
 use super::proc::{bool_arg, fill, int_arg, string_arg};
-use super::pwsh::{ps_single_quote, run_pwsh_json};
+use super::pwsh::ps_single_quote;
+use super::pwsh_out::run_pwsh_json;
 
 const TEMPLATE: &str = r##"
 $hive = @@HIVE@@
@@ -102,7 +103,11 @@ while ($stack.Count -gt 0 -and $visited.Count -lt $max) {
 const HIVES: [&str; 5] = ["HKLM", "HKCU", "HKCR", "HKU", "HKCC"];
 
 pub fn register(r: &mut Router) {
-    r.register("reg.query", handler(reg_query));
+    super::register_specs(
+        r,
+        include_str!("specs/reg.json"),
+        vec![("reg.query", handler(reg_query))],
+    );
 }
 
 fn key_char_allowed(c: char) -> bool {
@@ -184,12 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn registers_reg_query_as_a_plain_spec() {
+    fn registers_reg_query_with_a_full_spec() {
         let mut r = Router::new();
         register(&mut r);
         assert_eq!(r.kinds(), vec!["reg.query"]);
         let spec = r.spec_for("reg.query").unwrap();
-        assert!(spec.params.is_empty() && spec.label.is_empty());
+        assert_eq!(spec.label, "Query registry");
+        assert!(spec.params.iter().any(|p| p.name == "key" && p.required));
     }
 
     #[test]

@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub const DEFAULT_STRING_MAX_BYTES: usize = 2048;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamType {
@@ -101,6 +103,13 @@ impl Param {
         self.description = description.to_string();
         self
     }
+
+    pub fn effective_max_bytes(&self) -> usize {
+        match (self.max_bytes, self.kind) {
+            (0, ParamType::String) => DEFAULT_STRING_MAX_BYTES,
+            (n, _) => n,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -158,7 +167,12 @@ impl Spec {
                 }
             }
 
-            if present && out.get(&p.name).is_some_and(Value::is_null) {
+            let blank_enum = p.kind == ParamType::Enum
+                && out
+                    .get(&p.name)
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v.trim().is_empty());
+            if present && (blank_enum || out.get(&p.name).is_some_and(Value::is_null)) {
                 out.remove(&p.name);
                 present = false;
             }
@@ -232,8 +246,12 @@ fn bind_one(kind: &str, p: &Param, raw: Value) -> Result<(Value, Option<Clamp>),
             let Some(v) = raw.as_str() else {
                 return Err(format!("{kind}: '{}' must be a string", p.name));
             };
-            if p.enum_values.iter().any(|allowed| allowed == v) {
-                Ok((raw, None))
+            if let Some(allowed) = p
+                .enum_values
+                .iter()
+                .find(|allowed| allowed.eq_ignore_ascii_case(v.trim()))
+            {
+                Ok((Value::from(allowed.as_str()), None))
             } else {
                 Err(format!(
                     "{kind}: '{}' must be one of: {}",
@@ -246,12 +264,13 @@ fn bind_one(kind: &str, p: &Param, raw: Value) -> Result<(Value, Option<Clamp>),
             let Some(v) = raw.as_str() else {
                 return Err(format!("{kind}: '{}' must be a string", p.name));
             };
-            if p.max_bytes > 0 && v.len() > p.max_bytes {
+            let cap = p.effective_max_bytes();
+            if cap > 0 && v.len() > cap {
                 return Err(format!(
                     "{kind}: '{}' is {} bytes; cap is {}",
                     p.name,
                     v.len(),
-                    p.max_bytes
+                    cap
                 ));
             }
             Ok((raw, None))
@@ -346,6 +365,20 @@ mod tests {
     }
 
     #[test]
+    fn bind_matches_enums_case_insensitively_and_returns_the_canonical_value() {
+        let bound = list_spec()
+            .bind(&args(json!({"match_mode": " Prefix "})))
+            .unwrap();
+        assert_eq!(bound.args["match_mode"], json!("prefix"));
+    }
+
+    #[test]
+    fn bind_treats_a_blank_enum_as_absent() {
+        let bound = list_spec().bind(&args(json!({"match_mode": ""}))).unwrap();
+        assert_eq!(bound.args["match_mode"], json!("contains"));
+    }
+
+    #[test]
     fn bind_reports_unknown_keys() {
         let bound = list_spec().bind(&args(json!({"maxresults": 5}))).unwrap();
         assert_eq!(bound.ignored, vec!["maxresults".to_string()]);
@@ -376,6 +409,39 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.contains("cap is 8"), "{err}");
+    }
+
+    #[test]
+    fn strings_without_a_cap_get_the_default_cap() {
+        let spec = list_spec();
+        let at_cap = "x".repeat(DEFAULT_STRING_MAX_BYTES);
+        let bound = spec.bind(&args(json!({"match": at_cap}))).unwrap();
+        assert_eq!(bound.args["match"].as_str().unwrap().len(), 2048);
+        let err = spec
+            .bind(&args(
+                json!({"match": "x".repeat(DEFAULT_STRING_MAX_BYTES + 1)}),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err, "app.list: 'match' is 2049 bytes; cap is 2048");
+
+        let roomy = Spec {
+            kind: "fs.write".into(),
+            params: vec![Param::new("content", ParamType::String).max_bytes(1 << 20)],
+            ..Spec::default()
+        };
+        assert!(roomy
+            .bind(&args(json!({"content": "x".repeat(100_000)})))
+            .is_ok());
+
+        let blob = Spec {
+            kind: "fs.upload".into(),
+            params: vec![Param::new("data", ParamType::BytesBase64)],
+            ..Spec::default()
+        };
+        assert!(blob
+            .bind(&args(json!({"data": "x".repeat(100_000)})))
+            .is_ok());
     }
 
     #[test]

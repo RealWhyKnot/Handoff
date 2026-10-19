@@ -66,6 +66,10 @@ async fn run_picotool(cancel: &CancellationToken, args: &[String]) -> Run {
         Ok(p) => p,
         Err(e) => return Run::failed(e),
     };
+    let _slot = match crate::capabilities::pwsh::process_slot(cancel).await {
+        Ok(s) => s,
+        Err(f) => return Run::failed(f.message),
+    };
     let child = Command::new(&pt)
         .args(args)
         .stdin(Stdio::null())

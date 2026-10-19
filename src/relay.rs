@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,11 +22,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::{Clamp, Outcome, Spec};
 use crate::util;
+use crate::zwire::{self, Packer, Unpacker};
 
 pub const READ_LIMIT: usize = 8 << 20;
 pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 pub const PING_TIMEOUT: Duration = Duration::from_secs(30);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+pub const PENDING_RESULTS_CAP: usize = 32;
+pub const PRESENCE_KIND: &str = "control.presence";
+pub const UNREADABLE_FRAME: &str = "This computer couldn't read that request, so it didn't run it.";
+pub const UNREADABLE_NO_KIND: &str = "The request didn't say which command to run, so nothing ran.";
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
@@ -137,7 +143,7 @@ fn close_code_name(code: u16) -> String {
 impl fmt::Display for RecvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RecvError::Cancelled => f.write_str("context canceled"),
+            RecvError::Cancelled => f.write_str("stopped"),
             RecvError::Stale => f.write_str("bridge stale: ping timeout"),
             RecvError::BridgeClosed => f.write_str("bridge is closed"),
             RecvError::Closed { code, reason } => write!(
@@ -176,8 +182,23 @@ enum Incoming {
     Failed(String),
 }
 
+struct Writer {
+    sink: WsSink,
+    zip: Option<Packer>,
+}
+
+impl Writer {
+    async fn send_text(&mut self, text: String) -> Result<(), String> {
+        let msg = match &mut self.zip {
+            Some(zip) => Message::binary(zip.pack(text.as_bytes()).map_err(|e| e.to_string())?),
+            None => Message::text(text),
+        };
+        self.sink.send(msg).await.map_err(|e| e.to_string())
+    }
+}
+
 struct Conn {
-    sink: tokio::sync::Mutex<WsSink>,
+    sink: tokio::sync::Mutex<Writer>,
     rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Incoming>>,
     stale: AtomicBool,
     reader: AbortHandle,
@@ -211,6 +232,33 @@ struct Inner {
     timing: KeepaliveTiming,
     conn: Mutex<Option<Arc<Conn>>>,
     hello: Mutex<Option<Hello>>,
+    presence: AtomicBool,
+    pending: tokio::sync::Mutex<VecDeque<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Sent,
+    Queued,
+}
+
+impl Inner {
+    fn new(
+        base_url: &str,
+        write_token: &str,
+        timing: KeepaliveTiming,
+        conn: Option<Arc<Conn>>,
+    ) -> Inner {
+        Inner {
+            base_url: base_url.to_string(),
+            write_token: write_token.to_string(),
+            timing,
+            conn: Mutex::new(conn),
+            hello: Mutex::new(None),
+            presence: AtomicBool::new(false),
+            pending: tokio::sync::Mutex::new(VecDeque::new()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -244,24 +292,40 @@ async fn dial_conn(
         .map_err(|e| format!("ws dial: {e}"))?;
     let token = HeaderValue::from_str(write_token).map_err(|e| format!("ws dial: {e}"))?;
     request.headers_mut().insert("X-Write-Token", token);
+    request
+        .headers_mut()
+        .insert(zwire::HEADER, HeaderValue::from_static(zwire::ZSTD));
 
     let config = WebSocketConfig::default()
         .max_message_size(Some(READ_LIMIT))
         .max_frame_size(Some(READ_LIMIT));
 
     let connect = tokio_tungstenite::connect_async_with_config(request, Some(config), false);
-    let stream = tokio::select! {
-        _ = cancel.cancelled() => return Err("ws dial: context canceled".to_string()),
-        res = connect => res.map_err(|e| format!("ws dial: {e}"))?.0,
+    let (stream, response) = tokio::select! {
+        _ = cancel.cancelled() => return Err("ws dial: stopped".to_string()),
+        res = connect => res.map_err(|e| format!("ws dial: {e}"))?,
+    };
+    let zipped = zwire::offers_zstd(
+        response
+            .headers()
+            .get(zwire::HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
+    let (zip, unzip) = if zipped {
+        let zip = Packer::new(zwire::LEVEL).map_err(|e| format!("ws dial: {e}"))?;
+        let unzip = Unpacker::new(READ_LIMIT).map_err(|e| format!("ws dial: {e}"))?;
+        (Some(zip), Some(unzip))
+    } else {
+        (None, None)
     };
 
     let (sink, source) = stream.split();
     let (tx, rx) = mpsc::unbounded_channel();
     let (pong_tx, pong_rx) = watch::channel(0u64);
-    let reader = tokio::spawn(read_loop(source, tx, pong_tx));
+    let reader = tokio::spawn(read_loop(source, tx, pong_tx, unzip));
 
     let conn = Arc::new(Conn {
-        sink: tokio::sync::Mutex::new(sink),
+        sink: tokio::sync::Mutex::new(Writer { sink, zip }),
         rx: tokio::sync::Mutex::new(rx),
         stale: AtomicBool::new(false),
         reader: reader.abort_handle(),
@@ -276,12 +340,33 @@ async fn read_loop(
     mut source: WsSource,
     tx: mpsc::UnboundedSender<Incoming>,
     pongs: watch::Sender<u64>,
+    mut unzip: Option<Unpacker>,
 ) {
     while let Some(item) = source.next().await {
         match item {
             Ok(Message::Text(text)) => {
                 if tx.send(Incoming::Text(text.to_string())).is_err() {
                     return;
+                }
+            }
+            Ok(Message::Binary(bytes)) => {
+                let Some(unzip) = unzip.as_mut() else {
+                    continue;
+                };
+                let text = unzip
+                    .unpack(&bytes)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()));
+                match text {
+                    Ok(text) => {
+                        if tx.send(Incoming::Text(text)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Incoming::Failed(format!("bad compressed frame: {e}")));
+                        return;
+                    }
                 }
             }
             Ok(Message::Pong(_)) => {
@@ -310,6 +395,7 @@ async fn keepalive(conn: Arc<Conn>, mut pongs: watch::Receiver<u64>, timing: Kee
             conn.sink
                 .lock()
                 .await
+                .sink
                 .send(Message::Ping(Vec::new().into()))
                 .await
                 .map_err(|_| false)?;
@@ -348,13 +434,7 @@ impl Bridge {
     ) -> Result<Bridge, String> {
         let conn = dial_conn(base_url, write_token, cancel, timing).await?;
         Ok(Bridge {
-            inner: Arc::new(Inner {
-                base_url: base_url.to_string(),
-                write_token: write_token.to_string(),
-                timing,
-                conn: Mutex::new(Some(conn)),
-                hello: Mutex::new(None),
-            }),
+            inner: Arc::new(Inner::new(base_url, write_token, timing, Some(conn))),
         })
     }
 
@@ -396,6 +476,9 @@ impl Bridge {
         payload.insert("os".into(), json!("windows"));
         payload.insert("protocol_version".into(), json!(2));
         payload.insert("capabilities".into(), json!(hello.capabilities));
+        if self.inner.presence.load(Ordering::SeqCst) {
+            payload.insert("presence".into(), json!(true));
+        }
         if !hello.specs.is_empty() {
             payload.insert(
                 "command_specs".into(),
@@ -405,26 +488,94 @@ impl Bridge {
         self.send("hello", Value::Object(payload)).await
     }
 
+    pub fn want_presence(&self) {
+        self.inner.presence.store(true, Ordering::SeqCst);
+    }
+
     pub async fn send_command_result(&self, id: &str, out: &Outcome) -> Result<(), String> {
-        let mut payload = Map::new();
-        payload.insert("id".into(), json!(id));
-        payload.insert("ok".into(), json!(out.ok));
-        payload.insert("result".into(), out.result.clone());
-        payload.insert("error".into(), json!(out.error));
-        payload.insert("elapsed_ms".into(), json!(out.elapsed_ms));
-        if let Some(detail) = &out.detail {
-            payload.insert("detail".into(), detail.clone());
+        self.send("command_result", result_payload(id, out)?).await
+    }
+
+    pub async fn send_command_result_or_queue(
+        &self,
+        id: &str,
+        out: &Outcome,
+    ) -> Result<Delivery, String> {
+        let text = frame_text("command_result", result_payload(id, out)?)?;
+        let conn = match self.current_conn() {
+            Ok(conn) => conn,
+            Err(_) => {
+                self.queue_result(text).await;
+                return Ok(Delivery::Queued);
+            }
+        };
+        let sent = conn.sink.lock().await.send_text(text.clone()).await;
+        if sent.is_ok() {
+            return Ok(Delivery::Sent);
         }
-        if !out.clamped.is_empty() {
-            payload.insert(
-                "clamped".into(),
-                serde_json::to_value::<&Vec<Clamp>>(&out.clamped).map_err(|e| e.to_string())?,
-            );
+        self.queue_result(text).await;
+        let moved = self
+            .current_conn()
+            .map(|now| !Arc::ptr_eq(&now, &conn))
+            .unwrap_or(false);
+        if moved {
+            self.flush_pending().await;
+            if self.inner.pending.lock().await.is_empty() {
+                return Ok(Delivery::Sent);
+            }
         }
-        if !out.ignored.is_empty() {
-            payload.insert("ignored".into(), json!(out.ignored));
+        Ok(Delivery::Queued)
+    }
+
+    async fn queue_result(&self, text: String) {
+        let mut pending = self.inner.pending.lock().await;
+        while pending.len() >= PENDING_RESULTS_CAP {
+            pending.pop_front();
         }
-        self.send("command_result", Value::Object(payload)).await
+        pending.push_back(text);
+    }
+
+    pub async fn pending_results(&self) -> usize {
+        self.inner.pending.lock().await.len()
+    }
+
+    async fn flush_pending(&self) -> usize {
+        let mut pending = self.inner.pending.lock().await;
+        let Ok(conn) = self.current_conn() else {
+            return 0;
+        };
+        let mut sent = 0;
+        while let Some(text) = pending.pop_front() {
+            if conn
+                .sink
+                .lock()
+                .await
+                .send_text(text.clone())
+                .await
+                .is_err()
+            {
+                pending.push_front(text);
+                break;
+            }
+            sent += 1;
+        }
+        sent
+    }
+
+    async fn reply_unreadable(&self, id: &str, why: &str) {
+        let out = Outcome {
+            ok: false,
+            error: why.to_string(),
+            ..Outcome::default()
+        };
+        if let Err(err) = self.send_command_result(id, &out).await {
+            crate::slog!("unreadable command reply failed id={id}: {err}");
+        }
+    }
+
+    pub async fn send_command_progress(&self, id: &str, text: &str) -> Result<(), String> {
+        self.send("command_progress", json!({"id": id, "text": text}))
+            .await
     }
 
     pub async fn send_tunnel_data(
@@ -482,8 +633,22 @@ impl Bridge {
                     return Err(RecvError::Eof);
                 }
                 Some(Incoming::Text(text)) => match Command::parse(&text) {
+                    Some(cmd) if cmd.kind.is_empty() && !cmd.id.is_empty() => {
+                        crate::slog!("command without a kind id={}", cmd.id);
+                        self.reply_unreadable(&cmd.id, UNREADABLE_NO_KIND).await;
+                        continue;
+                    }
                     Some(cmd) => return Ok(cmd),
-                    None => continue,
+                    None => {
+                        match salvage_id(&text) {
+                            Some(id) => {
+                                crate::slog!("unreadable command id={id} len={}", text.len());
+                                self.reply_unreadable(&id, UNREADABLE_FRAME).await;
+                            }
+                            None => crate::slog!("dropped unreadable frame len={}", text.len()),
+                        }
+                        continue;
+                    }
                 },
                 Some(Incoming::Closed(frame)) => {
                     if conn.stale.load(Ordering::SeqCst) {
@@ -532,7 +697,12 @@ impl Bridge {
             .clone();
         self.send_hello_payload(hello)
             .await
-            .map_err(|e| format!("replay hello: {e}"))
+            .map_err(|e| format!("replay hello: {e}"))?;
+        let flushed = self.flush_pending().await;
+        if flushed > 0 {
+            crate::slog!("resent {flushed} queued result(s) after reconnect");
+        }
+        Ok(())
     }
 
     pub async fn close(&self) {
@@ -567,24 +737,62 @@ impl Bridge {
     }
 
     pub async fn send(&self, kind: &str, payload: Value) -> Result<(), String> {
-        let event = TelemetryEvent {
-            ts: util::now_ms(),
-            kind,
-            payload,
-        };
-        let text = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+        let text = frame_text(kind, payload)?;
         let conn = self.current_conn().map_err(|e| e.to_string())?;
-        let mut sink = conn.sink.lock().await;
-        sink.send(Message::text(text))
-            .await
-            .map_err(|e| e.to_string())
+        let mut writer = conn.sink.lock().await;
+        writer.send_text(text).await
     }
+}
+
+fn result_payload(id: &str, out: &Outcome) -> Result<Value, String> {
+    let mut payload = Map::new();
+    payload.insert("id".into(), json!(id));
+    payload.insert("ok".into(), json!(out.ok));
+    payload.insert("result".into(), out.result.clone());
+    payload.insert("error".into(), json!(out.error));
+    payload.insert("elapsed_ms".into(), json!(out.elapsed_ms));
+    if let Some(detail) = &out.detail {
+        payload.insert("detail".into(), detail.clone());
+    }
+    if !out.clamped.is_empty() {
+        payload.insert(
+            "clamped".into(),
+            serde_json::to_value::<&Vec<Clamp>>(&out.clamped).map_err(|e| e.to_string())?,
+        );
+    }
+    if !out.ignored.is_empty() {
+        payload.insert("ignored".into(), json!(out.ignored));
+    }
+    Ok(Value::Object(payload))
+}
+
+fn frame_text(kind: &str, payload: Value) -> Result<String, String> {
+    let event = TelemetryEvent {
+        ts: util::now_ms(),
+        kind,
+        payload,
+    };
+    serde_json::to_string(&event).map_err(|e| e.to_string())
+}
+
+fn salvage_id(text: &str) -> Option<String> {
+    let at = text.find("\"id\"")?;
+    let rest = text[at + 4..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let id = &rest[..end];
+    if id.is_empty() || id.len() > 128 || id.contains('\\') {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 async fn close_conn(conn: &Conn, reason: &'static str) {
     let closing = async {
-        let mut sink = conn.sink.lock().await;
-        let _ = sink
+        let mut writer = conn.sink.lock().await;
+        let _ = writer
+            .sink
             .send(Message::Close(Some(CloseFrame {
                 code: CloseCode::Normal,
                 reason: reason.into(),
@@ -903,13 +1111,12 @@ mod tests {
         let cancel = token();
         cancel.cancel();
         let bridge = Bridge {
-            inner: Arc::new(Inner {
-                base_url: "http://127.0.0.1:1".into(),
-                write_token: "write-token".into(),
-                timing: KeepaliveTiming::default(),
-                conn: Mutex::new(None),
-                hello: Mutex::new(None),
-            }),
+            inner: Arc::new(Inner::new(
+                "http://127.0.0.1:1",
+                "write-token",
+                KeepaliveTiming::default(),
+                None,
+            )),
         };
         assert!(bridge.reconnect(&cancel).await.is_err());
     }
@@ -987,13 +1194,12 @@ mod tests {
         );
 
         let moved = Bridge {
-            inner: Arc::new(Inner {
-                base_url: live_url,
-                write_token: "write-token".into(),
-                timing: fast(),
-                conn: Mutex::new(bridge.current_conn().ok()),
-                hello: Mutex::new(None),
-            }),
+            inner: Arc::new(Inner::new(
+                &live_url,
+                "write-token",
+                fast(),
+                bridge.current_conn().ok(),
+            )),
         };
         within(moved.reconnect(&cancel)).await.unwrap();
         let cmd = within(moved.recv(&cancel)).await.unwrap();
@@ -1054,5 +1260,137 @@ mod tests {
             RecvError::Cancelled
         );
         accepting.abort();
+    }
+
+    #[tokio::test]
+    async fn hello_carries_presence_beside_a_flat_capability_list() {
+        let TestServer { url, listener } = server().await;
+        let accepting = tokio::spawn(async move {
+            let (mut ws, _) = accept(&listener).await;
+            next_text(&mut ws).await
+        });
+        let bridge = within(Bridge::dial(&url, "t", &token())).await.unwrap();
+        bridge.want_presence();
+        within(bridge.send_hello("h", "v", &["b.x".to_string(), "a.y".to_string()], &[]))
+            .await
+            .unwrap();
+        let hello = within(accepting).await.unwrap();
+        assert_eq!(hello["payload"]["presence"], json!(true));
+        assert_eq!(hello["payload"]["capabilities"], json!(["a.y", "b.x"]));
+    }
+
+    #[tokio::test]
+    async fn hello_leaves_presence_out_unless_asked() {
+        let TestServer { url, listener } = server().await;
+        let accepting = tokio::spawn(async move {
+            let (mut ws, _) = accept(&listener).await;
+            next_text(&mut ws).await
+        });
+        let bridge = within(Bridge::dial(&url, "t", &token())).await.unwrap();
+        within(bridge.send_hello("h", "v", &[], &[])).await.unwrap();
+        let hello = within(accepting).await.unwrap();
+        assert!(hello["payload"].get("presence").is_none());
+    }
+
+    #[tokio::test]
+    async fn result_sent_while_offline_is_resent_after_reconnect() {
+        let TestServer { url, listener } = server().await;
+        let accepting = tokio::spawn(async move {
+            let (mut ws, _) = accept(&listener).await;
+            let hello = next_text(&mut ws).await;
+            let result = next_text(&mut ws).await;
+            (hello, result)
+        });
+        let bridge = Bridge {
+            inner: Arc::new(Inner::new(&url, "t", KeepaliveTiming::default(), None)),
+        };
+        let _ = bridge.send_hello("h", "v", &[], &[]).await;
+        let out = Outcome {
+            ok: true,
+            result: json!({"done": 1}),
+            ..Outcome::default()
+        };
+        assert_eq!(
+            bridge
+                .send_command_result_or_queue("c7", &out)
+                .await
+                .unwrap(),
+            Delivery::Queued
+        );
+        assert_eq!(bridge.pending_results().await, 1);
+        within(bridge.reconnect(&token())).await.unwrap();
+        let (hello, result) = within(accepting).await.unwrap();
+        assert_eq!(hello["kind"], "hello");
+        assert_eq!(result["kind"], "command_result");
+        assert_eq!(result["payload"]["id"], "c7");
+        assert_eq!(result["payload"]["result"], json!({"done": 1}));
+        assert_eq!(bridge.pending_results().await, 0);
+        bridge.close().await;
+    }
+
+    #[tokio::test]
+    async fn queue_keeps_only_the_newest_results() {
+        let bridge = Bridge {
+            inner: Arc::new(Inner::new(
+                "http://127.0.0.1:1",
+                "t",
+                KeepaliveTiming::default(),
+                None,
+            )),
+        };
+        for i in 0..PENDING_RESULTS_CAP + 5 {
+            let _ = bridge
+                .send_command_result_or_queue(&format!("c{i}"), &Outcome::default())
+                .await;
+        }
+        assert_eq!(bridge.pending_results().await, PENDING_RESULTS_CAP);
+        let first = bridge.inner.pending.lock().await.front().cloned().unwrap();
+        assert!(first.contains("\"id\":\"c5\""), "{first}");
+    }
+
+    #[tokio::test]
+    async fn unreadable_command_with_an_id_gets_an_error_reply() {
+        let TestServer { url, listener } = server().await;
+        let accepting = tokio::spawn(async move {
+            let (mut ws, _) = accept(&listener).await;
+            ws.send(Message::text(r#"{"id":"c3","kind":"fs.read","args":{"#))
+                .await
+                .unwrap();
+            ws.send(Message::text(r#"{"id":"c4","timeout_ms":5}"#))
+                .await
+                .unwrap();
+            ws.send(Message::text(r#"{"id":"c5","kind":"sys.info"}"#))
+                .await
+                .unwrap();
+            let a = next_text(&mut ws).await;
+            let b = next_text(&mut ws).await;
+            while ws.next().await.is_some() {}
+            (a, b)
+        });
+        let cancel = token();
+        let bridge = within(Bridge::dial(&url, "t", &cancel)).await.unwrap();
+        let cmd = within(bridge.recv(&cancel)).await.unwrap();
+        assert_eq!(cmd.id, "c5");
+        let (a, b) = within(async {
+            bridge.close().await;
+            accepting.await.unwrap()
+        })
+        .await;
+        assert_eq!(a["payload"]["id"], "c3");
+        assert_eq!(a["payload"]["ok"], false);
+        assert_eq!(a["payload"]["error"], UNREADABLE_FRAME);
+        assert_eq!(b["payload"]["id"], "c4");
+        assert_eq!(b["payload"]["error"], UNREADABLE_NO_KIND);
+    }
+
+    #[test]
+    fn salvage_id_finds_the_id_in_broken_json() {
+        assert_eq!(
+            salvage_id(r#"{"id": "c1", "kind": "#).as_deref(),
+            Some("c1")
+        );
+        assert_eq!(salvage_id(r#"{"kind":"x""#), None);
+        assert_eq!(salvage_id(r#"{"id":5}"#), None);
+        assert_eq!(salvage_id("not json"), None);
     }
 }

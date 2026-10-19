@@ -17,15 +17,31 @@ pub use spec::{Bound, Clamp, Param, ParamType, Spec};
 pub type Args = Map<String, Value>;
 pub type CapResult = Result<Value, HandlerError>;
 pub type Handler = Arc<dyn Fn(Ctx, Args) -> BoxFuture<'static, CapResult> + Send + Sync>;
+pub type Progress = Arc<dyn Fn(String) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct Ctx {
     pub cancel: CancellationToken,
+    pub progress: Option<Progress>,
 }
 
 impl Ctx {
     pub fn new(cancel: CancellationToken) -> Ctx {
-        Ctx { cancel }
+        Ctx {
+            cancel,
+            progress: None,
+        }
+    }
+
+    pub fn with_progress(mut self, progress: Progress) -> Ctx {
+        self.progress = Some(progress);
+        self
+    }
+
+    pub fn report(&self, text: String) {
+        if let Some(progress) = &self.progress {
+            progress(text);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -39,6 +55,66 @@ where
     Fut: Future<Output = CapResult> + Send + 'static,
 {
     Arc::new(move |ctx, args| Box::pin(f(ctx, args)))
+}
+
+pub struct Shown {
+    pub text: String,
+    pub cut: bool,
+}
+
+fn hidden_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    ) || (c.is_control() && c != '\n' && c != '\t')
+}
+
+pub fn for_display(text: &str, max_chars: usize, max_lines: usize) -> Shown {
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut lines = 1usize;
+    let mut space_run = 0usize;
+    let mut cut = false;
+    for c in text.chars() {
+        let c = match c {
+            '\t' => ' ',
+            '\u{2028}' | '\u{2029}' => '\n',
+            c if hidden_char(c) => continue,
+            c => c,
+        };
+        let c = if c == '\n' && max_lines <= 1 { ' ' } else { c };
+        if c == '\n' {
+            space_run = 0;
+            while out.ends_with(' ') {
+                out.pop();
+                chars -= 1;
+            }
+            if out.is_empty() || out.ends_with("\n\n") {
+                continue;
+            }
+            if lines >= max_lines {
+                cut = true;
+                break;
+            }
+            lines += 1;
+        } else if c == ' ' {
+            space_run += 1;
+            if space_run > 8 {
+                continue;
+            }
+        } else {
+            space_run = 0;
+        }
+        if chars >= max_chars {
+            cut = true;
+            break;
+        }
+        out.push(c);
+        chars += 1;
+    }
+    let kept = out.trim_end().len();
+    out.truncate(kept);
+    Shown { text: out, cut }
 }
 
 #[derive(Default, Clone)]
@@ -129,9 +205,21 @@ impl Router {
             }
         }
 
-        let task = AbortOnDrop(tokio::spawn(async move { h(ctx, args).await }));
-        let mut task = task;
-        let joined = (&mut task.0).await;
+        let cancel = ctx.cancel.clone();
+        let mut task = AbortOnDrop(tokio::spawn(async move { h(ctx, args).await }));
+        let joined = tokio::select! {
+            biased;
+            joined = &mut task.0 => joined,
+            _ = cancel.cancelled() => {
+                return Outcome {
+                    error: "command cancelled".to_string(),
+                    elapsed_ms: elapsed(t0),
+                    clamped,
+                    ignored,
+                    ..Outcome::default()
+                };
+            }
+        };
         match joined {
             Ok(Ok(result)) => Outcome {
                 ok: true,
@@ -204,6 +292,85 @@ mod tests {
             ],
             ..Spec::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_command_returns_without_waiting_for_its_handler() {
+        let mut r = Router::new();
+        r.register(
+            "stuck",
+            handler(|_, _| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(Value::Null)
+            }),
+        );
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            c.cancel();
+        });
+        let started = Instant::now();
+        let out = r.dispatch(Ctx::new(cancel), "stuck", Args::new()).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!out.ok);
+        assert_eq!(out.error, "command cancelled");
+    }
+
+    #[tokio::test]
+    async fn a_finished_command_keeps_its_result() {
+        let mut r = Router::new();
+        r.register("quick", handler(|_, _| async { Ok(json!("done")) }));
+        let cancel = CancellationToken::new();
+        let out = r
+            .dispatch(Ctx::new(cancel.clone()), "quick", Args::new())
+            .await;
+        cancel.cancel();
+        assert!(out.ok);
+        assert_eq!(out.result, json!("done"));
+    }
+
+    #[test]
+    fn display_text_drops_controls_and_bidi_overrides() {
+        let shown = for_display(
+            "a\u{202E}b\u{2066}c\u{2069}d\u{200F}e\u{1b}[31mf\u{7}g\rh\u{FEFF}i\u{0}j",
+            100,
+            10,
+        );
+        assert_eq!(shown.text, "abcde[31mfghij");
+        assert!(!shown.cut);
+        for c in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}',
+        ] {
+            assert_eq!(for_display(&format!("x{c}y"), 10, 1).text, "xy");
+        }
+    }
+
+    #[test]
+    fn display_text_is_cut_by_characters_and_lines() {
+        let shown = for_display(&"x".repeat(50), 10, 5);
+        assert_eq!(shown.text, "x".repeat(10));
+        assert!(shown.cut);
+
+        let shown = for_display("1\n2\n3\n4", 100, 2);
+        assert_eq!(shown.text, "1\n2");
+        assert!(shown.cut);
+
+        let shown = for_display("C:\\a\nb", 100, 1);
+        assert_eq!(shown.text, "C:\\a b");
+        assert!(!shown.cut);
+    }
+
+    #[test]
+    fn display_text_squeezes_padding_used_to_hide_things() {
+        let shown = for_display(
+            &format!("\n\n\nok{}; evil\n\n\n\n\nnext", " ".repeat(500)),
+            100,
+            10,
+        );
+        assert_eq!(shown.text, format!("ok{}; evil\n\nnext", " ".repeat(8)));
+        assert!(!shown.cut);
     }
 
     #[test]

@@ -4,10 +4,14 @@
   "control.cancel",
   "defender.status",
   "drv.list",
+  "drv.problems",
+  "evt.crashes",
   "evt.providers",
   "evt.snapshot",
   "fs.delete",
   "fs.download",
+  "fs.du",
+  "fs.grep",
   "fs.head",
   "fs.ls",
   "fs.mkdir",
@@ -18,8 +22,11 @@
   "fs.tree",
   "fs.upload",
   "fs.write",
+  "hw.battery",
   "hw.cpu",
+  "hw.disk-health",
   "hw.disks",
+  "hw.displays",
   "hw.gpu",
   "hw.ram",
   "hw.usb",
@@ -31,12 +38,15 @@
   "net.firewall",
   "net.listeners",
   "net.ping",
+  "net.profile",
+  "net.proxy",
   "net.resolve",
   "net.routes",
   "net.shares",
   "net.tcp-test",
   "net.tls",
   "net.trace",
+  "net.wifi",
   "net.wlan",
   "pico.bootsel",
   "pico.flash",
@@ -45,6 +55,8 @@
   "pico.reset",
   "pico.save",
   "pico.verify",
+  "print.jobs",
+  "print.list",
   "proc.find",
   "proc.kill",
   "proc.list",
@@ -59,9 +71,11 @@
   "sys.env",
   "sys.hotfixes",
   "sys.info",
+  "sys.power",
   "sys.reboot-required",
   "sys.resources",
   "sys.screenshot",
+  "sys.time-sync",
   "sys.timezone",
   "sys.uptime",
   "sys.users",
@@ -72,257 +86,859 @@
  ],
  "command_specs": [
   {
+   "description": "List installed applications.",
    "kind": "app.list",
    "label": "Installed apps",
-   "description": "List installed applications.",
    "params": [
     {
+     "description": "Match applications whose name starts with this.",
      "name": "name_prefix",
-     "type": "string",
-     "description": "Match applications whose name starts with this."
+     "type": "string"
     },
     {
-     "name": "limit",
-     "type": "int",
-     "default": 300,
-     "min": 1,
-     "max": 5000,
      "aliases": [
       "max_results"
      ],
-     "description": "Maximum rows to return."
+     "default": 300,
+     "description": "Maximum rows to return.",
+     "max": 5000,
+     "min": 1,
+     "name": "limit",
+     "type": "int"
     }
    ]
   },
   {
+   "description": "Ask the host to stop a running command.",
    "kind": "control.cancel",
    "label": "Cancel command",
-   "description": "Ask the host to stop a running command.",
    "params": [
     {
+     "description": "Id of the command to stop.",
      "name": "target_id",
-     "type": "string",
      "required": true,
-     "description": "Id of the command to stop."
+     "type": "string"
     }
    ]
   },
   {
-   "kind": "defender.status"
+   "description": "Defender protection state, signature age and last scans.",
+   "kind": "defender.status",
+   "label": "Defender status"
   },
   {
-   "kind": "drv.list"
+   "description": "Loaded signed drivers.",
+   "kind": "drv.list",
+   "label": "Drivers"
   },
   {
-   "kind": "evt.providers"
-  },
-  {
-   "kind": "evt.snapshot"
-  },
-  {
-   "kind": "fs.delete"
-  },
-  {
-   "kind": "fs.download"
-  },
-  {
-   "kind": "fs.head"
-  },
-  {
-   "kind": "fs.ls"
-  },
-  {
-   "kind": "fs.mkdir"
-  },
-  {
-   "kind": "fs.read"
-  },
-  {
-   "kind": "fs.search"
-  },
-  {
-   "kind": "fs.stat"
-  },
-  {
-   "kind": "fs.tail"
-  },
-  {
-   "kind": "fs.tree"
-  },
-  {
-   "kind": "fs.upload"
-  },
-  {
-   "kind": "fs.write",
-   "label": "Write text file",
-   "description": "Write or append text to a file on the host.",
-   "risky": true,
+   "default_timeout_ms": 30000,
+   "description": "Devices that Device Manager marks with a warning, and what the problem means.",
+   "kind": "drv.problems",
+   "label": "Devices with problems",
    "params": [
     {
+     "default": false,
+     "description": "Also list devices that are not plugged in right now.",
+     "name": "include_absent",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "default_timeout_ms": 30000,
+   "description": "Blue screens, restarts after power loss, app crashes and saved crash dumps.",
+   "kind": "evt.crashes",
+   "label": "Crashes and sudden restarts",
+   "params": [
+    {
+     "default": 30,
+     "description": "How many days back to look.",
+     "max": 365,
+     "min": 1,
+     "name": "since_days",
+     "type": "int"
+    },
+    {
+     "default": 50,
+     "max": 500,
+     "min": 1,
+     "name": "max_events",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Event log channels with record counts and owners.",
+   "kind": "evt.providers",
+   "label": "Event log channels",
+   "params": [
+    {
+     "max_bytes": 128,
+     "name": "name_prefix",
+     "type": "string"
+    },
+    {
+     "default": 400,
+     "max": 4000,
+     "min": 1,
+     "name": "max_results",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Recent entries from one event log.",
+   "kind": "evt.snapshot",
+   "label": "Event snapshot",
+   "params": [
+    {
+     "default": "System",
+     "description": "Event log name, such as System, Application or Microsoft-Windows-Kernel-PnP/Configuration.",
+     "max_bytes": 256,
+     "name": "channel",
+     "type": "string"
+    },
+    {
+     "default": "all",
+     "description": "Show this level and anything more severe.",
+     "enum": [
+      "all",
+      "critical",
+      "error",
+      "warning",
+      "information",
+      "verbose"
+     ],
+     "name": "level",
+     "type": "enum"
+    },
+    {
+     "description": "Only show entries from this source.",
+     "max_bytes": 256,
+     "name": "provider",
+     "type": "string"
+    },
+    {
+     "description": "Only show these event IDs, separated by commas.",
+     "max_bytes": 200,
+     "name": "event_id",
+     "type": "string"
+    },
+    {
+     "default": 200,
+     "max": 5000,
+     "min": 1,
+     "name": "max_events",
+     "type": "int"
+    },
+    {
+     "default": 60,
+     "max": 43200,
+     "min": 1,
+     "name": "since_minutes",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Delete a file or folder.",
+   "kind": "fs.delete",
+   "label": "Delete path",
+   "params": [
+    {
+     "description": "Absolute path to delete.",
      "name": "path",
-     "type": "string",
      "required": true,
-     "description": "Absolute path to write."
+     "type": "string"
     },
     {
+     "default": false,
+     "description": "Delete a folder and everything in it.",
+     "name": "recursive",
+     "type": "bool"
+    }
+   ],
+   "risky": true
+  },
+  {
+   "description": "Send a file to the helper. Files over 8 MiB need offset and length.",
+   "kind": "fs.download",
+   "label": "Download file",
+   "params": [
+    {
+     "description": "Absolute path to the file.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "description": "First byte to send, counting from 0. Setting offset or length sends one part of the file.",
+     "min": 0,
+     "name": "offset",
+     "type": "int"
+    },
+    {
+     "description": "Bytes to send in this part, up to 4 MiB.",
+     "max": 4194304,
+     "min": 1,
+     "name": "length",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Total size of a folder and its biggest entries.",
+   "kind": "fs.du",
+   "label": "Folder sizes",
+   "params": [
+    {
+     "description": "Absolute path to the folder.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": 20,
+     "description": "How many of the biggest entries to list.",
+     "max": 200,
+     "min": 1,
+     "name": "top",
+     "type": "int"
+    },
+    {
+     "default": 500000,
+     "description": "Stop counting after this many files and folders.",
+     "max": 1000000,
+     "min": 1000,
+     "name": "max_entries",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Find the lines in a text file that contain some text, with their line numbers.",
+   "kind": "fs.grep",
+   "label": "Search in file",
+   "params": [
+    {
+     "description": "Absolute path to the file.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "description": "Text to look for.",
+     "max_bytes": 1024,
+     "name": "text",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": false,
+     "description": "Match upper and lower case exactly.",
+     "name": "case_sensitive",
+     "type": "bool"
+    },
+    {
+     "default": 0,
+     "description": "Lines to show before each match.",
+     "max": 50,
+     "min": 0,
+     "name": "before",
+     "type": "int"
+    },
+    {
+     "default": 0,
+     "description": "Lines to show after each match.",
+     "max": 50,
+     "min": 0,
+     "name": "after",
+     "type": "int"
+    },
+    {
+     "default": 100,
+     "description": "Stop listing after this many matches. The total is still counted.",
+     "max": 1000,
+     "min": 1,
+     "name": "max_matches",
+     "type": "int"
+    },
+    {
+     "default": 1,
+     "description": "Line to start searching from.",
+     "min": 1,
+     "name": "start_line",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Read the first lines of a text file of any size.",
+   "kind": "fs.head",
+   "label": "Head file",
+   "params": [
+    {
+     "description": "Absolute path to the file.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": 80,
+     "description": "How many lines to read.",
+     "max": 5000,
+     "min": 1,
+     "name": "lines",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "List the entries in a folder.",
+   "kind": "fs.ls",
+   "label": "List directory",
+   "params": [
+    {
+     "description": "Absolute path to the folder.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "description": "Create a folder and any missing parents.",
+   "kind": "fs.mkdir",
+   "label": "Create directory",
+   "params": [
+    {
+     "description": "Absolute path of the new folder.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    }
+   ],
+   "risky": true
+  },
+  {
+   "description": "Read a file, up to 8 MiB, with its SHA-256. Give start_line or end_line to read lines from a text file of any size.",
+   "kind": "fs.read",
+   "label": "Read file",
+   "params": [
+    {
+     "description": "Absolute path to the file.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "description": "First line to read, counting from 1.",
+     "min": 1,
+     "name": "start_line",
+     "type": "int"
+    },
+    {
+     "description": "Last line to read. One reply holds up to 5000 lines.",
+     "min": 1,
+     "name": "end_line",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Find files by name under a folder.",
+   "kind": "fs.search",
+   "label": "Search files",
+   "params": [
+    {
+     "description": "Absolute path to search from.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": "*",
+     "description": "Wildcard pattern, for example *.log.",
+     "name": "pattern",
+     "type": "string"
+    },
+    {
+     "default": 200,
+     "max": 2000,
+     "min": 1,
+     "name": "max_results",
+     "type": "int"
+    },
+    {
+     "default": 4,
+     "description": "How many folders deep to look.",
+     "max": 20,
+     "min": 0,
+     "name": "max_depth",
+     "type": "int"
+    },
+    {
+     "default": false,
+     "description": "Match folder names too.",
+     "name": "include_dirs",
+     "type": "bool"
+    },
+    {
+     "default": false,
+     "name": "include_hidden",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "description": "Size, times, attributes and link target for one path.",
+   "kind": "fs.stat",
+   "label": "Stat path",
+   "params": [
+    {
+     "description": "Absolute path to a file or folder.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "description": "Read the last lines of a text file of any size.",
+   "kind": "fs.tail",
+   "label": "Tail file",
+   "params": [
+    {
+     "description": "Absolute path to the file.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": 80,
+     "description": "How many lines to read.",
+     "max": 5000,
+     "min": 1,
+     "name": "lines",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Walk a folder tree up to a depth and entry cap.",
+   "kind": "fs.tree",
+   "label": "Directory tree",
+   "params": [
+    {
+     "description": "Absolute path to the folder.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": 3,
+     "max": 8,
+     "min": 1,
+     "name": "max_depth",
+     "type": "int"
+    },
+    {
+     "default": 500,
+     "max": 5000,
+     "min": 50,
+     "name": "max_entries",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Write a file sent by the helper.",
+   "kind": "fs.upload",
+   "label": "Upload file",
+   "risky": true
+  },
+  {
+   "description": "Write or append text to a file on the host.",
+   "kind": "fs.write",
+   "label": "Write text file",
+   "params": [
+    {
+     "description": "Absolute path to write.",
+     "name": "path",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "max_bytes": 1048576,
      "name": "content",
-     "type": "string",
      "required": true,
-     "max_bytes": 1048576
+     "type": "string"
     },
     {
-     "name": "encoding",
-     "type": "enum",
      "default": "utf8",
      "enum": [
       "utf8",
       "utf8bom",
       "ascii"
-     ]
+     ],
+     "name": "encoding",
+     "type": "enum"
     },
     {
-     "name": "newline",
-     "type": "enum",
      "default": "crlf",
      "enum": [
       "lf",
       "crlf"
-     ]
+     ],
+     "name": "newline",
+     "type": "enum"
     },
     {
+     "default": false,
      "name": "overwrite",
-     "type": "bool",
-     "default": false
+     "type": "bool"
     },
     {
+     "default": false,
      "name": "append",
-     "type": "bool",
-     "default": false
+     "type": "bool"
+    }
+   ],
+   "risky": true
+  },
+  {
+   "description": "Charge, health and power source. Desktops report no battery.",
+   "kind": "hw.battery",
+   "label": "Battery"
+  },
+  {
+   "description": "Processor model, cores, threads and clock.",
+   "kind": "hw.cpu",
+   "label": "CPU"
+  },
+  {
+   "default_timeout_ms": 30000,
+   "description": "Whether each disk reports a problem. Temperature, wear and error counts need administrator rights.",
+   "kind": "hw.disk-health",
+   "label": "Disk health"
+  },
+  {
+   "description": "Physical disks and their health.",
+   "kind": "hw.disks",
+   "label": "Disks"
+  },
+  {
+   "description": "Screens with their resolution and position, and the monitors behind them.",
+   "kind": "hw.displays",
+   "label": "Displays"
+  },
+  {
+   "description": "Display adapters and driver versions.",
+   "kind": "hw.gpu",
+   "label": "GPU"
+  },
+  {
+   "description": "Installed memory modules.",
+   "kind": "hw.ram",
+   "label": "Memory"
+  },
+  {
+   "description": "USB devices that are plugged in.",
+   "kind": "hw.usb",
+   "label": "USB devices"
+  },
+  {
+   "description": "Interfaces, addresses, gateways and DNS servers.",
+   "kind": "net.adapters",
+   "label": "Adapters"
+  },
+  {
+   "description": "Neighbour cache entries.",
+   "kind": "net.arp",
+   "label": "ARP/NDP"
+  },
+  {
+   "description": "Open TCP connections.",
+   "kind": "net.connections",
+   "label": "Connections",
+   "params": [
+    {
+     "default": "established",
+     "enum": [
+      "all",
+      "established",
+      "listen",
+      "synsent",
+      "synreceived",
+      "finwait1",
+      "finwait2",
+      "closewait",
+      "closing",
+      "lastack",
+      "timewait",
+      "deletetcb",
+      "closed",
+      "bound"
+     ],
+     "name": "state",
+     "type": "enum"
+    },
+    {
+     "default": 200,
+     "max": 1000,
+     "min": 1,
+     "name": "max_results",
+     "type": "int"
+    },
+    {
+     "description": "Only connections owned by this process ID.",
+     "max": 4294967295,
+     "min": 1,
+     "name": "pid",
+     "type": "int"
     }
    ]
   },
   {
-   "kind": "hw.cpu"
-  },
-  {
-   "kind": "hw.disks"
-  },
-  {
-   "kind": "hw.gpu"
-  },
-  {
-   "kind": "hw.ram"
-  },
-  {
-   "kind": "hw.usb"
-  },
-  {
-   "kind": "net.adapters"
-  },
-  {
-   "kind": "net.arp"
-  },
-  {
-   "kind": "net.connections"
-  },
-  {
-   "kind": "net.curl"
-  },
-  {
-   "kind": "net.dns-cache"
-  },
-  {
-   "kind": "net.firewall"
-  },
-  {
-   "kind": "net.listeners"
-  },
-  {
-   "kind": "net.ping"
-  },
-  {
-   "kind": "net.resolve",
-   "label": "Resolve name",
-   "description": "Look up a hostname's current DNS answer.",
+   "description": "Send a GET or HEAD request to a public HTTP or HTTPS URL.",
+   "kind": "net.curl",
+   "label": "Fetch URL",
    "params": [
     {
-     "name": "name",
-     "type": "string",
+     "name": "url",
      "required": true,
-     "description": "Hostname to resolve."
+     "type": "string"
     },
     {
-     "name": "type",
-     "type": "enum",
+     "default": "GET",
+     "enum": [
+      "GET",
+      "HEAD"
+     ],
+     "name": "method",
+     "type": "enum"
+    }
+   ]
+  },
+  {
+   "description": "The Windows DNS client cache.",
+   "kind": "net.dns-cache",
+   "label": "DNS cache"
+  },
+  {
+   "description": "Firewall state per profile and a sample of enabled rules.",
+   "kind": "net.firewall",
+   "label": "Firewall state"
+  },
+  {
+   "description": "TCP listeners and UDP endpoints with their process.",
+   "kind": "net.listeners",
+   "label": "Listeners"
+  },
+  {
+   "description": "Ping a host or IP address.",
+   "kind": "net.ping",
+   "label": "Ping",
+   "params": [
+    {
+     "description": "Hostname or IP address.",
+     "name": "target",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": 4,
+     "max": 10,
+     "min": 1,
+     "name": "count",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "default_timeout_ms": 20000,
+   "description": "Whether each network is public, private or domain, and whether it can reach the internet.",
+   "kind": "net.profile",
+   "label": "Network type"
+  },
+  {
+   "default_timeout_ms": 20000,
+   "description": "Proxy servers set for this user, for Windows services and in environment variables.",
+   "kind": "net.proxy",
+   "label": "Proxy settings"
+  },
+  {
+   "description": "Look up a hostname's current DNS answer.",
+   "kind": "net.resolve",
+   "label": "Resolve name",
+   "params": [
+    {
+     "description": "Hostname to resolve.",
+     "name": "name",
+     "required": true,
+     "type": "string"
+    },
+    {
      "default": "any",
      "enum": [
       "a",
       "aaaa",
       "any"
-     ]
+     ],
+     "name": "type",
+     "type": "enum"
     }
    ]
   },
   {
-   "kind": "net.routes"
+   "description": "The routing table.",
+   "kind": "net.routes",
+   "label": "Routes"
   },
   {
-   "kind": "net.shares"
-  },
-  {
-   "kind": "net.tcp-test"
-  },
-  {
-   "kind": "net.tls"
-  },
-  {
-   "kind": "net.trace"
-  },
-  {
-   "kind": "net.wlan"
-  },
-  {
-   "kind": "pico.bootsel",
-   "label": "Reboot to BOOTSEL",
-   "description": "Reboot an attached Pico into BOOTSEL mode.",
-   "risky": true,
+   "description": "Shared folders and who is connected to them.",
+   "kind": "net.shares",
+   "label": "Shares",
    "params": [
     {
-     "name": "serial",
-     "type": "string",
-     "description": "Target a specific board when more than one is attached."
+     "default": false,
+     "description": "Include admin shares such as C$.",
+     "name": "include_hidden",
+     "type": "bool"
     },
     {
-     "name": "cpu",
-     "type": "enum",
+     "default": true,
+     "name": "include_sessions",
+     "type": "bool"
+    },
+    {
+     "default": 200,
+     "max": 1000,
+     "min": 1,
+     "name": "max_results",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Check whether a TCP port accepts connections.",
+   "kind": "net.tcp-test",
+   "label": "TCP port test",
+   "params": [
+    {
+     "description": "Hostname or IP address.",
+     "name": "target",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "max": 65535,
+     "min": 1,
+     "name": "port",
+     "required": true,
+     "type": "int"
+    },
+    {
+     "default": 5000,
+     "max": 30000,
+     "min": 1000,
+     "name": "timeout_ms",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Do a TLS handshake and summarise the certificate chain.",
+   "kind": "net.tls",
+   "label": "TLS probe",
+   "params": [
+    {
+     "description": "Hostname or IP address.",
+     "max_bytes": 253,
+     "name": "host",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "default": 443,
+     "max": 65535,
+     "min": 1,
+     "name": "port",
+     "type": "int"
+    },
+    {
+     "default": 5000,
+     "max": 30000,
+     "min": 1000,
+     "name": "timeout_ms",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "List the hops to a host.",
+   "kind": "net.trace",
+   "label": "Trace route",
+   "params": [
+    {
+     "description": "Hostname or IP address.",
+     "name": "target",
+     "required": true,
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "default_timeout_ms": 20000,
+   "description": "Current Wi-Fi network, signal strength, band and speed.",
+   "kind": "net.wifi",
+   "label": "Wi-Fi connection"
+  },
+  {
+   "description": "Wi-Fi adapter and current network. Saved passwords are not read.",
+   "kind": "net.wlan",
+   "label": "Wi-Fi state"
+  },
+  {
+   "description": "Reboot an attached Pico into BOOTSEL mode.",
+   "kind": "pico.bootsel",
+   "label": "Reboot to BOOTSEL",
+   "params": [
+    {
+     "description": "Target a specific board when more than one is attached.",
+     "name": "serial",
+     "type": "string"
+    },
+    {
+     "description": "RP2350 architecture.",
      "enum": [
       "arm",
       "riscv"
      ],
-     "description": "RP2350 architecture."
+     "name": "cpu",
+     "type": "enum"
     },
     {
+     "description": "RP2350 partition to target.",
      "name": "partition",
-     "type": "string",
-     "description": "RP2350 partition to target."
+     "type": "string"
     }
-   ]
+   ],
+   "risky": true
   },
   {
+   "description": "Write a UF2 image to an attached Pico.",
    "kind": "pico.flash",
    "label": "Flash UF2",
-   "description": "Write a UF2 image to an attached Pico.",
-   "risky": true,
    "params": [
     {
+     "description": "Path to the UF2 file on the host.",
      "name": "uf2_path",
-     "type": "string",
      "required": true,
-     "description": "Path to the UF2 file on the host."
+     "type": "string"
     },
     {
-     "name": "family",
-     "type": "enum",
      "enum": [
       "rp2040",
       "rp2350-arm-s",
@@ -330,90 +946,91 @@
       "rp2350-riscv",
       "absolute",
       "data"
-     ]
+     ],
+     "name": "family",
+     "type": "enum"
     },
     {
+     "description": "Target a specific board when more than one is attached.",
      "name": "serial",
-     "type": "string",
-     "description": "Target a specific board when more than one is attached."
+     "type": "string"
     }
-   ]
+   ],
+   "risky": true
   },
   {
+   "description": "Read details from an attached Pico.",
    "kind": "pico.info",
    "label": "Pico info",
-   "description": "Read details from an attached Pico.",
    "params": [
     {
+     "description": "Target a specific board when more than one is attached.",
      "name": "serial",
-     "type": "string",
-     "description": "Target a specific board when more than one is attached."
+     "type": "string"
     }
    ]
   },
   {
+   "description": "List attached Raspberry Pi Pico boards.",
    "kind": "pico.list",
-   "label": "List Pico devices",
-   "description": "List attached Raspberry Pi Pico boards."
+   "label": "List Pico devices"
   },
   {
+   "description": "Reboot an attached Pico normally.",
    "kind": "pico.reset",
    "label": "Reset Pico",
-   "description": "Reboot an attached Pico normally.",
-   "risky": true,
    "params": [
     {
+     "description": "Target a specific board when more than one is attached.",
      "name": "serial",
-     "type": "string",
-     "description": "Target a specific board when more than one is attached."
+     "type": "string"
     },
     {
-     "name": "cpu",
-     "type": "enum",
+     "description": "RP2350 architecture.",
      "enum": [
       "arm",
       "riscv"
      ],
-     "description": "RP2350 architecture."
+     "name": "cpu",
+     "type": "enum"
     },
     {
+     "description": "RP2350 partition to target.",
      "name": "partition",
-     "type": "string",
-     "description": "RP2350 partition to target."
+     "type": "string"
     }
-   ]
+   ],
+   "risky": true
   },
   {
+   "description": "Save Pico flash to a host file.",
    "kind": "pico.save",
    "label": "Save flash",
-   "description": "Save Pico flash to a host file.",
-   "risky": true,
    "params": [
     {
      "name": "out_path",
-     "type": "string",
-     "required": true
+     "required": true,
+     "type": "string"
     },
     {
+     "description": "Target a specific board when more than one is attached.",
      "name": "serial",
-     "type": "string",
-     "description": "Target a specific board when more than one is attached."
+     "type": "string"
     }
-   ]
+   ],
+   "risky": true
   },
   {
+   "description": "Compare a file against the flash contents.",
    "kind": "pico.verify",
    "label": "Verify flash",
-   "description": "Compare a file against the flash contents.",
    "params": [
     {
      "name": "file_path",
-     "type": "string",
-     "required": true
+     "required": true,
+     "type": "string"
     },
     {
-     "name": "family",
-     "type": "enum",
      "enum": [
       "rp2040",
       "rp2350-arm-s",
@@ -421,229 +1038,429 @@
       "rp2350-riscv",
       "absolute",
       "data"
-     ]
+     ],
+     "name": "family",
+     "type": "enum"
     },
     {
+     "description": "Target a specific board when more than one is attached.",
      "name": "serial",
-     "type": "string",
-     "description": "Target a specific board when more than one is attached."
+     "type": "string"
     }
    ]
   },
   {
+   "default_timeout_ms": 30000,
+   "description": "Documents waiting to print, who sent them and their status.",
+   "kind": "print.jobs",
+   "label": "Print queue",
+   "params": [
+    {
+     "description": "Only show this printer. Leave blank for all printers.",
+     "max_bytes": 256,
+     "name": "printer",
+     "type": "string"
+    },
+    {
+     "default": 200,
+     "max": 1000,
+     "min": 1,
+     "name": "max_results",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "default_timeout_ms": 30000,
+   "description": "Installed printers, which one is the default, and how many documents each has waiting.",
+   "kind": "print.list",
+   "label": "Printers"
+  },
+  {
+   "description": "Find processes whose name or path matches a query.",
    "kind": "proc.find",
    "label": "Find process",
-   "description": "Find processes whose name or path matches a query.",
    "params": [
     {
+     "max_bytes": 128,
      "name": "query",
-     "type": "string",
      "required": true,
-     "max_bytes": 128
+     "type": "string"
     },
     {
-     "name": "limit",
-     "type": "int",
-     "default": 100,
-     "min": 1,
-     "max": 500,
      "aliases": [
       "max_results"
      ],
-     "description": "Maximum rows to return."
+     "default": 100,
+     "description": "Maximum rows to return.",
+     "max": 500,
+     "min": 1,
+     "name": "limit",
+     "type": "int"
     }
    ]
   },
   {
+   "description": "Terminate a process by id.",
    "kind": "proc.kill",
    "label": "Stop process",
-   "description": "Terminate a process by id.",
-   "risky": true,
    "params": [
     {
-     "name": "pid",
-     "type": "int",
-     "required": true,
+     "description": "Process id to terminate.",
      "min": 1,
-     "description": "Process id to terminate."
+     "name": "pid",
+     "required": true,
+     "type": "int"
     }
-   ]
+   ],
+   "risky": true
   },
   {
+   "description": "List running processes.",
    "kind": "proc.list",
    "label": "Processes",
-   "description": "List running processes."
-  },
-  {
-   "kind": "ps.exec",
-   "label": "Run script",
-   "description": "Run arbitrary PowerShell on the host.",
-   "risky": true,
    "params": [
     {
-     "name": "script",
-     "type": "string",
-     "required": true,
-     "max_bytes": 65536,
-     "description": "PowerShell 5.1 script to run as the current user."
-    }
-   ]
-  },
-  {
-   "kind": "reg.query"
-  },
-  {
-   "kind": "sec.local-admins"
-  },
-  {
-   "kind": "startup.list",
-   "label": "Startup items",
-   "description": "List programs configured to run at sign-in.",
-   "params": [
+     "description": "Only processes whose name contains this.",
+     "max_bytes": 128,
+     "name": "name",
+     "type": "string"
+    },
     {
-     "name": "limit",
-     "type": "int",
-     "default": 300,
-     "min": 1,
-     "max": 2000,
+     "default": "memory",
+     "enum": [
+      "memory",
+      "name",
+      "pid",
+      "newest"
+     ],
+     "name": "sort",
+     "type": "enum"
+    },
+    {
      "aliases": [
       "max_results"
      ],
-     "description": "Maximum rows to return."
+     "default": 1000,
+     "description": "Maximum rows to return.",
+     "max": 5000,
+     "min": 1,
+     "name": "limit",
+     "type": "int"
+    },
+    {
+     "default": false,
+     "description": "Add the full path of each program.",
+     "name": "include_path",
+     "type": "bool"
+    },
+    {
+     "default": false,
+     "description": "Add the command line each process was started with.",
+     "name": "include_command_line",
+     "type": "bool"
     }
    ]
   },
   {
-   "kind": "storage.volumes",
-   "label": "Volumes",
-   "description": "List drives and their free space.",
+   "description": "Run arbitrary PowerShell on the host.",
+   "kind": "ps.exec",
+   "label": "Run script",
    "params": [
     {
-     "name": "drive_letter",
-     "type": "string",
-     "description": "Limit to one drive, for example C."
+     "description": "PowerShell 5.1 script to run as the current user.",
+     "max_bytes": 65536,
+     "name": "script",
+     "required": true,
+     "type": "string"
+    }
+   ],
+   "risky": true
+  },
+  {
+   "description": "Read a registry key, optionally one value or the whole subtree.",
+   "kind": "reg.query",
+   "label": "Query registry",
+   "params": [
+    {
+     "default": "HKLM",
+     "enum": [
+      "HKLM",
+      "HKCU",
+      "HKCR",
+      "HKU",
+      "HKCC"
+     ],
+     "name": "hive",
+     "type": "enum"
+    },
+    {
+     "max_bytes": 512,
+     "name": "key",
+     "required": true,
+     "type": "string"
+    },
+    {
+     "description": "Read just this value.",
+     "max_bytes": 256,
+     "name": "value",
+     "type": "string"
+    },
+    {
+     "default": false,
+     "name": "recursive",
+     "type": "bool"
+    },
+    {
+     "default": 200,
+     "max": 2000,
+     "min": 1,
+     "name": "max_results",
+     "type": "int"
     }
    ]
   },
   {
+   "description": "Members of the local Administrators group.",
+   "kind": "sec.local-admins",
+   "label": "Local admins"
+  },
+  {
+   "description": "List programs configured to run at sign-in.",
+   "kind": "startup.list",
+   "label": "Startup items",
+   "params": [
+    {
+     "aliases": [
+      "max_results"
+     ],
+     "default": 300,
+     "description": "Maximum rows to return.",
+     "max": 2000,
+     "min": 1,
+     "name": "limit",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "List drives and their free space.",
+   "kind": "storage.volumes",
+   "label": "Volumes",
+   "params": [
+    {
+     "description": "Limit to one drive, for example C.",
+     "name": "drive_letter",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "description": "Start, stop, or restart a Windows service.",
    "kind": "svc.control",
    "label": "Control service",
-   "description": "Start, stop, or restart a Windows service.",
-   "risky": true,
    "params": [
     {
      "name": "name",
-     "type": "string",
-     "required": true
+     "required": true,
+     "type": "string"
     },
     {
-     "name": "action",
-     "type": "enum",
-     "required": true,
      "enum": [
       "start",
       "stop",
       "restart"
-     ]
+     ],
+     "name": "action",
+     "required": true,
+     "type": "enum"
     }
-   ]
+   ],
+   "risky": true
   },
   {
+   "description": "List Windows services.",
    "kind": "svc.list",
    "label": "Services",
-   "description": "List Windows services."
-  },
-  {
-   "kind": "svc.status",
-   "label": "Service status",
-   "description": "Look up one Windows service.",
    "params": [
     {
+     "default": "all",
+     "enum": [
+      "all",
+      "running",
+      "stopped"
+     ],
+     "name": "state",
+     "type": "enum"
+    },
+    {
+     "default": "all",
+     "description": "Only services that start this way.",
+     "enum": [
+      "all",
+      "automatic",
+      "manual",
+      "disabled",
+      "boot",
+      "system"
+     ],
+     "name": "start_type",
+     "type": "enum"
+    },
+    {
+     "description": "Match the service name or display name.",
+     "max_bytes": 128,
      "name": "name",
-     "type": "string",
-     "required": true,
-     "description": "Service name, for example Spooler."
+     "type": "string"
     }
    ]
   },
   {
-   "kind": "sys.env"
-  },
-  {
-   "kind": "sys.hotfixes"
-  },
-  {
-   "kind": "sys.info"
-  },
-  {
-   "kind": "sys.reboot-required"
-  },
-  {
-   "kind": "sys.resources"
-  },
-  {
-   "kind": "sys.screenshot",
-   "label": "Screenshot",
-   "description": "Capture the host's screen.",
-   "risky": true,
+   "description": "Look up one or more Windows services.",
+   "kind": "svc.status",
+   "label": "Service status",
    "params": [
     {
-     "name": "display",
-     "type": "int",
-     "default": 0,
-     "min": -1,
-     "max": 16,
-     "description": "0 for the primary screen, -1 for all screens together."
+     "description": "Service name, for example Spooler. Separate several names with commas.",
+     "max_bytes": 4096,
+     "name": "name",
+     "required": true,
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "description": "Environment variables from one scope or all of them.",
+   "kind": "sys.env",
+   "label": "Environment",
+   "params": [
+    {
+     "default": "all",
+     "enum": [
+      "all",
+      "machine",
+      "user",
+      "process"
+     ],
+     "name": "scope",
+     "type": "enum"
     },
     {
-     "name": "format",
-     "type": "enum",
+     "description": "Only names starting with this.",
+     "max_bytes": 128,
+     "name": "name_prefix",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "description": "Installed updates and hotfix history.",
+   "kind": "sys.hotfixes",
+   "label": "Hotfixes"
+  },
+  {
+   "description": "Computer name, Windows version and build, BIOS and other inventory.",
+   "kind": "sys.info",
+   "label": "System profile"
+  },
+  {
+   "description": "Active power plan, the other plans and whether the PC is on mains power.",
+   "kind": "sys.power",
+   "label": "Power plan"
+  },
+  {
+   "description": "Whether Windows is waiting for a restart.",
+   "kind": "sys.reboot-required",
+   "label": "Reboot required"
+  },
+  {
+   "description": "CPU load, memory and page file use, and the busiest processes.",
+   "kind": "sys.resources",
+   "label": "Resource usage",
+   "params": [
+    {
+     "default": 10,
+     "description": "How many processes to list.",
+     "max": 50,
+     "min": 1,
+     "name": "top",
+     "type": "int"
+    }
+   ]
+  },
+  {
+   "description": "Capture the host's screen.",
+   "kind": "sys.screenshot",
+   "label": "Screenshot",
+   "params": [
+    {
+     "default": 0,
+     "description": "0 for the primary screen, -1 for all screens together.",
+     "max": 16,
+     "min": -1,
+     "name": "display",
+     "type": "int"
+    },
+    {
      "default": "jpeg",
      "enum": [
       "jpeg",
       "png"
-     ]
+     ],
+     "name": "format",
+     "type": "enum"
     },
     {
-     "name": "quality",
-     "type": "int",
      "default": 70,
-     "min": 1,
+     "description": "JPEG quality; ignored for PNG.",
      "max": 100,
-     "description": "JPEG quality; ignored for PNG."
+     "min": 1,
+     "name": "quality",
+     "type": "int"
     },
     {
-     "name": "max_width",
-     "type": "int",
      "default": 1600,
-     "min": 320,
+     "description": "Scale the capture down to at most this width.",
      "max": 3840,
-     "description": "Scale the capture down to at most this width."
+     "min": 320,
+     "name": "max_width",
+     "type": "int"
     }
-   ]
+   ],
+   "risky": true
   },
   {
-   "kind": "sys.timezone"
+   "default_timeout_ms": 20000,
+   "description": "Whether the clock syncs with a time server, when it last did and any error.",
+   "kind": "sys.time-sync",
+   "label": "Clock sync"
   },
   {
-   "kind": "sys.uptime"
+   "description": "Time zone, daylight saving, local clock and culture.",
+   "kind": "sys.timezone",
+   "label": "Time zone and locale"
   },
   {
-   "kind": "sys.users"
+   "description": "Boot time and how long the PC has been up.",
+   "kind": "sys.uptime",
+   "label": "Uptime"
   },
   {
+   "description": "Signed-in accounts and terminal sessions.",
+   "kind": "sys.users",
+   "label": "Logged-on users"
+  },
+  {
+   "description": "List Windows scheduled tasks.",
    "kind": "task.list",
    "label": "Scheduled tasks",
-   "description": "List Windows scheduled tasks.",
    "params": [
     {
+     "description": "Match tasks whose path starts with this.",
      "name": "path_prefix",
-     "type": "string",
-     "description": "Match tasks whose path starts with this."
+     "type": "string"
     },
     {
-     "name": "state",
-     "type": "enum",
      "default": "all",
      "enum": [
       "all",
@@ -652,31 +1469,38 @@
       "disabled",
       "queued",
       "unknown"
-     ]
+     ],
+     "name": "state",
+     "type": "enum"
     },
     {
-     "name": "limit",
-     "type": "int",
-     "default": 300,
-     "min": 1,
-     "max": 2000,
      "aliases": [
       "max_results"
      ],
-     "description": "Maximum rows to return."
+     "default": 300,
+     "description": "Maximum rows to return.",
+     "max": 2000,
+     "min": 1,
+     "name": "limit",
+     "type": "int"
     }
    ]
   },
   {
-   "kind": "tunnel.close"
+   "description": "Close a port tunnel.",
+   "kind": "tunnel.close",
+   "label": "Close port tunnel"
   },
   {
-   "kind": "tunnel.open"
+   "description": "Forward a local TCP port to whoever runs handoff tunnel with the connect token.",
+   "kind": "tunnel.open",
+   "label": "Open port tunnel",
+   "risky": true
   },
   {
-   "kind": "update.history"
+   "description": "The last 50 Windows Update entries with result codes.",
+   "kind": "update.history",
+   "label": "Update history"
   }
- ],
- "os": "windows",
- "protocol_version": 2
+ ]
 }

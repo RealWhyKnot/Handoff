@@ -3,15 +3,17 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{for_display, handler, Args, CapResult, Ctx, HandlerError, Router};
 
 use super::consent::require_risk_consent;
 use super::proc::{load_specs, string_arg};
-use super::pwsh::run_pwsh_full;
+use super::pwsh::{run_pwsh_echo, truncation_note, Echo};
 
 const SCRIPT_CAP: usize = 64 * 1024;
 const LIMIT: usize = 10;
 const WINDOW: Duration = Duration::from_secs(60);
+const PROMPT_CHARS: usize = 1200;
+const PROMPT_LINES: usize = 25;
 
 static HISTORY: LazyLock<Mutex<Vec<Instant>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
@@ -48,22 +50,48 @@ pub fn exec_script(args: &Args) -> Result<String, HandlerError> {
     Ok(script)
 }
 
+pub fn consent_summary(script: &str) -> String {
+    let shown = for_display(script, PROMPT_CHARS, PROMPT_LINES);
+    let mut text = format!(
+        "Runs this PowerShell script on this computer. It can read, change, or delete files and start programs as the current user.
+
+{}",
+        shown.text
+    );
+    if shown.cut {
+        text.push_str(&format!(
+            "
+
+(Only the start is shown. The whole script is {} characters long.)",
+            script.chars().count()
+        ));
+    }
+    text
+}
+
 async fn ps_exec(ctx: Ctx, args: Args) -> CapResult {
     let script = exec_script(&args)?;
-    require_risk_consent(
-        &ctx.cancel,
-        "ps.exec",
-        "Runs arbitrary PowerShell code on this computer. The script can read, change, or delete files and can start programs as the current user.",
-    )
-    .await?;
+    require_risk_consent(&ctx.cancel, "ps.exec", &consent_summary(&script)).await?;
     take_slot(Instant::now())?;
-    match run_pwsh_full(&ctx.cancel, &script).await {
-        Ok(res) => Ok(json!({
-            "exit_code": res.exit_code,
-            "stdout": String::from_utf8_lossy(&res.stdout),
-            "stderr": String::from_utf8_lossy(&res.stderr),
-        })),
-        Err((_, failure)) => Err(failure.into()),
+    match run_pwsh_echo(&ctx.cancel, &script, ctx.progress.clone(), Echo::Both).await {
+        Ok(res) => {
+            let mut out = json!({
+                "exit_code": res.exit_code,
+                "stdout": String::from_utf8_lossy(&res.stdout),
+                "stderr": String::from_utf8_lossy(&res.stderr),
+                "truncated": res.stdout_truncated || res.stderr_truncated,
+            });
+            if let Some(note) = truncation_note(&res) {
+                out["note"] = json!(note);
+            }
+            Ok(out)
+        }
+        Err((res, mut failure)) => {
+            if let Some(note) = truncation_note(&res) {
+                failure.message = format!("{} ({note})", failure.message);
+            }
+            Err(failure.into())
+        }
     }
 }
 
@@ -95,6 +123,72 @@ mod tests {
             })
         });
         (prompt, calls)
+    }
+
+    fn recording_prompt() -> (Prompt, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let prompt: Prompt = Arc::new(move |_, req| {
+            s.lock().unwrap().push(req.summary.clone());
+            Box::pin(async move { Ok(false) })
+        });
+        (prompt, seen)
+    }
+
+    #[tokio::test]
+    async fn the_consent_prompt_shows_the_script() {
+        let (prompt, seen) = recording_prompt();
+        let _guard = SessionGuard::with_prompt(prompt);
+        reset_history();
+        let _ = ps_exec(
+            Ctx::default(),
+            args(json!({"script": "Remove-Item C:\\temp\\x\n\u{202E}gpj.exe\u{7}"})),
+        )
+        .await;
+        let summary = seen.lock().unwrap()[0].clone();
+        assert!(summary.starts_with("Runs this PowerShell script on this computer."));
+        assert!(
+            summary.ends_with("\n\nRemove-Item C:\\temp\\x\ngpj.exe"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_long_script_is_shortened_in_the_prompt() {
+        let script = format!("Write-Output start\n{}", "Get-Date\n".repeat(400));
+        let summary = consent_summary(&script);
+        assert!(summary.contains("Write-Output start"));
+        assert!(summary.lines().count() < PROMPT_LINES + 6, "{summary}");
+        assert!(summary.ends_with(&format!(
+            "(Only the start is shown. The whole script is {} characters long.)",
+            script.chars().count()
+        )));
+        let one_line = consent_summary(&"x".repeat(5000));
+        assert!(one_line.contains(&"x".repeat(PROMPT_CHARS)));
+        assert!(!one_line.contains(&"x".repeat(PROMPT_CHARS + 1)));
+        assert!(one_line.ends_with("The whole script is 5000 characters long.)"));
+        assert!(!consent_summary("Get-Date").contains("Only the start"));
+    }
+
+    #[tokio::test]
+    async fn a_forty_kilobyte_script_runs() {
+        if !cfg!(windows) {
+            return;
+        }
+        let (prompt, _calls) = counting_prompt(true);
+        let _guard = SessionGuard::with_prompt(prompt);
+        reset_history();
+        let script = format!(
+            "$pad = @'\n{}\n'@\n\"len=$($pad.Length)\"",
+            "y".repeat(40 * 1024)
+        );
+        let res = ps_exec(Ctx::default(), args(json!({ "script": script })))
+            .await
+            .unwrap();
+        assert_eq!(res["exit_code"], json!(0));
+        assert_eq!(res["stdout"].as_str().unwrap().trim(), "len=40960");
+        assert_eq!(res["truncated"], json!(false));
+        assert!(res.get("note").is_none());
     }
 
     #[test]

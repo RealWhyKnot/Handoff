@@ -10,16 +10,62 @@ use sha2::{Digest, Sha256};
 use crate::dispatch::{handler, Args, CapResult, HandlerError, Router};
 
 const READ_CAP: u64 = 8 * 1024 * 1024;
-const TEXT_SAMPLE_CAP: u64 = 256 * 1024;
+const CHUNK_CAP: u64 = 4 * 1024 * 1024;
+const SEARCH_VISIT_CAP: u64 = 200_000;
+const DU_ENTRY_CAP: i64 = 1_000_000;
 
 pub fn register(r: &mut Router) {
-    r.register("fs.ls", blocking_handler(fs_ls));
-    r.register("fs.read", blocking_handler(fs_read));
-    r.register("fs.search", blocking_handler(fs_search));
-    r.register("fs.head", blocking_handler(|a| fs_text_sample(a, false)));
-    r.register("fs.tail", blocking_handler(|a| fs_text_sample(a, true)));
-    r.register("fs.stat", blocking_handler(fs_stat));
-    r.register("fs.tree", blocking_handler(fs_tree));
+    super::register_specs(
+        r,
+        include_str!("specs/fs.json"),
+        vec![
+            ("fs.ls", blocking_handler(fs_ls)),
+            (
+                "fs.read",
+                handler(|ctx, args| async move {
+                    let cancel = ctx.cancel.clone();
+                    run_blocking(move || fs_read(args, &cancel)).await
+                }),
+            ),
+            (
+                "fs.search",
+                handler(|ctx, args| async move {
+                    let cancel = ctx.cancel.clone();
+                    run_blocking(move || fs_search(args, &cancel)).await
+                }),
+            ),
+            (
+                "fs.head",
+                handler(|ctx, args| async move {
+                    let cancel = ctx.cancel.clone();
+                    run_blocking(move || super::fs_lines::head(args, &cancel)).await
+                }),
+            ),
+            (
+                "fs.tail",
+                handler(|ctx, args| async move {
+                    let cancel = ctx.cancel.clone();
+                    run_blocking(move || super::fs_lines::tail(args, &cancel)).await
+                }),
+            ),
+            (
+                "fs.grep",
+                handler(|ctx, args| async move {
+                    let cancel = ctx.cancel.clone();
+                    run_blocking(move || super::fs_lines::grep(args, &cancel)).await
+                }),
+            ),
+            ("fs.stat", blocking_handler(fs_stat)),
+            ("fs.tree", blocking_handler(fs_tree)),
+            (
+                "fs.du",
+                handler(|ctx, args| async move {
+                    let cancel = ctx.cancel.clone();
+                    run_blocking(move || fs_du(args, &cancel)).await
+                }),
+            ),
+        ],
+    );
 }
 
 pub(crate) fn blocking_handler<F>(f: F) -> crate::dispatch::Handler
@@ -76,6 +122,16 @@ pub(crate) fn path_err(op: &str, path: &str, e: &io::Error) -> HandlerError {
         _ => text,
     };
     HandlerError::plain(format!("{op} {path}: {text}"))
+}
+
+pub(crate) fn read_err(kind: &str, op: &str, path: &str, e: &io::Error) -> HandlerError {
+    match e.kind() {
+        io::ErrorKind::NotFound => err(format!("{kind}: {path} doesn't exist")),
+        io::ErrorKind::PermissionDenied => {
+            err(format!("{kind}: Windows won't let Handoff open {path}"))
+        }
+        _ => path_err(op, path, e),
+    }
 }
 
 fn is_slash(b: u8) -> bool {
@@ -156,18 +212,58 @@ pub(crate) fn go_clean(original: &str) -> String {
     out
 }
 
-pub(crate) fn go_is_abs(path: &str) -> bool {
-    let l = volume_len(path);
-    if l == 0 {
-        return false;
-    }
-    let b = path.as_bytes();
-    if is_slash(b[0]) && is_slash(b[1]) {
+const DEVICE_NAMES: [&str; 8] = [
+    "con", "prn", "aux", "nul", "conin$", "conout$", "clock$", "config$",
+];
+
+fn is_device_name(segment: &str) -> bool {
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or(segment)
+        .trim_end_matches(' ')
+        .to_lowercase();
+    if DEVICE_NAMES.contains(&stem.as_str()) {
         return true;
     }
-    let rest = &path[l..];
-    !rest.is_empty() && is_slash(rest.as_bytes()[0])
+    let mut chars = stem.chars();
+    let head: String = chars.by_ref().take(3).collect();
+    let tail: Vec<char> = chars.collect();
+    (head == "com" || head == "lpt")
+        && tail.len() == 1
+        && (tail[0].is_ascii_digit() || matches!(tail[0], '\u{b9}' | '\u{b2}' | '\u{b3}'))
 }
+
+pub(crate) fn local_path(kind: &str, raw: &str) -> Result<String, HandlerError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(err(format!("{kind}: 'path' is required")));
+    }
+    let b = raw.as_bytes();
+    if b.len() >= 2 && is_slash(b[0]) && is_slash(b[1]) {
+        return Err(err(format!(
+            "{kind}: network and device paths are not allowed"
+        )));
+    }
+    if !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && is_slash(b[2])) {
+        return Err(err(format!(
+            "{kind}: path must be absolute, like C:\\folder"
+        )));
+    }
+    let path = go_clean(raw);
+    let rest = &path[2..];
+    if rest.contains(':') {
+        return Err(err(format!(
+            "{kind}: ':' is only allowed after the drive letter"
+        )));
+    }
+    if let Some(dev) = rest.split('\\').find(|s| is_device_name(s)) {
+        return Err(err(format!("{kind}: {dev} is a reserved device name")));
+    }
+    Ok(path)
+}
+
+pub(crate) use super::fs_guard::guard_read_path;
 
 pub(crate) fn go_base(path: &str) -> String {
     if path.is_empty() {
@@ -396,18 +492,14 @@ pub(crate) fn lstat(path: &str) -> io::Result<Info> {
 }
 
 fn fs_ls(args: Args) -> CapResult {
-    let path = str_arg(&args, "path").unwrap_or_default();
-    if path.is_empty() {
-        return Err(err("fs.ls: 'path' is required"));
-    }
-    let path = go_clean(&path);
+    let path = local_path("fs.ls", &str_arg(&args, "path").unwrap_or_default())?;
 
     let rd = fs::read_dir(&path).map_err(|e| {
         if Path::new(&path).is_file() {
-            path_err("open", &path, &io::Error::from_raw_os_error(3))
+            err(format!("fs.ls: {path} is a file, not a folder"))
         } else {
             let cause = fs::metadata(&path).err().unwrap_or(e);
-            path_err("open", &path, &cause)
+            read_err("fs.ls", "open", &path, &cause)
         }
     })?;
     let mut items: Vec<(String, fs::DirEntry)> = Vec::new();
@@ -434,38 +526,135 @@ fn fs_ls(args: Args) -> CapResult {
     Ok(json!({"path": path, "entries": out}))
 }
 
-pub(crate) fn fs_read(args: Args) -> CapResult {
-    let path = str_arg(&args, "path").unwrap_or_default();
-    if path.is_empty() {
-        return Err(err("fs.read: 'path' is required"));
+pub(crate) fn fs_read(args: Args, cancel: &tokio_util::sync::CancellationToken) -> CapResult {
+    if super::fs_lines::has_range(&args) {
+        return super::fs_lines::range(args, cancel);
     }
-    let path = go_clean(&path);
+    read_file("fs.read", args)
+}
 
-    let lp = path.replace('\\', "/").to_lowercase();
-    for bad in [
-        "/windows/system32/config/",
-        "/windows/system32/configstore/",
-        "/users/all users/microsoft/crypto/",
-    ] {
-        if lp.contains(bad) {
-            return Err(err(format!(
-                "fs.read: refusing to read {bad} (sensitive system path)"
-            )));
-        }
+#[cfg(test)]
+pub(crate) fn fs_download(args: Args) -> CapResult {
+    download(args, &tokio_util::sync::CancellationToken::new())
+}
+
+pub(crate) fn download(args: Args, cancel: &tokio_util::sync::CancellationToken) -> CapResult {
+    if args.contains_key("offset") || args.contains_key("length") {
+        return download_chunk(args, cancel);
     }
+    read_file("fs.download", args)
+}
 
-    let info = stat(&path).map_err(|e| path_err("GetFileAttributesEx", &path, &e))?;
+fn chunk_arg(args: &Args, key: &str, min: i64, missing: u64) -> Result<u64, HandlerError> {
+    if !args.contains_key(key) {
+        return Ok(missing);
+    }
+    match int_arg(args, key) {
+        Some(n) if n >= min => Ok(n as u64),
+        _ => Err(err(format!("fs.download: '{key}' must be {min} or more"))),
+    }
+}
+
+fn download_chunk(args: Args, cancel: &tokio_util::sync::CancellationToken) -> CapResult {
+    let kind = "fs.download";
+    let path = local_path(kind, &str_arg(&args, "path").unwrap_or_default())?;
+    guard_read_path(kind, &path)?;
+    let offset = chunk_arg(&args, "offset", 0, 0)?;
+    let length = chunk_arg(&args, "length", 1, CHUNK_CAP)?.min(CHUNK_CAP);
+
+    let info = stat(&path).map_err(|e| read_err(kind, "GetFileAttributesEx", &path, &e))?;
     if info.dir {
-        return Err(err(format!("fs.read: {path} is a directory; use fs.ls")));
+        return Err(err(format!("{kind}: {path} is a folder, not a file")));
+    }
+    let mut f = fs::File::open(&path).map_err(|e| read_err(kind, "open", &path, &e))?;
+    let md = f
+        .metadata()
+        .map_err(|e| read_err(kind, "open", &path, &e))?;
+    let size = md.len();
+    let mtime = md.modified().unwrap_or(UNIX_EPOCH);
+    if offset > size {
+        return Err(err(format!(
+            "{kind}: offset {offset} is past the end of {path}, which is {size} bytes"
+        )));
+    }
+    let want = length.min(size - offset);
+    let mut buf = vec![0u8; want as usize];
+    f.seek(SeekFrom::Start(offset))
+        .and_then(|_| f.read_exact(&mut buf))
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                err(format!(
+                    "{kind}: {path} got shorter while it was being read"
+                ))
+            } else {
+                path_err("read", &path, &e)
+            }
+        })?;
+    let eof = offset + want >= size;
+
+    let mut out = json!({
+        "path": path,
+        "size": size,
+        "mtime": fmt_time(mtime),
+        "offset": offset,
+        "length": want,
+        "eof": eof,
+        "base64": base64::engine::general_purpose::STANDARD.encode(&buf),
+    });
+    if eof {
+        drop(buf);
+        out["sha256"] = Value::String(hash_file(&mut f, &path, cancel)?);
+    }
+    Ok(out)
+}
+
+fn hash_file(
+    f: &mut fs::File,
+    path: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<String, HandlerError> {
+    f.seek(SeekFrom::Start(0))
+        .map_err(|e| path_err("read", path, &e))?;
+    let mut hasher = Sha256::new();
+    let mut block = vec![0u8; 1 << 20];
+    loop {
+        if cancel.is_cancelled() {
+            return Err(err("command cancelled"));
+        }
+        let n = match f.read(&mut block) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(path_err("read", path, &e)),
+        };
+        hasher.update(&block[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+fn read_file(kind: &str, args: Args) -> CapResult {
+    let path = local_path(kind, &str_arg(&args, "path").unwrap_or_default())?;
+    guard_read_path(kind, &path)?;
+
+    let info = stat(&path).map_err(|e| read_err(kind, "GetFileAttributesEx", &path, &e))?;
+    if info.dir {
+        return Err(err(format!("{kind}: {path} is a folder, not a file")));
     }
     if info.size > READ_CAP {
+        let instead = if kind == "fs.read" {
+            "Read part of it with start_line and end_line, fs.head, fs.tail or fs.grep, \
+             or download it."
+        } else {
+            "Download it in parts with offset and length."
+        };
         return Err(err(format!(
-            "fs.read: file is {} bytes; cap is {}",
-            info.size, READ_CAP
+            "{kind}: {path} is {:.1} MiB, over the {} MiB limit. {instead}",
+            info.size as f64 / (1024.0 * 1024.0),
+            READ_CAP / (1024 * 1024)
         )));
     }
 
-    let mut f = fs::File::open(&path).map_err(|e| path_err("open", &path, &e))?;
+    let mut f = fs::File::open(&path).map_err(|e| read_err(kind, "open", &path, &e))?;
     let mut buf = vec![0u8; info.size as usize];
     f.read_exact(&mut buf).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -562,15 +751,12 @@ fn slash_depth(path: &str) -> i64 {
     path.replace('\\', "/").split('/').count() as i64
 }
 
-fn fs_search(args: Args) -> CapResult {
-    let search_path = str_arg(&args, "path").unwrap_or_default();
-    if search_path.is_empty() {
-        return Err(err("fs.search: 'path' is required"));
-    }
-    let search_path = go_clean(&search_path);
-    if !go_is_abs(&search_path) {
-        return Err(err("fs.search: path must be absolute"));
-    }
+fn fs_search(args: Args, cancel: &tokio_util::sync::CancellationToken) -> CapResult {
+    search(args, cancel, SEARCH_VISIT_CAP)
+}
+
+fn search(args: Args, cancel: &tokio_util::sync::CancellationToken, visit_cap: u64) -> CapResult {
+    let search_path = local_path("fs.search", &str_arg(&args, "path").unwrap_or_default())?;
 
     let mut pattern = str_arg(&args, "pattern").unwrap_or_else(|| "*".to_string());
     if pattern.is_empty() {
@@ -593,7 +779,8 @@ fn fs_search(args: Args) -> CapResult {
     let include_dirs = bool_arg(&args, "include_dirs").unwrap_or(false);
     let include_hidden = bool_arg(&args, "include_hidden").unwrap_or(false);
 
-    let root = stat(&search_path).map_err(|e| path_err("GetFileAttributesEx", &search_path, &e))?;
+    let root = stat(&search_path)
+        .map_err(|e| read_err("fs.search", "GetFileAttributesEx", &search_path, &e))?;
     if !root.dir {
         return Err(err(format!(
             "fs.search: {search_path:?} is not a directory"
@@ -603,8 +790,16 @@ fn fs_search(args: Args) -> CapResult {
     let lower_pattern = pattern.to_lowercase();
     let root_depth = slash_depth(&go_clean(&search_path));
     let mut entries: Vec<Value> = Vec::new();
+    let mut visited: u64 = 0;
+    let mut visit_cap_hit = false;
 
     walk_dir(&search_path, &mut |node| {
+        visited += 1;
+        if visited > visit_cap || cancel.is_cancelled() {
+            visit_cap_hit = visited > visit_cap;
+            visited -= 1;
+            return Flow::Stop;
+        }
         let name = node.name.as_str();
         if name == "." || name.is_empty() {
             return Flow::Continue;
@@ -650,7 +845,7 @@ fn fs_search(args: Args) -> CapResult {
     });
 
     let count = entries.len();
-    Ok(json!({
+    let mut out = json!({
         "path": search_path,
         "pattern": pattern,
         "max_depth": max_depth,
@@ -658,92 +853,23 @@ fn fs_search(args: Args) -> CapResult {
         "include_dirs": include_dirs,
         "include_hidden": include_hidden,
         "count": count,
+        "visited": visited,
+        "truncated": visit_cap_hit || count as i64 >= max_results,
         "entries": entries,
-    }))
-}
-
-fn fs_text_sample(args: Args, tail: bool) -> CapResult {
-    let mode = if tail { "tail" } else { "head" };
-    let path = str_arg(&args, "path").unwrap_or_default();
-    let mut lines = int_arg(&args, "lines").unwrap_or(80);
-    let path = path.trim().to_string();
-    if path.is_empty() {
-        return Err(err(format!("fs.{mode}: 'path' is required")));
+    });
+    if visit_cap_hit {
+        out["note"] = json!(format!(
+            "stopped after looking at {visit_cap} files and folders; search a smaller folder or lower max_depth"
+        ));
     }
-    let path = go_clean(&path);
-    if !go_is_abs(&path) {
-        return Err(err(format!("fs.{mode}: path must be absolute")));
-    }
-    if lines <= 0 {
-        lines = 80;
-    }
-    if lines > 5000 {
-        lines = 5000;
-    }
-
-    let info = stat(&path).map_err(|e| path_err("GetFileAttributesEx", &path, &e))?;
-    if info.dir {
-        return Err(err(format!("fs.{mode}: {path:?} is a directory")));
-    }
-
-    let mut f = fs::File::open(&path).map_err(|e| path_err("open", &path, &e))?;
-    let mut data: Vec<u8> = Vec::new();
-    if tail {
-        let read_size = TEXT_SAMPLE_CAP.min(info.size);
-        f.seek(SeekFrom::End(-(read_size as i64)))
-            .map_err(|e| path_err("seek", &path, &e))?;
-        f.by_ref()
-            .take(read_size)
-            .read_to_end(&mut data)
-            .map_err(|e| path_err("read", &path, &e))?;
-        if info.size > read_size {
-            if let Some(i) = data.iter().position(|b| *b == b'\n') {
-                if i + 1 < data.len() {
-                    data.drain(..=i);
-                }
-            }
-        }
-    } else {
-        f.by_ref()
-            .take(TEXT_SAMPLE_CAP)
-            .read_to_end(&mut data)
-            .map_err(|e| path_err("read", &path, &e))?;
-    }
-
-    let text = go_lossy(&data);
-    let mut all: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
-    let lines = lines as usize;
-    if tail {
-        if all.len() > lines {
-            all = all.split_off(all.len() - lines);
-        }
-    } else if all.len() > lines {
-        all.truncate(lines);
-    }
-
-    Ok(json!({
-        "path": path,
-        "size": info.size,
-        "mtime": fmt_time(info.mtime),
-        "lines": all,
-        "line_count": all.len(),
-        "truncated": info.size > data.len() as u64,
-        "mode": mode,
-    }))
+    Ok(out)
 }
 
 fn fs_stat(args: Args) -> CapResult {
-    let path = str_arg(&args, "path").unwrap_or_default();
-    let path = path.trim().to_string();
-    if path.is_empty() {
-        return Err(err("fs.stat: 'path' is required"));
-    }
-    let path = go_clean(&path);
-    if !go_is_abs(&path) {
-        return Err(err("fs.stat: path must be absolute"));
-    }
+    let path = local_path("fs.stat", &str_arg(&args, "path").unwrap_or_default())?;
 
-    let info = lstat(&path).map_err(|e| path_err("GetFileAttributesEx", &path, &e))?;
+    let info =
+        lstat(&path).map_err(|e| read_err("fs.stat", "GetFileAttributesEx", &path, &e))?;
     let mut target = String::new();
     if info.symlink {
         if let Ok(dest) = fs::read_link(&path) {
@@ -763,20 +889,12 @@ fn fs_stat(args: Args) -> CapResult {
 }
 
 fn fs_tree(args: Args) -> CapResult {
-    let path = str_arg(&args, "path").unwrap_or_default();
-    let path = path.trim().to_string();
-    if path.is_empty() {
-        return Err(err("fs.tree: 'path' is required"));
-    }
-    let path = go_clean(&path);
-    if !go_is_abs(&path) {
-        return Err(err("fs.tree: path must be absolute"));
-    }
+    let path = local_path("fs.tree", &str_arg(&args, "path").unwrap_or_default())?;
 
     let max_depth = int_arg(&args, "max_depth").unwrap_or(3).clamp(1, 8);
     let max_entries = int_arg(&args, "max_entries").unwrap_or(500).clamp(50, 5000);
 
-    let root = stat(&path).map_err(|e| path_err("GetFileAttributesEx", &path, &e))?;
+    let root = stat(&path).map_err(|e| read_err("fs.tree", "GetFileAttributesEx", &path, &e))?;
     if !root.dir {
         return Err(err(format!("fs.tree: {path:?} is not a directory")));
     }
@@ -819,6 +937,84 @@ fn fs_tree(args: Args) -> CapResult {
         "max_entries": max_entries,
         "count": count,
         "truncated": count as i64 >= max_entries,
+        "entries": entries,
+    }))
+}
+
+#[derive(Default)]
+struct DuChild {
+    dir: bool,
+    bytes: u64,
+    files: u64,
+}
+
+fn fs_du(args: Args, cancel: &tokio_util::sync::CancellationToken) -> CapResult {
+    let path = local_path("fs.du", &str_arg(&args, "path").unwrap_or_default())?;
+    let top = int_arg(&args, "top").unwrap_or(20).clamp(1, 200) as usize;
+    let max_entries = int_arg(&args, "max_entries")
+        .unwrap_or(500_000)
+        .clamp(1000, DU_ENTRY_CAP);
+
+    let root = stat(&path).map_err(|e| read_err("fs.du", "GetFileAttributesEx", &path, &e))?;
+    if !root.dir {
+        return Err(err(format!("fs.du: {path:?} is not a directory")));
+    }
+
+    let prefix_len = path.trim_end_matches(['/', '\\']).len() + 1;
+    let mut children: std::collections::HashMap<String, DuChild> = Default::default();
+    let (mut bytes, mut files, mut dirs, mut seen) = (0u64, 0u64, 0u64, 0i64);
+    let mut stopped = false;
+    walk_dir(&path, &mut |node| {
+        if node.path == path {
+            return Flow::Continue;
+        }
+        seen += 1;
+        if seen > max_entries || cancel.is_cancelled() {
+            stopped = true;
+            return Flow::Stop;
+        }
+        let rel = node.path.get(prefix_len..).unwrap_or_default();
+        let first = rel.split(['/', '\\']).next().unwrap_or(rel);
+        let child = children.entry(first.to_string()).or_default();
+        if first.len() == rel.len() {
+            child.dir = node.is_dir;
+        }
+        if node.is_dir {
+            dirs += 1;
+        } else {
+            let size = node.info.as_ref().map_or(0, |i| i.size);
+            bytes += size;
+            files += 1;
+            child.bytes += size;
+            child.files += 1;
+        }
+        Flow::Continue
+    });
+
+    let mut rows: Vec<(String, DuChild)> = children.into_iter().collect();
+    rows.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes).then_with(|| a.0.cmp(&b.0)));
+    let rest: u64 = rows.iter().skip(top).map(|(_, c)| c.bytes).sum();
+    let entries: Vec<Value> = rows
+        .iter()
+        .take(top)
+        .map(|(name, c)| {
+            json!({
+                "name": name,
+                "path": go_join(&path, name),
+                "dir": c.dir,
+                "bytes": c.bytes,
+                "files": c.files,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "path": path,
+        "bytes": bytes,
+        "files": files,
+        "dirs": dirs,
+        "truncated": stopped,
+        "max_entries": max_entries,
+        "other_bytes": rest,
         "entries": entries,
     }))
 }
@@ -1000,6 +1196,7 @@ fn match_chunk<'a>(mut chunk: &[u8], mut s: &'a [u8]) -> Result<Option<&'a [u8]>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::fs_guard::is_secret_path;
     use crate::dispatch::Ctx;
 
     fn args(v: Value) -> Args {
@@ -1040,6 +1237,8 @@ mod tests {
         assert_eq!(
             router().kinds(),
             vec![
+                "fs.du",
+                "fs.grep",
                 "fs.head",
                 "fs.ls",
                 "fs.read",
@@ -1059,10 +1258,10 @@ mod tests {
         assert_eq!(go_clean("a/../.."), "..");
         assert_eq!(go_clean("\\\\host\\share\\x\\.."), "\\\\host\\share\\");
         assert_eq!(go_clean("C:\\..\\x"), "C:\\x");
-        assert!(go_is_abs("C:\\x"));
-        assert!(!go_is_abs("\\x"));
-        assert!(!go_is_abs("C:x"));
-        assert!(!go_is_abs("relative"));
+        assert!(local_path("fs.ls", "C:\\x").is_ok());
+        assert!(local_path("fs.ls", "\\x").is_err());
+        assert!(local_path("fs.ls", "C:x").is_err());
+        assert!(local_path("fs.ls", "relative").is_err());
         assert_eq!(go_base("C:\\"), "\\");
         assert_eq!(go_base("C:\\a\\b.txt"), "b.txt");
     }
@@ -1195,7 +1394,7 @@ mod tests {
             lines(&out),
             vec!["entry-039997", "entry-039998", "entry-039999"]
         );
-        assert_eq!(out.result["truncated"], json!(true));
+        assert_eq!(out.result["truncated"], json!(false));
     }
 
     #[tokio::test]
@@ -1264,13 +1463,448 @@ mod tests {
 
         let dir_read = run("fs.read", json!({"path": dir.path()})).await;
         assert!(!dir_read.ok);
-        assert!(dir_read.error.ends_with("is a directory; use fs.ls"));
+        assert!(dir_read.error.ends_with("is a folder, not a file"));
 
         let sensitive = run(
             "fs.read",
             json!({"path": "C:\\Windows\\System32\\config\\SAM"}),
         )
         .await;
-        assert!(sensitive.error.contains("sensitive system path"));
+        assert!(
+            sensitive.error.contains("can hold passwords or keys"),
+            "{}",
+            sensitive.error
+        );
+    }
+
+    #[tokio::test]
+    async fn du_totals_a_folder_and_ranks_its_children() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("big").join("inner")).unwrap();
+        fs::write(
+            dir.path().join("big").join("inner").join("a.bin"),
+            vec![0u8; 3000],
+        )
+        .unwrap();
+        fs::write(dir.path().join("small.txt"), vec![0u8; 10]).unwrap();
+        let out = run("fs.du", json!({"path": dir.path()})).await;
+        assert!(out.ok, "{}", out.error);
+        let r = &out.result;
+        assert_eq!(r["bytes"], json!(3010));
+        assert_eq!(r["files"], json!(2));
+        assert_eq!(r["dirs"], json!(2));
+        assert_eq!(r["truncated"], json!(false));
+        assert_eq!(r["entries"][0]["name"], json!("big"));
+        assert_eq!(r["entries"][0]["dir"], json!(true));
+        assert_eq!(r["entries"][0]["bytes"], json!(3000));
+        assert_eq!(r["entries"][1]["name"], json!("small.txt"));
+        assert_eq!(r["entries"][1]["dir"], json!(false));
+
+        let top = run("fs.du", json!({"path": dir.path(), "top": 1})).await;
+        assert_eq!(top.result["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(top.result["other_bytes"], json!(10));
+    }
+
+    #[tokio::test]
+    async fn du_rejects_relative_paths() {
+        let out = run("fs.du", json!({"path": "relative/dir"})).await;
+        assert!(!out.ok);
+        assert!(out.error.contains("absolute"), "{}", out.error);
+    }
+
+    const ALL_KINDS: [&str; 9] = [
+        "fs.du",
+        "fs.grep",
+        "fs.head",
+        "fs.ls",
+        "fs.read",
+        "fs.search",
+        "fs.stat",
+        "fs.tail",
+        "fs.tree",
+    ];
+
+    #[tokio::test]
+    async fn every_fs_kind_refuses_network_and_device_paths() {
+        for path in [
+            "\\\\attacker\\share\\x.txt",
+            "//attacker/share/x.txt",
+            "\\\\?\\C:\\Windows\\win.ini",
+            "\\\\?\\UNC\\attacker\\share\\x",
+            "\\\\.\\PhysicalDrive0",
+            "\\\\.\\pipe\\x",
+            "\\/attacker\\share",
+        ] {
+            for kind in ALL_KINDS {
+                let out = run(kind, json!({ "path": path, "text": "x" })).await;
+                assert!(!out.ok, "{kind} {path}");
+                assert_eq!(
+                    out.error,
+                    format!("{kind}: network and device paths are not allowed"),
+                    "{path}"
+                );
+            }
+        }
+        for path in [
+            "\\??\\UNC\\attacker\\share\\x",
+            "\\Device\\Mup\\attacker",
+            "C:relative",
+        ] {
+            for kind in ALL_KINDS {
+                let out = run(kind, json!({ "path": path, "text": "x" })).await;
+                assert!(
+                    out.error.contains("must be absolute"),
+                    "{kind} {path}: {}",
+                    out.error
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_path_rejects_streams_and_device_names() {
+        assert_eq!(local_path("fs.read", " C:/a/./b ").unwrap(), "C:\\a\\b");
+        assert!(local_path("fs.read", "C:\\a\\..\\..\\b").is_ok());
+        let e = local_path("fs.read", "C:\\Users\\x\\.ssh\\id_rsa::$DATA").unwrap_err();
+        assert_eq!(
+            e.message,
+            "fs.read: ':' is only allowed after the drive letter"
+        );
+        for dev in [
+            "CON",
+            "nul.txt",
+            "Aux",
+            "COM1",
+            "lpt9.log",
+            "CONIN$",
+            "com\u{b9}",
+        ] {
+            let e = local_path("fs.read", &format!("C:\\temp\\{dev}")).unwrap_err();
+            assert_eq!(
+                e.message,
+                format!("fs.read: {dev} is a reserved device name")
+            );
+        }
+        assert!(local_path("fs.read", "C:\\temp\\console.txt").is_ok());
+        assert!(local_path("fs.read", "C:\\temp\\com10").is_ok());
+        assert_eq!(
+            local_path("fs.read", "  ").unwrap_err().message,
+            "fs.read: 'path' is required"
+        );
+    }
+
+    #[test]
+    fn the_secret_list_matches_after_normalising() {
+        for p in [
+            "C:\\Windows\\System32\\config\\SAM",
+            "c:/windows/system32/CONFIG/system",
+            "D:\\WINDOWS\\System32\\Config\\SECURITY",
+            "C:\\Windows\\System32\\config\\RegBack\\SAM",
+            "C:\\Users\\bob\\.ssh\\id_rsa",
+            "C:\\Users\\bob\\.SSH\\config",
+            "C:\\Users\\bob\\.ssh.\\known_hosts",
+            "C:\\Users\\bob\\.aws\\credentials",
+            "C:\\Users\\bob\\.azure\\msal_token_cache.bin",
+            "C:\\Users\\bob\\.git-credentials",
+            "C:\\Users\\bob\\.git-credentials. ",
+            "C:\\Users\\bob\\NTUSER.DAT",
+            "C:\\Users\\bob\\ntuser.dat.LOG1",
+            "C:\\Users\\bob\\AppData\\Local\\Microsoft\\Windows\\UsrClass.dat",
+            "C:\\Users\\bob\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data",
+            "C:\\Users\\bob\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies",
+            "C:\\Users\\bob\\AppData\\Local\\Google\\Chrome\\User Data\\Local State",
+            "C:\\Users\\bob\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data",
+            "C:\\Users\\bob\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\x.default\\logins.json",
+            "C:\\Users\\bob\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\x.default\\key4.db",
+            "C:\\Users\\bob\\AppData\\Roaming\\Microsoft\\Credentials\\ABCDEF",
+            "C:\\Users\\bob\\AppData\\Local\\Microsoft\\Credentials\\ABCDEF",
+            "C:\\Users\\bob\\AppData\\Roaming\\Microsoft\\Protect\\S-1-5-21\\key",
+            "C:\\Users\\bob\\AppData\\Local\\Microsoft\\Vault\\x\\y.vcrd",
+            "C:\\ProgramData\\Microsoft\\Crypto\\RSA\\MachineKeys\\k",
+            "C:\\Users\\bob\\Documents\\passwords.kdbx",
+            "C:\\Users\\bob\\Desktop\\cert.PFX",
+            "C:\\Windows\\Panther\\unattend.xml",
+            "C:\\pagefile.sys",
+            "\\\\?\\C:\\Users\\bob\\.ssh\\id_ed25519",
+            "C:\\Users\\bob\\keys\\id_ed25519_sk",
+            "C:\\ProgramData\\ssh\\ssh_host_ed25519_key",
+            "C:\\ProgramData\\ssh\\ssh_host_rsa_key.pub",
+        ] {
+            assert!(is_secret_path(p), "{p} was allowed");
+        }
+        for p in [
+            "C:\\Users\\bob\\Documents\\notes.txt",
+            "C:\\Windows\\System32\\drivers\\etc\\hosts",
+            "C:\\Windows\\Logs\\CBS\\CBS.log",
+            "C:\\Users\\bob\\sshfiles\\readme.txt",
+            "C:\\Users\\bob\\Documents\\cookies recipe.txt",
+            "C:\\Windows\\System32\\configuration.txt",
+            "C:\\ProgramData\\ssh\\logs\\sshd.log",
+        ] {
+            assert!(!is_secret_path(p), "{p} was blocked");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_read_path_refuses_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        let key = ssh.join("id_rsa");
+        fs::write(&key, "PRIVATE").unwrap();
+        let mut r = router();
+        super::super::fs_write::register(&mut r);
+        for kind in ["fs.read", "fs.head", "fs.tail", "fs.grep", "fs.download"] {
+            let out = r
+                .dispatch(
+                    Ctx::default(),
+                    kind,
+                    args(json!({ "path": key, "text": "P" })),
+                )
+                .await;
+            assert!(!out.ok, "{kind} read the key");
+            assert!(
+                out.error.ends_with("because it can hold passwords or keys"),
+                "{kind}: {}",
+                out.error
+            );
+            let upper = key.to_string_lossy().to_uppercase();
+            let out = r
+                .dispatch(
+                    Ctx::default(),
+                    kind,
+                    args(json!({ "path": upper, "text": "P" })),
+                )
+                .await;
+            assert!(!out.ok, "{kind} read the key by its upper-case name");
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_junction_does_not_get_around_the_secret_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        fs::write(ssh.join("id_rsa"), "PRIVATE").unwrap();
+        let link = dir.path().join("innocent");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&ssh)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let sneaky = link.join("id_rsa");
+        assert_eq!(fs::read_to_string(&sneaky).unwrap(), "PRIVATE");
+        for kind in ["fs.read", "fs.head", "fs.tail"] {
+            let out = run(kind, json!({ "path": sneaky })).await;
+            assert!(!out.ok, "{kind} followed the junction");
+            assert!(out.error.contains("passwords or keys"), "{}", out.error);
+        }
+    }
+
+    #[test]
+    fn search_stops_at_the_visit_cap_and_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plain");
+        fs::create_dir(&dir).unwrap();
+        for i in 0..30 {
+            fs::write(dir.join(format!("f-{i:02}.txt")), "x").unwrap();
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let a = args(json!({"path": dir, "pattern": "*.txt", "max_results": 2000}));
+        let out = search(a.clone(), &cancel, 10).unwrap();
+        assert_eq!(out["truncated"], json!(true));
+        assert_eq!(out["visited"], json!(10));
+        assert_eq!(out["count"], json!(9));
+        assert_eq!(
+            out["note"],
+            json!("stopped after looking at 10 files and folders; search a smaller folder or lower max_depth")
+        );
+        let full = search(a, &cancel, SEARCH_VISIT_CAP).unwrap();
+        assert_eq!(full["truncated"], json!(false));
+        assert_eq!(full["count"], json!(30));
+        assert!(full.get("note").is_none());
+    }
+
+    #[tokio::test]
+    async fn du_entry_cap_is_one_million() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run(
+            "fs.du",
+            json!({"path": dir.path(), "max_entries": 5_000_000}),
+        )
+        .await;
+        assert!(out.ok, "{}", out.error);
+        assert_eq!(out.result["max_entries"], json!(DU_ENTRY_CAP));
+        assert_eq!(out.clamped.len(), 1);
+        assert_eq!(out.clamped[0].to, DU_ENTRY_CAP);
+    }
+
+    fn download_router() -> Router {
+        let mut r = Router::new();
+        super::super::fs_write::register(&mut r);
+        r
+    }
+
+    async fn download_part(r: &Router, v: Value) -> crate::dispatch::Outcome {
+        r.dispatch(Ctx::default(), "fs.download", args(v)).await
+    }
+
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 7 % 251) as u8).collect()
+    }
+
+    fn decode(out: &crate::dispatch::Outcome) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(out.result["base64"].as_str().unwrap())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn download_parts_cover_start_middle_and_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        let data = patterned(10 * 1024 * 1024 + 123);
+        fs::write(&path, &data).unwrap();
+        let size = data.len() as u64;
+        let mtime = fmt_time(fs::metadata(&path).unwrap().modified().unwrap());
+        let r = download_router();
+
+        let first = download_part(&r, json!({"path": path, "offset": 0})).await;
+        assert!(first.ok, "{}", first.error);
+        assert_eq!(decode(&first), &data[..CHUNK_CAP as usize]);
+        assert_eq!(first.result["offset"], json!(0));
+        assert_eq!(first.result["length"], json!(CHUNK_CAP));
+        assert_eq!(first.result["eof"], json!(false));
+        assert!(first.result.get("sha256").is_none());
+
+        let mid_at = 4 * 1024 * 1024 + 5;
+        let mid = download_part(&r, json!({"path": path, "offset": mid_at, "length": 1000})).await;
+        assert!(mid.ok, "{}", mid.error);
+        assert_eq!(decode(&mid), &data[mid_at..mid_at + 1000]);
+        assert_eq!(mid.result["eof"], json!(false));
+
+        let end_at = data.len() - 100;
+        let end = download_part(&r, json!({"path": path, "offset": end_at})).await;
+        assert!(end.ok, "{}", end.error);
+        assert_eq!(decode(&end), &data[end_at..]);
+        assert_eq!(end.result["length"], json!(100));
+        assert_eq!(end.result["eof"], json!(true));
+        assert_eq!(end.result["sha256"], json!(hex(&Sha256::digest(&data))));
+
+        let at_end = download_part(&r, json!({"path": path, "offset": size})).await;
+        assert!(at_end.ok, "{}", at_end.error);
+        assert_eq!(at_end.result["length"], json!(0));
+        assert_eq!(at_end.result["eof"], json!(true));
+
+        for out in [&first, &mid, &end, &at_end] {
+            assert_eq!(out.result["size"], json!(size));
+            assert_eq!(out.result["mtime"], json!(mtime));
+            assert_eq!(out.result["path"], json!(path.to_string_lossy()));
+        }
+
+        let mut joined = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let part = download_part(&r, json!({"path": path, "offset": offset})).await;
+            assert!(part.ok, "{}", part.error);
+            joined.extend(decode(&part));
+            offset += part.result["length"].as_u64().unwrap();
+            if part.result["eof"] == json!(true) {
+                break;
+            }
+        }
+        assert_eq!(joined, data);
+    }
+
+    #[tokio::test]
+    async fn download_part_refuses_an_offset_past_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        fs::write(&path, "hello").unwrap();
+        let out = download_part(&download_router(), json!({"path": path, "offset": 6})).await;
+        assert!(!out.ok);
+        assert_eq!(
+            out.error,
+            format!(
+                "fs.download: offset 6 is past the end of {}, which is 5 bytes",
+                path.to_string_lossy()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn download_part_length_is_capped_at_four_mib() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        fs::write(&path, patterned(5 * 1024 * 1024)).unwrap();
+        let out = download_part(
+            &download_router(),
+            json!({"path": path, "length": 9 * 1024 * 1024}),
+        )
+        .await;
+        assert!(out.ok, "{}", out.error);
+        assert_eq!(out.result["length"], json!(CHUNK_CAP));
+        assert_eq!(out.result["offset"], json!(0));
+        assert_eq!(out.clamped.len(), 1);
+        assert_eq!(out.clamped[0].to, CHUNK_CAP as i64);
+
+        let direct = fs_download(args(json!({"path": path, "length": 9 * 1024 * 1024}))).unwrap();
+        assert_eq!(direct["length"], json!(CHUNK_CAP));
+        let bad = fs_download(args(json!({"path": path, "length": 0}))).unwrap_err();
+        assert_eq!(bad.message, "fs.download: 'length' must be 1 or more");
+    }
+
+    #[tokio::test]
+    async fn download_part_refuses_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        let key = ssh.join("id_ed25519");
+        fs::write(&key, "PRIVATE").unwrap();
+        let out = download_part(
+            &download_router(),
+            json!({"path": key, "offset": 0, "length": 4}),
+        )
+        .await;
+        assert!(!out.ok);
+        assert!(
+            out.error.ends_with("because it can hold passwords or keys"),
+            "{}",
+            out.error
+        );
+    }
+
+    #[tokio::test]
+    async fn download_without_offset_or_length_is_one_reply_up_to_8_mib() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("b.txt");
+        fs::write(&small, "hi").unwrap();
+        let r = download_router();
+        let out = download_part(&r, json!({"path": small})).await;
+        assert!(out.ok, "{}", out.error);
+        assert_eq!(out.result["base64"], json!("aGk="));
+        assert_eq!(
+            out.result["sha256"],
+            json!("8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4")
+        );
+        assert_eq!(out.result["size"], json!(2));
+        let mut keys: Vec<&String> = out.result.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["base64", "mtime", "path", "sha256", "size"]);
+
+        let big = dir.path().join("big.bin");
+        fs::write(&big, patterned(8 * 1024 * 1024 + 1)).unwrap();
+        let out = download_part(&r, json!({"path": big})).await;
+        assert!(!out.ok);
+        assert_eq!(
+            out.error,
+            format!(
+                "fs.download: {} is 8.0 MiB, over the 8 MiB limit. Download it in parts with offset and length.",
+                big.to_string_lossy()
+            )
+        );
     }
 }

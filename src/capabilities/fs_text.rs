@@ -8,8 +8,8 @@ use crate::dispatch::{handler, Spec};
 use crate::dispatch::{Args, CapResult, Router};
 
 use super::consent::require_risk_consent;
-use super::fs::{bool_arg, err, go_clean, go_is_abs, hex, path_err, run_blocking, str_arg};
-use super::fs_write::{guard_write_path, mkdir_all};
+use super::fs::{bool_arg, err, hex, local_path, path_err, run_blocking, str_arg};
+use super::fs_write::{guard_write_path, mkdir_all, shown_path};
 
 const WRITE_CAP: usize = 1 << 20;
 
@@ -26,10 +26,12 @@ pub fn register(r: &mut Router) {
                     "fs.write",
                     &format!(
                         "Writes {} bytes of text to {} on this computer.",
-                        prep.content_len, prep.path
+                        prep.content_len,
+                        shown_path(&prep.path)
                     ),
                 )
                 .await?;
+                guard_write_path("fs.write", &prep.path)?;
                 run_blocking(move || fs_write_commit(prep)).await
             }),
         );
@@ -54,14 +56,7 @@ fn fs_write_prepare(args: &Args) -> Result<Prep, crate::dispatch::HandlerError> 
     let overwrite = bool_arg(args, "overwrite").unwrap_or(false);
     let append = bool_arg(args, "append").unwrap_or(false);
 
-    let path = path.trim().to_string();
-    if path.is_empty() {
-        return Err(err("fs.write: 'path' is required"));
-    }
-    if !go_is_abs(&path) {
-        return Err(err("fs.write: 'path' must be absolute"));
-    }
-    let path = go_clean(&path);
+    let path = local_path("fs.write", &path)?;
     if content.len() > WRITE_CAP {
         return Err(err(format!(
             "fs.write: content is {} bytes; cap is {}",
@@ -69,7 +64,7 @@ fn fs_write_prepare(args: &Args) -> Result<Prep, crate::dispatch::HandlerError> 
             WRITE_CAP
         )));
     }
-    guard_write_path(&path)?;
+    guard_write_path("fs.write", &path)?;
     Ok(Prep {
         path,
         content_len: content.len(),

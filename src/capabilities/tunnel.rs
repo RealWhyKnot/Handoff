@@ -136,8 +136,14 @@ pub fn register(r: &mut Router, bridge: Option<Bridge>) {
         }
         *slot = Some(TunnelMgr::new(bridge));
     }
-    r.register("tunnel.open", handler(open_handler));
-    r.register("tunnel.close", handler(close_handler));
+    super::register_specs(
+        r,
+        include_str!("specs/tunnel.json"),
+        vec![
+            ("tunnel.open", handler(open_handler)),
+            ("tunnel.close", handler(close_handler)),
+        ],
+    );
 }
 
 pub fn is_tunnel_frame_kind(kind: &str) -> bool {
