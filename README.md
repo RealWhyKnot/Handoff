@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://github.com/RealWhyKnot/Handoff/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/RealWhyKnot/Handoff/ci.yml?branch=main&label=ci&style=flat-square&labelColor=0a246a"></a>
   <a href="https://github.com/RealWhyKnot/Handoff/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RealWhyKnot/Handoff?label=release&style=flat-square&labelColor=0a246a&color=3a6ea5"></a>
+  <a href="https://github.com/RealWhyKnot/Handoff/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/RealWhyKnot/Handoff/total?label=downloads&style=flat-square&labelColor=0a246a&color=3a6ea5"></a>
   <a href="https://handoff.whyknot.dev"><img alt="handoff.whyknot.dev status" src="https://img.shields.io/website?url=https%3A%2F%2Fhandoff.whyknot.dev%2Fhealth&label=handoff.whyknot.dev&up_message=online&down_message=offline&style=flat-square&labelColor=0a246a"></a>
   <img alt="Windows 10 and 11, 64-bit" src="https://img.shields.io/badge/windows-10%20%7C%2011%20x64-3a6ea5?style=flat-square&labelColor=0a246a">
   <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-3a6ea5?style=flat-square&labelColor=0a246a"></a>
