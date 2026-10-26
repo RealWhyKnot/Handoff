@@ -22,7 +22,7 @@ embed_picotool = []
 [dependencies]
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-jpeg-encoder = "0.6.1"
+jpeg-encoder = "0.7.1"
 png = "0.18.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "gzip", "zstd"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
