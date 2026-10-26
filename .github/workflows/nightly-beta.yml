@@ -19,8 +19,8 @@ jobs:
     with:
       runs-on: windows-latest
       validate-scripts: |
-        ./.github/scripts/Test-WorkflowSyntax.ps1
         ./.github/scripts/Test-NightlyBetaPlan.ps1
         ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
       ignore-paths: |
         tests/**
+      ci-workflow: ci.yml

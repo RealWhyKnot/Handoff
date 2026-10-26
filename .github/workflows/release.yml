@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,24 +24,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Full history + all tags so the release-body step can diff
           # commits against the previous version tag for the changelog.
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Validate PowerShell and release scripts
-        shell: pwsh
-        run: |
-          ./.github/scripts/Test-WorkflowSyntax.ps1
-          ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
-          ./.github/scripts/Test-NewReleaseNotes.ps1
-
-      - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.99.1"
 
       - name: Resolve version from tag
         id: ver
@@ -48,6 +37,23 @@ jobs:
         with:
           tag: ${{ github.event.inputs.tag }}
           prerelease-pattern: '^v\d{4}\.\d+\.\d+\.\d+-.+$'
+
+      - name: Wait for CI
+        uses: RealWhyKnot/workflows/wait-for-ci@v1
+        with:
+          sha: ${{ steps.ver.outputs.sha }}
+          workflow: ci.yml
+
+      - name: Validate PowerShell and release scripts
+        shell: pwsh
+        run: |
+          ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
+          ./.github/scripts/Test-NewReleaseNotes.ps1
+
+      - name: Rust toolchain
+        uses: RealWhyKnot/workflows/setup-rust@v1
+        with:
+          cache: 'false'
 
       - name: Validate release version sequence
         uses: RealWhyKnot/workflows/version-sequence@v1
