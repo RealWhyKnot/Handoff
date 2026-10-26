@@ -11,6 +11,8 @@ use serde_json::{Map, Value};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::consent::{take_ask, Ask};
+
 pub use failure::{Failure, HandlerError};
 pub use spec::{Bound, Clamp, Param, ParamType, Spec};
 
@@ -23,6 +25,7 @@ pub type Progress = Arc<dyn Fn(String) + Send + Sync>;
 pub struct Ctx {
     pub cancel: CancellationToken,
     pub progress: Option<Progress>,
+    pub consent: Ask,
 }
 
 impl Ctx {
@@ -30,6 +33,7 @@ impl Ctx {
         Ctx {
             cancel,
             progress: None,
+            consent: Ask::Default,
         }
     }
 
@@ -62,7 +66,7 @@ pub struct Shown {
     pub cut: bool,
 }
 
-fn hidden_char(c: char) -> bool {
+pub fn hidden_char(c: char) -> bool {
     matches!(
         c,
         '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
@@ -184,6 +188,17 @@ impl Router {
         };
 
         let mut args = args;
+        let mut ctx = ctx;
+        match take_ask(kind, &mut args) {
+            Ok(ask) => ctx.consent = ask,
+            Err(message) => {
+                return Outcome {
+                    error: message,
+                    elapsed_ms: elapsed(t0),
+                    ..Outcome::default()
+                };
+            }
+        }
         let mut clamped = Vec::new();
         let mut ignored = Vec::new();
         if let Some(spec) = self.specs.get(kind) {
@@ -529,6 +544,81 @@ mod tests {
             .await;
         assert!(out.ok);
         assert_eq!(*got.lock().unwrap(), json!("kept"));
+    }
+
+    #[tokio::test]
+    async fn consent_minutes_reaches_the_ctx_and_never_the_capability() {
+        let mut r = Router::new();
+        let got = Arc::new(Mutex::new(None));
+        let got_in = got.clone();
+        r.register_spec(
+            list_spec(),
+            handler(move |ctx: Ctx, a: Args| {
+                let got = got_in.clone();
+                async move {
+                    *got.lock().unwrap() = Some((ctx.consent, a));
+                    Ok(Value::Null)
+                }
+            }),
+        );
+        let out = r
+            .dispatch(
+                Ctx::default(),
+                "app.list",
+                args(json!({"limit": 5, "consent_minutes": 30})),
+            )
+            .await;
+        assert!(out.ok, "{}", out.error);
+        assert!(out.ignored.is_empty(), "{:?}", out.ignored);
+        let (ask, seen) = got.lock().unwrap().take().unwrap();
+        assert_eq!(ask, Ask::Minutes(30));
+        assert!(!seen.contains_key("consent_minutes"));
+        assert_eq!(seen["limit"], json!(5));
+
+        r.register(
+            "legacy.kind",
+            handler(|ctx: Ctx, a: Args| async move {
+                assert!(a.is_empty());
+                assert_eq!(ctx.consent, Ask::Once);
+                Ok(Value::Null)
+            }),
+        );
+        let out = r
+            .dispatch(
+                Ctx::default(),
+                "legacy.kind",
+                args(json!({"consent_minutes": 0})),
+            )
+            .await;
+        assert!(out.ok, "{}", out.error);
+    }
+
+    #[tokio::test]
+    async fn bad_consent_minutes_stop_the_command_before_it_runs() {
+        let mut r = Router::new();
+        let called = Arc::new(AtomicBool::new(false));
+        let c = called.clone();
+        r.register(
+            "ps.exec",
+            handler(move |_, _| {
+                c.store(true, Ordering::SeqCst);
+                async { Ok(Value::Null) }
+            }),
+        );
+        for bad in [json!(-5), json!(241), json!(2.5), json!("10")] {
+            let out = r
+                .dispatch(
+                    Ctx::default(),
+                    "ps.exec",
+                    args(json!({"script": "Get-Date", "consent_minutes": bad})),
+                )
+                .await;
+            assert!(!out.ok);
+            assert!(out
+                .error
+                .contains("'consent_minutes' must be a whole number from 0 to 240"));
+        }
+        assert!(!called.load(Ordering::SeqCst));
     }
 
     #[test]

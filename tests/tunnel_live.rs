@@ -21,7 +21,8 @@ async fn live_tunnel_host() {
         .expect("dial");
     let mut router = Router::new();
     capabilities::register_all(&mut router, Some(bridge.clone()));
-    let prompt: Prompt = Arc::new(|_, _| Box::pin(async { Ok(true) }));
+    let prompt: Prompt =
+        Arc::new(|_, _| Box::pin(async { Ok(handoff::consent::Answer::ForGrant) }));
     set_session_ledger(Arc::new(Ledger::new(prompt)));
     let router = Arc::new(router);
     bridge

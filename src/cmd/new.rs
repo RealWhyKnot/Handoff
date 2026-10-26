@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::flags::{parse_options, Def, FlagError, Options};
 use super::host::{self, tag, Board, Ending};
 use super::keys::{start_keyboard_control, ENDING};
-use super::summary::{summarize_args, summarize_result};
+use super::summary::{describe_args, summarize_result};
 use crate::audit::{self, Logger};
 use crate::consent::{self, category_for, Decision};
 use crate::console::{self, human_duration, paint, plain_error, Tone};
@@ -354,15 +354,16 @@ async fn recv_step(
         return true;
     }
 
-    let summary = summarize_args(&cmd.extras);
+    let view = describe_args(&cmd.extras);
     let num = jobs.board.begin(&cmd.id, &cmd.kind);
     slog!("command number sid={sid} id={} num={num}", cmd.id);
     let label = jobs.board.label(&cmd.kind);
-    console::line(&host::command_line(
+    console::lines(&host::command_lines(
         num,
         label.as_deref(),
         &cmd.kind,
-        &summary,
+        &view,
+        console::body_width(),
     ));
     jobs.start(cmd, num);
     true
@@ -650,10 +651,13 @@ impl Jobs {
                 Ending::Refused => String::new(),
                 _ => summarize_result(&out),
             };
-            console::line(&format!(
-                "{}  {}",
-                tag(num),
-                host::result_line(&out, ending, jobs.board.read_only(), &detail)
+            console::lines(&host::result_lines(
+                num,
+                &out,
+                ending,
+                jobs.board.read_only(),
+                &detail,
+                console::body_width(),
             ));
 
             jobs.write_audit(&cmd, &out, ending);

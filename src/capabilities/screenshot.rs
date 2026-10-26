@@ -61,7 +61,7 @@ pub struct Screenshot {
 async fn screenshot_handler(ctx: Ctx, args: Args) -> CapResult {
     let opts = ScreenshotOptions::from_args(&args);
     require_risk_consent(
-        &ctx.cancel,
+        &ctx,
         "sys.screenshot",
         "Takes a picture of what is currently on your screen and sends it to your helper.",
     )
@@ -548,7 +548,8 @@ mod tests {
     async fn handler_end_to_end_with_consent_returns_a_jpeg_result() {
         use crate::capabilities::consent::testing::SessionGuard;
         use crate::consent::Prompt;
-        let prompt: Prompt = Arc::new(|_, _| Box::pin(async { Ok(true) }));
+        let prompt: Prompt =
+            Arc::new(|_, _| Box::pin(async { Ok(crate::consent::Answer::ForGrant) }));
         let _guard = SessionGuard::with_prompt(prompt);
         let args = serde_json::json!({"max_width": 640, "quality": 50});
         let out = match screenshot_handler(Ctx::default(), args.as_object().unwrap().clone()).await

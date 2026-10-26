@@ -3,10 +3,13 @@ pub mod exec;
 pub mod flags;
 pub mod host;
 pub mod keys;
+pub mod layout;
 pub mod menu;
 pub mod new;
 pub mod paths;
 pub mod pause;
+#[cfg(test)]
+mod preview;
 pub mod summary;
 pub mod tunnel;
 pub mod update;

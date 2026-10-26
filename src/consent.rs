@@ -1,9 +1,11 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
+use serde_json::{Map, Value};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -59,7 +61,7 @@ impl Category {
             Category::Services => "start and stop Windows services",
             Category::Devices => "reprogram attached devices such as a Pico board",
             Category::Network => {
-                "open connections to this PC and to devices on your local network, for example your router"
+                "open connections to this PC and to devices on your local network such as your router"
             }
             Category::Capture => "capture your screen and set your clipboard",
             Category::Exec => "run PowerShell commands",
@@ -72,21 +74,115 @@ impl Category {
 pub enum Decision {
     NotRequired,
     PromptAllow,
+    PromptAllowOnce,
+    PromptAllowFor(u32),
     PromptDeny,
     GrantCached,
     GrantExpired,
 }
 
 impl Decision {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> Cow<'static, str> {
         match self {
-            Decision::NotRequired => "not_required",
-            Decision::PromptAllow => "prompt_allow",
-            Decision::PromptDeny => "prompt_deny",
-            Decision::GrantCached => "grant_cached",
-            Decision::GrantExpired => "grant_expired",
+            Decision::NotRequired => "not_required".into(),
+            Decision::PromptAllow => "prompt_allow".into(),
+            Decision::PromptAllowOnce => "prompt_allow_once".into(),
+            Decision::PromptAllowFor(minutes) => format!("prompt_allow_{minutes}m").into(),
+            Decision::PromptDeny => "prompt_deny".into(),
+            Decision::GrantCached => "grant_cached".into(),
+            Decision::GrantExpired => "grant_expired".into(),
         }
     }
+}
+
+pub const CONSENT_ARG: &str = "consent_minutes";
+pub const MAX_CONSENT_MINUTES: u32 = 240;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ask {
+    #[default]
+    Default,
+    Once,
+    Minutes(u32),
+}
+
+pub fn take_ask(kind: &str, args: &mut Map<String, Value>) -> Result<Ask, String> {
+    let ask = match args.remove(CONSENT_ARG) {
+        None | Some(Value::Null) => return Ok(Ask::Default),
+        Some(v) => v.as_u64(),
+    };
+    match ask {
+        Some(0) => Ok(Ask::Once),
+        Some(n) if n <= u64::from(MAX_CONSENT_MINUTES) => Ok(Ask::Minutes(n as u32)),
+        _ => Err(format!(
+            "{kind}: '{CONSENT_ARG}' must be a whole number from 0 to {MAX_CONSENT_MINUTES} (0 means just this once)"
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Term {
+    Once,
+    Minutes(u32),
+    Session,
+}
+
+impl Term {
+    pub fn length(self) -> Option<Duration> {
+        match self {
+            Term::Minutes(m) => Some(Duration::from_secs(u64::from(m) * 60)),
+            _ => None,
+        }
+    }
+
+    pub fn text(self) -> String {
+        match self {
+            Term::Once => "just this once".to_string(),
+            Term::Minutes(m) => format!("for the next {}", minutes_text(m, true)),
+            Term::Session => "until this session ends".to_string(),
+        }
+    }
+
+    pub fn button(self) -> Option<String> {
+        match self {
+            Term::Once => None,
+            Term::Minutes(m) => Some(format!("Allow for {}", minutes_text(m, false))),
+            Term::Session => Some("Allow until this session ends".to_string()),
+        }
+    }
+}
+
+fn minutes_text(m: u32, after_next: bool) -> String {
+    match (m, m % 60) {
+        (1, _) if after_next => "minute".to_string(),
+        (1, _) => "1 minute".to_string(),
+        (60, _) if after_next => "hour".to_string(),
+        (60, _) => "1 hour".to_string(),
+        (m, 0) => format!("{} hours", m / 60),
+        (m, _) => format!("{m} minutes"),
+    }
+}
+
+pub fn term_for(category: Category, ask: Ask) -> Term {
+    if category == Category::Power {
+        return Term::Once;
+    }
+    match ask {
+        Ask::Once => Term::Once,
+        Ask::Minutes(m) => Term::Minutes(m),
+        Ask::Default => match grant_ttl(category) {
+            Some(ttl) if ttl.is_zero() => Term::Once,
+            Some(ttl) => Term::Minutes((ttl.as_secs() / 60) as u32),
+            None => Term::Session,
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    No,
+    Once,
+    ForGrant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,20 +215,39 @@ pub struct Request {
     pub kind: String,
     pub category: Option<Category>,
     pub summary: String,
+    pub detail: Option<String>,
+    pub ask: Ask,
 }
 
 impl Request {
     pub fn for_kind(kind: &str, summary: &str) -> Request {
         Request {
             kind: kind.to_string(),
-            category: None,
             summary: summary.to_string(),
+            ..Request::default()
+        }
+    }
+
+    pub fn asking(mut self, ask: Ask) -> Request {
+        self.ask = ask;
+        self
+    }
+
+    pub fn showing(mut self, detail: Option<&str>) -> Request {
+        self.detail = detail.map(str::to_string);
+        self
+    }
+
+    pub fn term(&self) -> Term {
+        match self.category.or_else(|| category_for(&self.kind)) {
+            Some(c) => term_for(c, self.ask),
+            None => Term::Session,
         }
     }
 }
 
 pub type Prompt = Arc<
-    dyn Fn(CancellationToken, Request) -> BoxFuture<'static, Result<bool, ConsentError>>
+    dyn Fn(CancellationToken, Request) -> BoxFuture<'static, Result<Answer, ConsentError>>
         + Send
         + Sync,
 >;
@@ -140,7 +255,7 @@ pub type Prompt = Arc<
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     Asking,
-    Allowed,
+    Allowed(Term),
     Denied,
     TimedOut,
     Withdrawn,
@@ -271,7 +386,7 @@ impl Ledger {
         self.timeout
     }
 
-    async fn ask(&self, cancel: &CancellationToken, req: &Request) -> Result<bool, ConsentError> {
+    async fn ask(&self, cancel: &CancellationToken, req: &Request) -> Result<Answer, ConsentError> {
         let ask_cancel = cancel.child_token();
         let prompt = (self.prompt)(ask_cancel.clone(), req.clone());
         tokio::pin!(prompt);
@@ -318,6 +433,11 @@ impl Ledger {
                 None => return (Decision::NotRequired, Ok(())),
             },
         };
+        let term = term_for(category, req.ask);
+        let needs = match req.ask {
+            Ask::Minutes(_) => term.length(),
+            _ => None,
+        };
 
         loop {
             if cancel.is_cancelled() {
@@ -339,6 +459,7 @@ impl Ledger {
                         Some(exp) if now >= exp => {
                             st.grants.remove(&category);
                         }
+                        Some(exp) if needs.is_some_and(|d| exp - now < d) => {}
                         _ => return (Decision::GrantCached, Ok(())),
                     }
                 }
@@ -372,12 +493,16 @@ impl Ledger {
                 armed: true,
             };
             tell(&req, Step::Asking);
-            let answer = self.ask(cancel, &req).await;
+            let picked = self.ask(cancel, &req).await.map(|answer| match answer {
+                Answer::No => None,
+                Answer::Once => Some(Term::Once),
+                Answer::ForGrant => Some(term),
+            });
             tell(
                 &req,
-                match &answer {
-                    Ok(true) => Step::Allowed,
-                    Ok(false) => Step::Denied,
+                match &picked {
+                    Ok(Some(term)) => Step::Allowed(*term),
+                    Ok(None) => Step::Denied,
                     Err(ConsentError::TimedOut) => Step::TimedOut,
                     Err(ConsentError::Cancelled) => Step::Withdrawn,
                     Err(ConsentError::Denied) => Step::Denied,
@@ -387,11 +512,13 @@ impl Ledger {
             {
                 let mut st = self.lock();
                 st.asking.remove(&category);
-                if let Ok(allowed) = &answer {
-                    if *allowed {
-                        let grant = new_grant(category, st.now());
+                match &picked {
+                    Ok(Some(Term::Once)) | Err(_) => {}
+                    Ok(Some(term)) => {
+                        let grant = new_grant(category, *term, st.now());
                         st.grants.insert(category, grant);
-                    } else {
+                    }
+                    Ok(None) => {
                         let until = st.now() + DENY_BACKOFF;
                         st.denied.insert(category, until);
                     }
@@ -400,10 +527,12 @@ impl Ledger {
             guard.armed = false;
             self.notify.notify_waiters();
 
-            return match answer {
+            return match picked {
                 Err(e) => (Decision::PromptDeny, Err(e)),
-                Ok(true) => (Decision::PromptAllow, Ok(())),
-                Ok(false) => (Decision::PromptDeny, Err(ConsentError::Denied)),
+                Ok(None) => (Decision::PromptDeny, Err(ConsentError::Denied)),
+                Ok(Some(Term::Once)) => (Decision::PromptAllowOnce, Ok(())),
+                Ok(Some(Term::Minutes(m))) => (Decision::PromptAllowFor(m), Ok(())),
+                Ok(Some(Term::Session)) => (Decision::PromptAllow, Ok(())),
             };
         }
     }
@@ -443,55 +572,133 @@ pub fn grant_ttl(category: Category) -> Option<Duration> {
 }
 
 pub fn scope_text(category: Option<Category>) -> String {
-    match category.and_then(grant_ttl) {
-        Some(ttl) if ttl.is_zero() => "this one time".to_string(),
-        Some(ttl) => format!("for the next {} minutes", ttl.as_secs() / 60),
-        None => "until this session ends".to_string(),
+    match category {
+        Some(c) => term_for(c, Ask::Default).text(),
+        None => Term::Session.text(),
     }
 }
 
-fn new_grant(category: Category, now: Instant) -> Grant {
-    let expires_at = match category {
-        Category::Exec => Some(now + EXEC_GRANT_TTL),
-        Category::Files => Some(now + FILES_GRANT_TTL),
-        Category::Power => Some(now),
-        _ => None,
-    };
+fn new_grant(category: Category, term: Term, now: Instant) -> Grant {
     Grant {
         category,
         granted_at: now,
-        expires_at,
+        expires_at: term.length().map(|d| now + d),
     }
 }
 
 const SUMMARY_CHARS: usize = 2000;
 const SUMMARY_LINES: usize = 40;
+const DETAIL_CHARS: usize = 200_000;
+const DETAIL_LINES: usize = 20_000;
+const CUT_NOTE: &str = "(The rest is too long to show here.)";
 
-pub fn prompt_text(req: &Request) -> String {
+pub const PROMPT_TITLE: &str = "Allow this Handoff request?";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptParts {
+    pub instruction: String,
+    pub summary: String,
+    pub scope: String,
+    pub caution: String,
+    pub command: Option<String>,
+    pub detail: Option<String>,
+    pub grant_button: Option<String>,
+}
+
+pub fn prompt_parts(req: &Request) -> PromptParts {
     let shown = for_display(&req.summary, SUMMARY_CHARS, SUMMARY_LINES);
-    let mut summary = if shown.text.trim().is_empty() {
+    let text = shown.text.trim();
+    let (head, command) = match text.split_once("\n\n") {
+        Some((head, rest)) => (head.trim().to_string(), Some(rest.trim().to_string())),
+        None if text.contains('\n') => (String::new(), Some(text.to_string())),
+        None => (text.to_string(), None),
+    };
+    let mut command = command.filter(|c| !c.is_empty());
+    if shown.cut {
+        match &mut command {
+            Some(c) => c.push_str(&format!("\n{CUT_NOTE}")),
+            None => command = Some(CUT_NOTE.to_string()),
+        }
+    }
+    let detail = match &req.detail {
+        Some(full) => {
+            let shown = for_display(full, DETAIL_CHARS, DETAIL_LINES);
+            let mut text = shown.text;
+            if shown.cut {
+                text.push_str(&format!("\n{CUT_NOTE}"));
+            }
+            Some(text).filter(|t| !t.is_empty())
+        }
+        None => command.clone(),
+    };
+    let head = if head.is_empty() && command.is_none() {
         "Run a command that can change this computer.".to_string()
     } else {
-        shown.text.trim().to_string()
+        head
     };
-    if shown.cut {
-        summary.push_str("\n(The rest is too long to show here.)");
-    }
+    let term = req.term();
     let granted = req
         .category
         .map(Category::label)
         .unwrap_or("run this kind of command");
-    let scope = scope_text(req.category);
-    let minutes = PROMPT_TIMEOUT.as_secs() / 60;
+    let scope = match term {
+        Term::Once => "If you allow it, only this request goes ahead. They have to ask again for anything else."
+            .to_string(),
+        term => format!(
+            "If you allow it, they can {granted} {}. For any other kind of change they have to ask you again.",
+            term.text()
+        ),
+    };
+    PromptParts {
+        instruction: "The person helping you wants to make a change on this computer".to_string(),
+        summary: head,
+        scope,
+        caution: "Only allow it if you know this person and asked them for help.".to_string(),
+        command,
+        detail,
+        grant_button: term.button(),
+    }
+}
 
+impl PromptParts {
+    pub fn scope_line(&self) -> String {
+        let mut out = self.scope.clone();
+        if self.grant_button.is_some() {
+            out.push_str(" Choose Just this once to allow only this request.");
+        }
+        out
+    }
+}
+
+pub fn countdown_text(left: Duration) -> String {
+    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
     format!(
-        "The person helping you wants to make a change on this computer.\n\n\
-         They asked to:\n{summary}\n\n\
-         If you choose Yes, they can {granted} {scope}. \
-         For any other kind of change they have to ask you again.\n\n\
-         Choose Yes only if you know this person and asked them for help. \
-         If you don't answer within {minutes} minutes, Handoff answers No for you."
+        "If you don't answer, Handoff says no for you in {}:{:02}.",
+        secs / 60,
+        secs % 60
     )
+}
+
+pub fn prompt_text(req: &Request) -> String {
+    let parts = prompt_parts(req);
+    let mut out = format!("{}.\n\n", parts.instruction);
+    for piece in [Some(&parts.summary), parts.command.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !piece.is_empty() {
+            out.push_str(piece);
+            out.push_str("\n\n");
+        }
+    }
+    out.push_str(&parts.scope);
+    out.push_str("\n\n");
+    out.push_str(&parts.caution);
+    out.push_str(&format!(
+        " If you don't answer within {} minutes, Handoff says no for you.",
+        PROMPT_TIMEOUT.as_secs() / 60
+    ));
+    out
 }
 
 pub fn system_prompt() -> Prompt {
@@ -499,29 +706,15 @@ pub fn system_prompt() -> Prompt {
 }
 
 #[cfg(windows)]
-fn close_prompt_windows(thread_id: u32) {
-    use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumThreadWindows, PostMessageW, IDNO, WM_COMMAND,
-    };
-
-    unsafe extern "system" fn press_no(hwnd: HWND, _: LPARAM) -> BOOL {
-        let _ = unsafe { PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0)) };
-        BOOL(1)
-    }
-    unsafe {
-        let _ = EnumThreadWindows(thread_id, Some(press_no), LPARAM(0));
-    }
-}
+#[path = "consent_dialog.rs"]
+pub mod dialog;
 
 #[cfg(windows)]
-async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<bool, ConsentError> {
+async fn system_prompt_impl(
+    cancel: CancellationToken,
+    req: Request,
+) -> Result<Answer, ConsentError> {
     use std::sync::atomic::{AtomicU32, Ordering};
-    use windows::core::HSTRING;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
-    };
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -531,27 +724,12 @@ async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<b
     if cancel.is_cancelled() {
         return Err(ConsentError::Cancelled);
     }
-    let text = HSTRING::from(prompt_text(&req));
-    let title = HSTRING::from("Allow this Handoff request?");
     let thread = Arc::new(AtomicU32::new(0));
     let seen = thread.clone();
+    let shown = req.clone();
     let mut task = tokio::task::spawn_blocking(move || {
         seen.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
-        let ret = unsafe {
-            MessageBoxW(
-                None,
-                &text,
-                &title,
-                MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-            )
-        };
-        if ret.0 == 0 {
-            return Err(ConsentError::Other(format!(
-                "consent prompt failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(ret == IDYES)
+        dialog::show(&shown, &dialog::Options::default())
     });
     tokio::select! {
         joined = &mut task => {
@@ -563,7 +741,7 @@ async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<b
             loop {
                 let id = thread.load(Ordering::SeqCst);
                 if id != 0 {
-                    close_prompt_windows(id);
+                    dialog::close(id);
                 }
                 match tokio::time::timeout(Duration::from_millis(100), &mut task).await {
                     Ok(_) => {
@@ -580,21 +758,43 @@ async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<b
     }
 }
 
+pub fn typed_question(term: Term) -> String {
+    match term {
+        Term::Once => {
+            "Type y and press Enter to allow it. Press Enter on its own to say no: ".to_string()
+        }
+        term => format!(
+            "Type y and press Enter to allow it {}, or o to allow just this once. Press Enter on its own to say no: ",
+            term.text()
+        ),
+    }
+}
+
+pub fn typed_answer(line: &str, term: Term) -> Answer {
+    match line.trim().to_lowercase().as_str() {
+        "y" | "yes" if term == Term::Once => Answer::Once,
+        "y" | "yes" => Answer::ForGrant,
+        "o" | "once" => Answer::Once,
+        _ => Answer::No,
+    }
+}
+
 #[cfg(not(windows))]
-async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<bool, ConsentError> {
+async fn system_prompt_impl(
+    cancel: CancellationToken,
+    req: Request,
+) -> Result<Answer, ConsentError> {
     if cancel.is_cancelled() {
         return Err(ConsentError::Cancelled);
     }
+    let term = req.term();
     eprintln!("{}", prompt_text(&req));
-    eprint!("Type y and press Enter to allow it. Press Enter on its own to say no: ");
-    let read = tokio::task::spawn_blocking(|| {
+    eprint!("{}", typed_question(term));
+    let read = tokio::task::spawn_blocking(move || {
         let mut line = String::new();
         match std::io::stdin().read_line(&mut line) {
             Ok(0) => Err(ConsentError::Other("no answer could be read".into())),
-            Ok(_) => {
-                let line = line.trim().to_lowercase();
-                Ok(line == "y" || line == "yes")
-            }
+            Ok(_) => Ok(typed_answer(&line, term)),
             Err(e) => Err(ConsentError::Other(e.to_string())),
         }
     });
@@ -604,12 +804,16 @@ async fn system_prompt_impl(cancel: CancellationToken, req: Request) -> Result<b
     }
 }
 
+#[cfg(all(test, windows))]
+#[path = "consent_preview.rs"]
+mod preview;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn counting(allow: bool, delay_ms: u64) -> (Prompt, Arc<AtomicUsize>) {
+    fn counting(answer: Answer, delay_ms: u64) -> (Prompt, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         let prompt: Prompt = Arc::new(move |_, _| {
@@ -619,7 +823,7 @@ mod tests {
                 if delay_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
-                Ok(allow)
+                Ok(answer)
             })
         });
         (prompt, calls)
@@ -635,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn grant_in_one_category_does_not_cover_another() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         for kind in ["pico.reset", "ps.exec", "fs.delete"] {
             assert!(l.require(&tok(), req(kind)).await.1.is_ok(), "{kind}");
@@ -645,7 +849,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_command_in_the_same_category_reuses_the_grant() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         for kind in ["fs.delete", "fs.mkdir", "fs.upload"] {
             assert!(l.require(&tok(), req(kind)).await.1.is_ok(), "{kind}");
@@ -655,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_requests_in_one_category_prompt_once() {
-        let (p, calls) = counting(true, 25);
+        let (p, calls) = counting(Answer::ForGrant, 25);
         let l = Arc::new(Ledger::new(p));
         let mut tasks = Vec::new();
         for _ in 0..8 {
@@ -673,7 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_requests_in_different_categories_prompt_separately() {
-        let (p, calls) = counting(true, 10);
+        let (p, calls) = counting(Answer::ForGrant, 10);
         let l = Arc::new(Ledger::new(p));
         let mut tasks = Vec::new();
         for kind in ["ps.exec", "fs.delete", "svc.control"] {
@@ -691,7 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn denial_is_not_terminal_for_the_session() {
-        let (p, calls) = counting(false, 0);
+        let (p, calls) = counting(Answer::No, 0);
         let l = Ledger::new(p);
         assert_eq!(
             l.require(&tok(), req("fs.delete")).await.1,
@@ -713,7 +917,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_grant_expires() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         assert!(l.require(&tok(), req("ps.exec")).await.1.is_ok());
         l.advance(EXEC_GRANT_TTL - Duration::from_secs(60));
@@ -727,7 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn power_is_never_remembered() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         for _ in 0..3 {
             assert!(l.require(&tok(), req("sys.restart")).await.1.is_ok());
@@ -737,7 +941,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_all_forces_a_fresh_prompt() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         assert!(l.require(&tok(), req("fs.delete")).await.1.is_ok());
         assert_eq!(l.revoke_all(), 1);
@@ -748,7 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn deny_everything_refuses_without_prompting() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         l.deny_everything();
         for kind in ["ps.exec", "fs.delete", "tunnel.open"] {
@@ -763,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn ungated_kind_needs_no_consent() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         let (decision, res) = l.require(&tok(), req("sys.info")).await;
         assert!(res.is_ok());
@@ -773,11 +977,11 @@ mod tests {
 
     #[tokio::test]
     async fn decisions_are_reported_for_the_audit_log() {
-        let (p, _) = counting(true, 0);
+        let (p, _) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         assert_eq!(
             l.require(&tok(), req("fs.delete")).await.0,
-            Decision::PromptAllow
+            Decision::PromptAllowFor(15)
         );
         assert_eq!(
             l.require(&tok(), req("fs.mkdir")).await.0,
@@ -787,7 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_prompt_releases_the_category() {
-        let (slow, _) = counting(true, 5_000);
+        let (slow, _) = counting(Answer::ForGrant, 5_000);
         let l = Arc::new(Ledger::new(slow));
         let l2 = l.clone();
         let task = tokio::spawn(async move {
@@ -817,6 +1021,7 @@ mod tests {
             kind: "svc.control".into(),
             category: Some(Category::Services),
             summary: "Stop \u{202E}exe.ssecorp\u{202C} spooler\u{200B}\u{7}".into(),
+            ..Request::default()
         });
         assert!(text.contains("Stop exe.ssecorp spooler"), "{text}");
         for c in ['\u{202E}', '\u{202C}', '\u{200B}', '\u{7}'] {
@@ -827,6 +1032,7 @@ mod tests {
             kind: "svc.control".into(),
             category: Some(Category::Services),
             summary: "\u{200B}\u{202E}".into(),
+            ..Request::default()
         });
         assert!(text.contains("Run a command that can change this computer."));
 
@@ -834,6 +1040,7 @@ mod tests {
             kind: "svc.control".into(),
             category: Some(Category::Services),
             summary: "x\n".repeat(80),
+            ..Request::default()
         });
         assert!(text.contains("(The rest is too long to show here.)"));
     }
@@ -844,6 +1051,7 @@ mod tests {
             kind: "ps.exec".into(),
             category: Some(Category::Exec),
             summary: "Run: Get-Date".into(),
+            ..Request::default()
         });
         assert!(text.contains("Run: Get-Date"));
         assert!(text.contains("for the next 15 minutes"));
@@ -853,8 +1061,9 @@ mod tests {
             kind: "sys.restart".into(),
             category: Some(Category::Power),
             summary: String::new(),
+            ..Request::default()
         });
-        assert!(text.contains("this one time"));
+        assert!(text.contains("only this request goes ahead"));
         assert!(text.contains("Run a command that can change this computer."));
         assert!(text.contains("within 2 minutes"));
 
@@ -862,6 +1071,7 @@ mod tests {
             kind: "fs.delete".into(),
             category: Some(Category::Files),
             summary: "Delete C:\\x".into(),
+            ..Request::default()
         });
         assert!(text.contains("read, add, change, and delete your files for the next 15 minutes"));
 
@@ -869,17 +1079,18 @@ mod tests {
             kind: "tunnel.open".into(),
             category: Some(Category::Network),
             summary: String::new(),
+            ..Request::default()
         });
         assert!(text.contains("until this session ends"));
     }
 
     #[tokio::test]
     async fn files_grant_expires_after_fifteen_minutes() {
-        let (p, calls) = counting(true, 0);
+        let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         assert_eq!(
             l.require(&tok(), req("fs.delete")).await.0,
-            Decision::PromptAllow
+            Decision::PromptAllowFor(15)
         );
         l.advance(FILES_GRANT_TTL - Duration::from_secs(60));
         assert_eq!(
@@ -893,7 +1104,7 @@ mod tests {
         assert!(l.grants().is_empty());
         assert_eq!(
             l.require(&tok(), req("fs.upload")).await.0,
-            Decision::PromptAllow
+            Decision::PromptAllowFor(15)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -943,7 +1154,7 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_that_ignores_cancel_does_not_hang_the_command() {
-        let (slow, _) = counting(true, 60_000);
+        let (slow, _) = counting(Answer::ForGrant, 60_000);
         let l = Ledger::new(slow);
         let cancel = tok();
         let c2 = cancel.clone();
@@ -966,13 +1177,414 @@ mod tests {
                 s2.lock().unwrap().push(e.step.clone());
             }
         })));
-        let (p, _) = counting(false, 0);
+        let (p, _) = counting(Answer::No, 0);
         let l = Ledger::new(p);
         let _ = l
             .require(&tok(), Request::for_kind("proc.kill", "observer-test"))
             .await;
         set_observer(None);
         assert_eq!(*seen.lock().unwrap(), vec![Step::Asking, Step::Denied]);
+    }
+
+    fn asked(kind: &str, ask: Ask) -> Request {
+        Request::for_kind(kind, "").asking(ask)
+    }
+
+    fn args_of(v: serde_json::Value) -> Map<String, Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn consent_minutes_is_parsed_and_removed() {
+        for (v, want) in [
+            (serde_json::json!({}), Ask::Default),
+            (serde_json::json!({"consent_minutes": null}), Ask::Default),
+            (serde_json::json!({"consent_minutes": 0}), Ask::Once),
+            (serde_json::json!({"consent_minutes": 1}), Ask::Minutes(1)),
+            (
+                serde_json::json!({"consent_minutes": 240}),
+                Ask::Minutes(240),
+            ),
+        ] {
+            let mut args = args_of(v.clone());
+            args.insert("script".into(), Value::from("Get-Date"));
+            assert_eq!(take_ask("ps.exec", &mut args), Ok(want), "{v}");
+            assert!(!args.contains_key(CONSENT_ARG));
+            assert_eq!(args["script"], Value::from("Get-Date"));
+        }
+    }
+
+    #[test]
+    fn bad_consent_minutes_are_refused_with_a_plain_error() {
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(241),
+            serde_json::json!(15.5),
+            serde_json::json!(15.0),
+            serde_json::json!("15"),
+            serde_json::json!(true),
+            serde_json::json!(u64::MAX),
+        ] {
+            let mut args = args_of(serde_json::json!({ "consent_minutes": bad }));
+            assert_eq!(
+                take_ask("ps.exec", &mut args),
+                Err("ps.exec: 'consent_minutes' must be a whole number from 0 to 240 (0 means just this once)".to_string()),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn terms_follow_the_category_and_the_ask() {
+        assert_eq!(term_for(Category::Exec, Ask::Default), Term::Minutes(15));
+        assert_eq!(term_for(Category::Files, Ask::Default), Term::Minutes(15));
+        assert_eq!(term_for(Category::Network, Ask::Default), Term::Session);
+        assert_eq!(term_for(Category::Power, Ask::Default), Term::Once);
+        assert_eq!(term_for(Category::Exec, Ask::Once), Term::Once);
+        assert_eq!(
+            term_for(Category::Exec, Ask::Minutes(90)),
+            Term::Minutes(90)
+        );
+        assert_eq!(
+            term_for(Category::Network, Ask::Minutes(5)),
+            Term::Minutes(5)
+        );
+        assert_eq!(term_for(Category::Power, Ask::Minutes(60)), Term::Once);
+    }
+
+    #[test]
+    fn terms_read_naturally() {
+        assert_eq!(Term::Once.text(), "just this once");
+        assert_eq!(Term::Minutes(1).text(), "for the next minute");
+        assert_eq!(Term::Minutes(30).text(), "for the next 30 minutes");
+        assert_eq!(Term::Minutes(60).text(), "for the next hour");
+        assert_eq!(Term::Minutes(90).text(), "for the next 90 minutes");
+        assert_eq!(Term::Minutes(240).text(), "for the next 4 hours");
+        assert_eq!(Term::Session.text(), "until this session ends");
+        assert_eq!(Term::Once.button(), None);
+        assert_eq!(Term::Minutes(1).button().unwrap(), "Allow for 1 minute");
+        assert_eq!(Term::Minutes(15).button().unwrap(), "Allow for 15 minutes");
+        assert_eq!(Term::Minutes(60).button().unwrap(), "Allow for 1 hour");
+        assert_eq!(Term::Minutes(120).button().unwrap(), "Allow for 2 hours");
+        assert_eq!(
+            Term::Session.button().unwrap(),
+            "Allow until this session ends"
+        );
+        assert_eq!(scope_text(Some(Category::Exec)), "for the next 15 minutes");
+        assert_eq!(scope_text(Some(Category::Power)), "just this once");
+    }
+
+    #[test]
+    fn audit_strings_name_the_grant() {
+        assert_eq!(Decision::PromptAllow.as_str(), "prompt_allow");
+        assert_eq!(Decision::PromptAllowOnce.as_str(), "prompt_allow_once");
+        assert_eq!(Decision::PromptAllowFor(30).as_str(), "prompt_allow_30m");
+    }
+
+    #[tokio::test]
+    async fn one_off_request_is_not_remembered() {
+        let (p, calls) = counting(Answer::ForGrant, 0);
+        let l = Ledger::new(p);
+        for _ in 0..3 {
+            let (decision, res) = l.require(&tok(), asked("ps.exec", Ask::Once)).await;
+            assert!(res.is_ok());
+            assert_eq!(decision, Decision::PromptAllowOnce);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(l.grants().is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_can_shorten_a_grant_to_one_time() {
+        let (p, calls) = counting(Answer::Once, 0);
+        let l = Ledger::new(p);
+        for _ in 0..2 {
+            assert_eq!(
+                l.require(&tok(), req("fs.delete")).await,
+                (Decision::PromptAllowOnce, Ok(()))
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(l.grants().is_empty());
+    }
+
+    #[tokio::test]
+    async fn asked_length_sets_when_the_grant_runs_out() {
+        let (p, calls) = counting(Answer::ForGrant, 0);
+        let l = Ledger::new(p);
+        assert_eq!(
+            l.require(&tok(), asked("ps.exec", Ask::Minutes(30)))
+                .await
+                .0,
+            Decision::PromptAllowFor(30)
+        );
+        l.advance(Duration::from_secs(29 * 60));
+        assert_eq!(
+            l.require(&tok(), req("ps.exec")).await.0,
+            Decision::GrantCached
+        );
+        l.advance(Duration::from_secs(2 * 60));
+        assert!(l.grants().is_empty());
+        assert_eq!(
+            l.require(&tok(), req("ps.exec")).await.0,
+            Decision::PromptAllowFor(15)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let (p, _) = counting(Answer::ForGrant, 0);
+        let l = Ledger::new(p);
+        assert_eq!(
+            l.require(&tok(), asked("tunnel.open", Ask::Minutes(5)))
+                .await
+                .0,
+            Decision::PromptAllowFor(5)
+        );
+        assert!(l.grants().iter().all(|g| g.expires()));
+        l.advance(Duration::from_secs(5 * 60));
+        assert!(l.grants().is_empty());
+    }
+
+    #[tokio::test]
+    async fn asking_for_more_than_is_left_asks_again() {
+        let (p, calls) = counting(Answer::ForGrant, 0);
+        let l = Ledger::new(p);
+        assert!(l.require(&tok(), req("ps.exec")).await.1.is_ok());
+        l.advance(Duration::from_secs(10 * 60));
+
+        for ask in [Ask::Default, Ask::Once, Ask::Minutes(3)] {
+            assert_eq!(
+                l.require(&tok(), asked("ps.exec", ask)).await.0,
+                Decision::GrantCached,
+                "{ask:?}"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            l.require(&tok(), asked("ps.exec", Ask::Minutes(10)))
+                .await
+                .0,
+            Decision::PromptAllowFor(10)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        l.advance(Duration::from_secs(9 * 60));
+        assert_eq!(
+            l.require(&tok(), req("ps.exec")).await.0,
+            Decision::GrantCached
+        );
+    }
+
+    #[tokio::test]
+    async fn declining_a_longer_grant_keeps_the_one_already_given() {
+        let answers = Arc::new(Mutex::new(vec![Answer::No, Answer::ForGrant]));
+        let p: Prompt = Arc::new(move |_, _| {
+            let next = answers.lock().unwrap().pop().unwrap();
+            Box::pin(async move { Ok(next) })
+        });
+        let l = Ledger::new(p);
+        assert!(l.require(&tok(), req("ps.exec")).await.1.is_ok());
+        assert_eq!(
+            l.require(&tok(), asked("ps.exec", Ask::Minutes(60))).await,
+            (Decision::PromptDeny, Err(ConsentError::Denied))
+        );
+        assert_eq!(
+            l.require(&tok(), req("ps.exec")).await.0,
+            Decision::GrantCached
+        );
+        assert_eq!(l.grants().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_grant_covers_a_timed_ask() {
+        let (p, calls) = counting(Answer::ForGrant, 0);
+        let l = Ledger::new(p);
+        assert_eq!(
+            l.require(&tok(), req("tunnel.open")).await.0,
+            Decision::PromptAllow
+        );
+        assert_eq!(
+            l.require(&tok(), asked("tunnel.open", Ask::Minutes(240)))
+                .await
+                .0,
+            Decision::GrantCached
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn power_stays_one_time_whatever_is_asked() {
+        let terms = Arc::new(Mutex::new(Vec::new()));
+        let t2 = terms.clone();
+        let p: Prompt = Arc::new(move |_, req: Request| {
+            t2.lock().unwrap().push(req.term());
+            Box::pin(async { Ok(Answer::ForGrant) })
+        });
+        let l = Ledger::new(p);
+        for ask in [Ask::Default, Ask::Minutes(60), Ask::Once] {
+            assert_eq!(
+                l.require(&tok(), asked("sys.restart", ask)).await,
+                (Decision::PromptAllowOnce, Ok(()))
+            );
+        }
+        assert!(l.grants().is_empty());
+        assert_eq!(*terms.lock().unwrap(), vec![Term::Once; 3]);
+    }
+
+    #[tokio::test]
+    async fn observer_hears_what_the_host_picked() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        set_observer(Some(Arc::new(move |e: &Event| {
+            if e.request.summary == "picked-test" {
+                s2.lock().unwrap().push(e.step.clone());
+            }
+        })));
+        let (p, _) = counting(Answer::ForGrant, 0);
+        let l = Ledger::new(p);
+        let _ = l
+            .require(
+                &tok(),
+                Request::for_kind("ps.exec", "picked-test").asking(Ask::Minutes(45)),
+            )
+            .await;
+        let (p, _) = counting(Answer::Once, 0);
+        let l = Ledger::new(p);
+        let _ = l
+            .require(&tok(), Request::for_kind("fs.delete", "picked-test"))
+            .await;
+        set_observer(None);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                Step::Asking,
+                Step::Allowed(Term::Minutes(45)),
+                Step::Asking,
+                Step::Allowed(Term::Once)
+            ]
+        );
+    }
+
+    fn exec_request(summary: String, ask: Ask) -> Request {
+        Request {
+            kind: "ps.exec".into(),
+            category: Some(Category::Exec),
+            summary,
+            ask,
+            ..Request::default()
+        }
+    }
+
+    #[test]
+    fn prompt_parts_keep_the_command_apart_from_the_explanation() {
+        let script = (1..=30)
+            .map(|i| format!("Write-Output 'line {i}'"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parts = prompt_parts(&exec_request(
+            format!("Runs this PowerShell script.\n\n{script}"),
+            Ask::Minutes(30),
+        ));
+        assert_eq!(parts.summary, "Runs this PowerShell script.");
+        let command = parts.command.as_deref().unwrap();
+        assert!(command.starts_with("Write-Output 'line 1'\nWrite-Output 'line 2'\n"));
+        assert_eq!(parts.detail, parts.command);
+        assert_eq!(parts.grant_button.as_deref(), Some("Allow for 30 minutes"));
+        let scope = parts.scope_line();
+        assert!(scope.contains("run PowerShell commands for the next 30 minutes"));
+        assert!(scope.contains("Choose Just this once"));
+        assert!(!scope.contains("line 1"));
+
+        let parts = prompt_parts(&exec_request(
+            "Runs this PowerShell script.\n\nGet-Date".into(),
+            Ask::Once,
+        ));
+        assert_eq!(parts.command.as_deref(), Some("Get-Date"));
+        assert_eq!(parts.grant_button, None);
+        assert!(parts.scope_line().contains("only this request goes ahead"));
+        assert!(!parts.scope_line().contains("Choose Just this once"));
+
+        let parts = prompt_parts(&Request {
+            kind: "fs.mkdir".into(),
+            category: Some(Category::Files),
+            summary: "Creates the folder C:\\x on this computer.".into(),
+            ask: Ask::Default,
+            ..Request::default()
+        });
+        assert_eq!(parts.command, None);
+        assert_eq!(parts.detail, None);
+        assert_eq!(parts.grant_button.as_deref(), Some("Allow for 15 minutes"));
+    }
+
+    #[test]
+    fn prompt_detail_holds_the_whole_text_without_hidden_characters() {
+        let script = format!("{}\u{202E}tail\u{200B}end", "x".repeat(10_000));
+        let req = exec_request(
+            crate::capabilities::ps::consent_summary(&script),
+            Ask::Default,
+        )
+        .showing(Some(&script));
+        let parts = prompt_parts(&req);
+        let detail = parts.detail.unwrap();
+        assert_eq!(detail, format!("{}tailend", "x".repeat(10_000)));
+        assert!(parts.command.unwrap().chars().count() < 2_100);
+        assert!(parts.summary.starts_with("Runs this PowerShell script"));
+
+        let lines: String = (1..=2000).map(|i| format!("Write-Output {i}\n")).collect();
+        let parts = prompt_parts(
+            &exec_request(
+                crate::capabilities::ps::consent_summary(&lines),
+                Ask::Default,
+            )
+            .showing(Some(&lines)),
+        );
+        let detail = parts.detail.unwrap();
+        assert_eq!(detail.lines().count(), 2000);
+        assert!(detail.ends_with("Write-Output 2000"));
+
+        let huge = "y\n".repeat(DETAIL_LINES + 5);
+        let parts =
+            prompt_parts(&exec_request("Runs it.".into(), Ask::Default).showing(Some(&huge)));
+        assert!(parts.detail.unwrap().ends_with(CUT_NOTE));
+    }
+
+    #[test]
+    fn prompt_text_names_the_asked_length() {
+        let text = prompt_text(&exec_request("Get-Date".into(), Ask::Minutes(120)));
+        assert!(
+            text.contains("run PowerShell commands for the next 2 hours"),
+            "{text}"
+        );
+        let text = prompt_text(&exec_request("Get-Date".into(), Ask::Once));
+        assert!(text.contains("only this request goes ahead"), "{text}");
+    }
+
+    #[test]
+    fn countdown_counts_whole_seconds_up() {
+        assert_eq!(
+            countdown_text(Duration::from_secs(120)),
+            "If you don't answer, Handoff says no for you in 2:00."
+        );
+        assert_eq!(
+            countdown_text(Duration::from_millis(59_001)),
+            "If you don't answer, Handoff says no for you in 1:00."
+        );
+        assert_eq!(
+            countdown_text(Duration::from_millis(9_000)),
+            "If you don't answer, Handoff says no for you in 0:09."
+        );
+    }
+
+    #[test]
+    fn typed_answers_map_to_the_choices() {
+        let grant = Term::Minutes(15);
+        assert_eq!(typed_answer("y\n", grant), Answer::ForGrant);
+        assert_eq!(typed_answer(" Yes ", grant), Answer::ForGrant);
+        assert_eq!(typed_answer("o", grant), Answer::Once);
+        assert_eq!(typed_answer("", grant), Answer::No);
+        assert_eq!(typed_answer("n", grant), Answer::No);
+        assert_eq!(typed_answer("y", Term::Once), Answer::Once);
+        assert!(typed_question(grant).contains("or o to allow just this once"));
+        assert!(!typed_question(Term::Once).contains("or o"));
     }
 
     async fn within<F: std::future::Future>(f: F) -> F::Output {

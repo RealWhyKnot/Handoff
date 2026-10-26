@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::dispatch::{for_display, handler, Args, CapResult, Ctx, HandlerError, Router};
 
-use super::consent::require_risk_consent;
+use super::consent::require_risk_consent_showing;
 use super::proc::{load_specs, string_arg};
 use super::pwsh::{run_pwsh_echo, truncation_note, Echo};
 
@@ -71,7 +71,7 @@ pub fn consent_summary(script: &str) -> String {
 
 async fn ps_exec(ctx: Ctx, args: Args) -> CapResult {
     let script = exec_script(&args)?;
-    require_risk_consent(&ctx.cancel, "ps.exec", &consent_summary(&script)).await?;
+    require_risk_consent_showing(&ctx, "ps.exec", &consent_summary(&script), Some(&script)).await?;
     take_slot(Instant::now())?;
     match run_pwsh_echo(&ctx.cancel, &script, ctx.progress.clone(), Echo::Both).await {
         Ok(res) => {
@@ -119,7 +119,11 @@ mod tests {
             let c = c.clone();
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
-                Ok(allow)
+                Ok(if allow {
+                    crate::consent::Answer::ForGrant
+                } else {
+                    crate::consent::Answer::No
+                })
             })
         });
         (prompt, calls)
@@ -130,7 +134,7 @@ mod tests {
         let s = seen.clone();
         let prompt: Prompt = Arc::new(move |_, req| {
             s.lock().unwrap().push(req.summary.clone());
-            Box::pin(async move { Ok(false) })
+            Box::pin(async move { Ok(crate::consent::Answer::No) })
         });
         (prompt, seen)
     }
@@ -151,6 +155,31 @@ mod tests {
             summary.ends_with("\n\nRemove-Item C:\\temp\\x\ngpj.exe"),
             "{summary}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_whole_script_reaches_the_prompt() {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let s = seen.clone();
+        let prompt: Prompt = Arc::new(move |_, req| {
+            *s.lock().unwrap() = Some(req);
+            Box::pin(async move { Ok(crate::consent::Answer::No) })
+        });
+        let _guard = SessionGuard::with_prompt(prompt);
+        reset_history();
+        let script = format!(
+            "Write-Output start\n{}Write-Output end",
+            "Get-Date\n".repeat(3000)
+        );
+        let _ = ps_exec(Ctx::default(), args(json!({ "script": script }))).await;
+        let req = seen.lock().unwrap().take().unwrap();
+        assert!(req.summary.contains("Only the start is shown"));
+        assert_eq!(req.detail.as_deref(), Some(script.as_str()));
+        let parts = crate::consent::prompt_parts(&req);
+        assert!(parts
+            .detail
+            .unwrap()
+            .ends_with("Get-Date\nWrite-Output end"));
     }
 
     #[test]

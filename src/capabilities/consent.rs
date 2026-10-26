@@ -2,10 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use tokio_util::sync::CancellationToken;
-
 use crate::consent::{system_prompt, Decision, Ledger, Request};
-use crate::dispatch::HandlerError;
+use crate::dispatch::{Ctx, HandlerError};
 
 static SESSION_LEDGER: LazyLock<Mutex<Arc<Ledger>>> =
     LazyLock::new(|| Mutex::new(Arc::new(Ledger::new(system_prompt()))));
@@ -51,12 +49,26 @@ pub fn last_consent_decision(kind: &str) -> Decision {
 }
 
 pub async fn require_risk_consent(
-    cancel: &CancellationToken,
+    ctx: &Ctx,
     kind: &str,
     summary: &str,
 ) -> Result<(), HandlerError> {
+    require_risk_consent_showing(ctx, kind, summary, None).await
+}
+
+pub async fn require_risk_consent_showing(
+    ctx: &Ctx,
+    kind: &str,
+    summary: &str,
+    detail: Option<&str>,
+) -> Result<(), HandlerError> {
     let (decision, result) = ledger()
-        .require(cancel, Request::for_kind(kind, summary))
+        .require(
+            &ctx.cancel,
+            Request::for_kind(kind, summary)
+                .asking(ctx.consent)
+                .showing(detail),
+        )
         .await;
     decisions().insert(kind.to_string(), decision);
     result.map_err(|e| HandlerError::plain(e.to_string()))
@@ -110,7 +122,7 @@ mod tests {
             let c = c.clone();
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
-                Ok(true)
+                Ok(crate::consent::Answer::ForGrant)
             })
         });
         (prompt, calls)
@@ -120,12 +132,15 @@ mod tests {
     async fn consent_is_asked_and_the_decision_is_recorded() {
         let (prompt, calls) = allow_all();
         let _guard = SessionGuard::with_prompt(prompt);
-        let cancel = CancellationToken::new();
+        let cancel = Ctx::default();
         require_risk_consent(&cancel, "fs.write", "Writes a file.")
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(last_consent_decision("fs.write"), Decision::PromptAllow);
+        assert_eq!(
+            last_consent_decision("fs.write"),
+            Decision::PromptAllowFor(15)
+        );
         require_risk_consent(&cancel, "fs.write", "Writes a file.")
             .await
             .unwrap();
@@ -140,7 +155,7 @@ mod tests {
         deny_all_risky();
         super::super::register_all(&mut crate::dispatch::Router::new(), None);
 
-        let cancel = CancellationToken::new();
+        let cancel = Ctx::default();
         let err = require_risk_consent(&cancel, "fs.write", "Writes a file.")
             .await
             .unwrap_err();

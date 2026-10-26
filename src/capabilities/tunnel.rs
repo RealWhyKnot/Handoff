@@ -718,17 +718,10 @@ pub fn split_host_port_ok(hostport: &str) -> bool {
     true
 }
 
-pub async fn validate_tunnel_target_host(host: &str) -> Result<(String, String), String> {
-    validate_tunnel_target_host_with(host, system_lookup).await
-}
-
-pub async fn validate_tunnel_target_host_with(
-    host: &str,
-    lookup: Lookup,
-) -> Result<(String, String), String> {
+pub fn check_tunnel_host_text(host: &str) -> Result<(), String> {
     let host = host.trim();
     if host.is_empty() {
-        return Ok(("127.0.0.1".to_string(), "127.0.0.1".to_string()));
+        return Ok(());
     }
     if host.contains("://") || host.contains(['/', '\\', '?', '#', '@']) {
         return Err(format!(
@@ -749,10 +742,29 @@ pub async fn validate_tunnel_target_host_with(
                 go_quote(host)
             ));
         }
-        return Ok((host.to_string(), host.to_string()));
+        return Ok(());
     }
     if !is_reasonable_tunnel_hostname(host) {
         return Err(format!("tunnel.open: invalid host {}", go_quote(host)));
+    }
+    Ok(())
+}
+
+pub async fn validate_tunnel_target_host(host: &str) -> Result<(String, String), String> {
+    validate_tunnel_target_host_with(host, system_lookup).await
+}
+
+pub async fn validate_tunnel_target_host_with(
+    host: &str,
+    lookup: Lookup,
+) -> Result<(String, String), String> {
+    let host = host.trim();
+    check_tunnel_host_text(host)?;
+    if host.is_empty() {
+        return Ok(("127.0.0.1".to_string(), "127.0.0.1".to_string()));
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok((host.to_string(), host.to_string()));
     }
 
     let addrs = match tokio::time::timeout(HOST_LOOKUP_TIME, lookup(host.to_string())).await {
@@ -859,12 +871,13 @@ async fn open_handler(ctx: Ctx, args: Args) -> CapResult {
             "tunnel.open: tunnel manager not registered",
         ));
     };
+    check_tunnel_host_text(&host_arg).map_err(HandlerError::plain)?;
 
     let summary = format!(
         "Opens a network tunnel so the helper can reach {}. It stays open until you end the session or the helper closes it.",
         tunnel_target_description(&host_arg, port)
     );
-    require_risk_consent(&ctx.cancel, "tunnel.open", &summary).await?;
+    require_risk_consent(&ctx, "tunnel.open", &summary).await?;
     let t = mgr
         .open(&tunnel_id, port, &host_arg)
         .await
@@ -1053,7 +1066,15 @@ mod tests {
     }
 
     fn prompt(answer: bool) -> Prompt {
-        Arc::new(move |_, _| Box::pin(async move { Ok(answer) }))
+        Arc::new(move |_, _| {
+            Box::pin(async move {
+                Ok(if answer {
+                    crate::consent::Answer::ForGrant
+                } else {
+                    crate::consent::Answer::No
+                })
+            })
+        })
     }
 
     #[test]
@@ -1397,6 +1418,35 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.message, "the host declined this request");
+        if let Some(m) = set_manager(old) {
+            m.shutdown();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_handler_refuses_a_bad_host_before_asking() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = asked.clone();
+        let _guard = SessionGuard::with_prompt(Arc::new(move |_, _| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(crate::consent::Answer::ForGrant) })
+        }));
+        let (_, mgr) = fake();
+        let old = set_manager(Some(mgr));
+        for host in [
+            "a".repeat(10_000),
+            "printer:80".to_string(),
+            "8.8.8.8".to_string(),
+        ] {
+            let err = open_handler(
+                Ctx::default(),
+                args(json!({"tunnel_id": "tn1", "local_port": 8080, "host": host})),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.message.starts_with("tunnel.open: "), "{}", err.message);
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
         if let Some(m) = set_manager(old) {
             m.shutdown();
         }

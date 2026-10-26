@@ -237,7 +237,7 @@ async fn pico_info(ctx: Ctx, args: Args) -> CapResult {
 async fn pico_bootsel(ctx: Ctx, args: Args) -> CapResult {
     let cmd = pico_bootsel_args(&args)?;
     require_risk_consent(
-        &ctx.cancel,
+        &ctx,
         "pico.bootsel",
         "Reboots an attached Pico into BOOTSEL mode. Connected software may lose its current device connection.",
     )
@@ -252,7 +252,7 @@ async fn pico_bootsel(ctx: Ctx, args: Args) -> CapResult {
 async fn pico_flash(ctx: Ctx, args: Args) -> CapResult {
     let (cmd, uf2) = pico_flash_args(&args)?;
     require_risk_consent(
-        &ctx.cancel,
+        &ctx,
         "pico.flash",
         "Flashes firmware to an attached Pico from a UF2 file. Bad firmware can make the device stop working until it is reflashed.",
     )
@@ -285,7 +285,7 @@ async fn pico_save(ctx: Ctx, args: Args) -> CapResult {
         return Err(HandlerError::plain("pico.save: 'out_path' is required"));
     }
     require_risk_consent(
-        &ctx.cancel,
+        &ctx,
         "pico.save",
         "Writes a Pico flash dump to a file on this computer. Existing files may be replaced by picotool behavior.",
     )
@@ -304,7 +304,7 @@ async fn pico_save(ctx: Ctx, args: Args) -> CapResult {
 async fn pico_reset(ctx: Ctx, args: Args) -> CapResult {
     let cmd = pico_reset_args(&args)?;
     require_risk_consent(
-        &ctx.cancel,
+        &ctx,
         "pico.reset",
         "Reboots an attached Pico. Connected software may lose its current device connection.",
     )

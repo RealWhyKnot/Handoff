@@ -29,7 +29,8 @@ fn router() -> Router {
 
 #[tokio::test]
 async fn read_only_kinds_return_json_and_risky_kinds_obey_consent() {
-    let prompt: Prompt = Arc::new(|_, _| Box::pin(async { Ok(true) }));
+    let prompt: Prompt =
+        Arc::new(|_, _| Box::pin(async { Ok(handoff::consent::Answer::ForGrant) }));
     set_session_ledger(Arc::new(Ledger::new(prompt)));
     let r = router();
 

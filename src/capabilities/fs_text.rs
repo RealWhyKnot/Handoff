@@ -7,9 +7,9 @@ use sha2::{Digest, Sha256};
 use crate::dispatch::{handler, Spec};
 use crate::dispatch::{Args, CapResult, Router};
 
-use super::consent::require_risk_consent;
+use super::consent::require_risk_consent_showing;
 use super::fs::{bool_arg, err, hex, local_path, path_err, run_blocking, str_arg};
-use super::fs_write::{guard_write_path, mkdir_all, shown_path};
+use super::fs_write::{guard_write_path, mkdir_all, path_detail, shown_path};
 
 const WRITE_CAP: usize = 1 << 20;
 
@@ -21,14 +21,15 @@ pub fn register(r: &mut Router) {
             spec,
             handler(|ctx, args| async move {
                 let prep = fs_write_prepare(&args)?;
-                require_risk_consent(
-                    &ctx.cancel,
+                require_risk_consent_showing(
+                    &ctx,
                     "fs.write",
                     &format!(
                         "Writes {} bytes of text to {} on this computer.",
                         prep.content_len,
                         shown_path(&prep.path)
                     ),
+                    path_detail(&prep.path),
                 )
                 .await?;
                 guard_write_path("fs.write", &prep.path)?;
@@ -151,11 +152,11 @@ mod tests {
     }
 
     fn allow() -> Prompt {
-        Arc::new(|_, _| Box::pin(async { Ok(true) }))
+        Arc::new(|_, _| Box::pin(async { Ok(crate::consent::Answer::ForGrant) }))
     }
 
     fn deny() -> Prompt {
-        Arc::new(|_, _| Box::pin(async { Ok(false) }))
+        Arc::new(|_, _| Box::pin(async { Ok(crate::consent::Answer::No) }))
     }
 
     async fn run(v: Value) -> crate::dispatch::Outcome {

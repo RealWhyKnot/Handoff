@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::dispatch::{for_display, handler, CapResult, HandlerError, Router};
 
-use super::consent::require_risk_consent;
+use super::consent::require_risk_consent_showing;
 use super::fs::{
     bool_arg, err, fmt_time, hex, local_path, lstat, path_err, run_blocking, stat, str_arg,
     volume_len,
@@ -24,7 +24,13 @@ pub fn register(r: &mut Router) {
                 handler(|ctx, args| async move {
                     let prep = run_blocking(move || upload_prepare(&args)).await?;
                     let summary = upload_summary(&prep);
-                    require_risk_consent(&ctx.cancel, "fs.upload", &summary).await?;
+                    require_risk_consent_showing(
+                        &ctx,
+                        "fs.upload",
+                        &summary,
+                        path_detail(&prep.path),
+                    )
+                    .await?;
                     guard_write_path("fs.upload", &prep.path)?;
                     run_blocking(move || upload_commit(prep)).await
                 }),
@@ -45,7 +51,8 @@ pub fn register(r: &mut Router) {
                         "Creates the folder {} on this computer, along with any missing parent folders.",
                         shown_path(&path)
                     );
-                    require_risk_consent(&ctx.cancel, "fs.mkdir", &summary).await?;
+                    require_risk_consent_showing(&ctx, "fs.mkdir", &summary, path_detail(&path))
+                        .await?;
                     guard_write_path("fs.mkdir", &path)?;
                     run_blocking(move || mkdir(&path)).await
                 }),
@@ -57,10 +64,11 @@ pub fn register(r: &mut Router) {
                     let path =
                         local_path("fs.delete", &str_arg(&args, "path").unwrap_or_default())?;
                     guard_delete_path(&path)?;
-                    require_risk_consent(
-                        &ctx.cancel,
+                    require_risk_consent_showing(
+                        &ctx,
                         "fs.delete",
                         &delete_summary(&path, recursive),
+                        path_detail(&path),
                     )
                     .await?;
                     guard_delete_path(&path)?;
@@ -71,13 +79,44 @@ pub fn register(r: &mut Router) {
     );
 }
 
+const PATH_SHOWN: usize = 400;
+const PATH_HEAD: usize = 120;
+const PATH_TAIL_MIN: usize = 160;
+const PATH_TAIL_MAX: usize = 260;
+
 pub(crate) fn shown_path(path: &str) -> String {
-    let shown = for_display(path, 400, 1);
-    if shown.cut {
-        format!("{}...", shown.text)
-    } else {
-        shown.text
+    let clean = for_display(path, usize::MAX, 1).text;
+    let chars: Vec<char> = clean.chars().collect();
+    let n = chars.len();
+    if n <= PATH_SHOWN {
+        return clean;
     }
+    let sep = |c: &char| *c == '\\' || *c == '/';
+    let mut tail_start = chars[..n - 1]
+        .iter()
+        .rposition(sep)
+        .map_or(0, |i| i + 1)
+        .max(n - PATH_TAIL_MAX);
+    while n - tail_start < PATH_TAIL_MIN {
+        match chars[..tail_start - 1].iter().rposition(sep) {
+            Some(i) if n - (i + 1) <= PATH_TAIL_MAX => tail_start = i + 1,
+            _ => break,
+        }
+    }
+    let mut head_end = PATH_HEAD;
+    if let Some(i) = chars[..head_end].iter().rposition(sep) {
+        head_end = i + 1;
+    }
+    let head: String = chars[..head_end].iter().collect();
+    let tail: String = chars[tail_start..].iter().collect();
+    format!(
+        "{head} ... ({} characters left out) ... {tail}",
+        tail_start - head_end
+    )
+}
+
+pub(crate) fn path_detail(path: &str) -> Option<&str> {
+    (path.chars().count() > PATH_SHOWN).then_some(path)
 }
 
 fn upload_summary(up: &Upload) -> String {
@@ -92,7 +131,7 @@ fn upload_summary(up: &Upload) -> String {
     text
 }
 
-fn delete_summary(path: &str, recursive: bool) -> String {
+pub(crate) fn delete_summary(path: &str, recursive: bool) -> String {
     let mut text = format!("Deletes {} from this computer.", shown_path(path));
     if recursive {
         text.push_str(" If this is a folder, everything inside it is deleted too.");
@@ -335,7 +374,11 @@ mod tests {
             let c = c.clone();
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
-                Ok(allow)
+                Ok(if allow {
+                    crate::consent::Answer::ForGrant
+                } else {
+                    crate::consent::Answer::No
+                })
             })
         });
         (p, calls)
@@ -698,9 +741,67 @@ mod tests {
         let s = seen.clone();
         let p: Prompt = Arc::new(move |_, req| {
             s.lock().unwrap().push(req.summary.clone());
-            Box::pin(async move { Ok(false) })
+            Box::pin(async move { Ok(crate::consent::Answer::No) })
         });
         (p, seen)
+    }
+
+    #[test]
+    fn long_paths_keep_their_start_and_their_end() {
+        let short = "C:\\Users\\me\\in\u{202E}voice.txt";
+        assert_eq!(shown_path(short), "C:\\Users\\me\\invoice.txt");
+        assert_eq!(path_detail(short), None);
+
+        let path = format!("C:\\{}Old project backups", "Folder\\".repeat(700));
+        let shown = shown_path(&path);
+        assert!(shown.starts_with("C:\\Folder\\"), "{shown}");
+        assert!(shown.ends_with("\\Folder\\Old project backups"), "{shown}");
+        assert!(shown.chars().count() <= 440, "{}", shown.chars().count());
+        let (head, rest) = shown.split_once(" ... (").unwrap();
+        let (count, tail) = rest.split_once(" characters left out) ... ").unwrap();
+        assert_eq!(
+            head.chars().count() + count.parse::<usize>().unwrap() + tail.chars().count(),
+            path.chars().count()
+        );
+        assert!(tail.starts_with("Folder\\"), "{tail}");
+        assert_eq!(path_detail(&path), Some(path.as_str()));
+
+        let name = format!("{}END", "n".repeat(10_000));
+        let shown = shown_path(&format!("D:\\{name}"));
+        assert!(shown.ends_with("nnnEND"), "{shown}");
+        assert!(shown.chars().count() <= 440);
+
+        let at_limit = format!("C:\\{}", "a".repeat(397));
+        assert_eq!(shown_path(&at_limit), at_limit);
+    }
+
+    #[tokio::test]
+    async fn long_paths_reach_the_prompt_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!(
+            "{}\\{}gone.txt",
+            dir.path().to_string_lossy(),
+            "deep\\".repeat(90)
+        );
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let p: Prompt = Arc::new(move |_, req| {
+            s.lock()
+                .unwrap()
+                .push((req.summary.clone(), req.detail.clone()));
+            Box::pin(async move { Ok(crate::consent::Answer::No) })
+        });
+        let _guard = SessionGuard::with_prompt(p);
+        run("fs.mkdir", json!({ "path": path })).await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        let (summary, detail) = &seen[0];
+        assert!(summary.contains("characters left out"), "{summary}");
+        assert!(
+            summary.contains("\\deep\\gone.txt on this computer"),
+            "{summary}"
+        );
+        assert_eq!(detail.as_deref(), Some(path.as_str()));
     }
 
     #[tokio::test]
@@ -741,7 +842,7 @@ mod tests {
     fn recording_prompt_into(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Prompt {
         Arc::new(move |_, req| {
             seen.lock().unwrap().push(req.summary.clone());
-            Box::pin(async move { Ok(false) })
+            Box::pin(async move { Ok(crate::consent::Answer::No) })
         })
     }
 
@@ -752,8 +853,9 @@ mod tests {
             "Deletes C:\\temp\\a.txt from this computer. Handoff can't undo this."
         );
         let long = format!("C:\\{}", "d".repeat(1000));
-        assert!(shown_path(&long).ends_with("..."));
-        assert!(shown_path(&long).len() < 420);
+        assert!(shown_path(&long).contains("characters left out"));
+        assert!(shown_path(&long).ends_with(&"d".repeat(PATH_TAIL_MAX)));
+        assert!(shown_path(&long).len() < 440);
     }
 
     #[tokio::test]

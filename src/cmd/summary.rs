@@ -2,12 +2,13 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
+use super::layout;
 use crate::capabilities::pwsh::normalize_numbers;
 use crate::console;
 use crate::dispatch::Outcome;
 use crate::util;
 
-const SUMMARY_KEYS: [&str; 15] = [
+const SUMMARY_KEYS: [&str; 16] = [
     "path",
     "target",
     "url",
@@ -17,6 +18,7 @@ const SUMMARY_KEYS: [&str; 15] = [
     "pid",
     "query",
     "script",
+    "command",
     "channel",
     "serial",
     "local_port",
@@ -33,8 +35,12 @@ const BULK_KEYS: [&str; 5] = [
     "zip_base64",
 ];
 
+pub const BODY_KEYS: [&str; 2] = ["script", "command"];
+
 const MAX_SUMMARY_VALUE: usize = 120;
 const MAX_SUMMARY_TOTAL: usize = 200;
+const MAX_INLINE_VALUE: usize = 48;
+const MAX_ERROR: usize = 600;
 
 fn truncate_bytes(s: &str, max: usize) -> &str {
     if s.len() <= max {
@@ -47,61 +53,87 @@ fn truncate_bytes(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-pub fn summarize_args(args: &Map<String, Value>) -> String {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArgView {
+    pub inline: Vec<String>,
+    pub blocks: Vec<(String, String)>,
+}
+
+pub fn describe_args(args: &Map<String, Value>) -> ArgView {
+    let mut view = ArgView::default();
     if args.is_empty() {
-        return String::new();
+        return view;
     }
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut parts: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut cut_short = false;
 
-    let mut add = |key: &str, parts: &mut Vec<String>| {
+    let mut add = |key: &str, view: &mut ArgView| -> bool {
+        if key == "consent_minutes" {
+            return false;
+        }
         let Some(value) = args.get(key) else {
-            return;
+            return false;
         };
         if !seen.insert(key.to_string()) {
-            return;
+            return false;
         }
         if BULK_KEYS.contains(&key) {
             let raw = serde_json::to_string(value).unwrap_or_default();
-            parts.push(format!("{key}=<{} bytes>", raw.len()));
-            return;
+            view.inline.push(format!("{key}=<{} bytes>", raw.len()));
+            return true;
         }
-        parts.push(format!("{key}={}", summary_value(value)));
+        if let Value::String(text) = value {
+            if goes_in_block(text) {
+                view.blocks.push((key.to_string(), text.clone()));
+                return true;
+            }
+        }
+        let part = format!("{key}={}", summary_value(value));
+        if total + part.len() > MAX_SUMMARY_TOTAL {
+            cut_short = true;
+            return true;
+        }
+        total += part.len() + 1;
+        view.inline.push(part);
+        true
     };
 
     for key in SUMMARY_KEYS {
-        add(key, &mut parts);
+        add(key, &mut view);
     }
-    if parts.is_empty() {
+    if view.inline.is_empty() && view.blocks.is_empty() {
         let mut rest: Vec<&String> = args.keys().collect();
         rest.sort();
+        let mut taken = 0;
         for key in rest {
-            add(key, &mut parts);
-            if parts.len() >= 2 {
+            if add(key, &mut view) {
+                taken += 1;
+            }
+            if taken >= 2 {
                 break;
             }
         }
     }
-
-    let out = parts.join(" ");
-    if out.len() > MAX_SUMMARY_TOTAL {
-        return format!("{}...", truncate_bytes(&out, MAX_SUMMARY_TOTAL));
+    if cut_short {
+        view.inline.push("...".to_string());
     }
-    out
+    view
+}
+
+fn goes_in_block(text: &str) -> bool {
+    layout::clean_lines(text).len() > 1
+        || console::display_width(&layout::clean_inline(text)) > MAX_INLINE_VALUE
 }
 
 fn summary_value(value: &Value) -> String {
-    let mut s = match value {
-        Value::String(s) => s.clone(),
+    let s = match value {
+        Value::String(s) => layout::clean_inline(s),
         other => util::go_json_escape_html(
             &serde_json::to_string(&normalize_numbers(other.clone())).unwrap_or_default(),
         ),
     };
-    s = s.replace('\n', " ").replace('\r', "");
-    if s.len() > MAX_SUMMARY_VALUE {
-        s = format!("{}...", truncate_bytes(&s, MAX_SUMMARY_VALUE));
-    }
     if s.contains([' ', '\t']) {
         return util::go_quote(&s);
     }
@@ -113,9 +145,16 @@ const NAME_KEYS: [&str; 8] = [
 ];
 
 fn cut(text: &str) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.len() > MAX_SUMMARY_VALUE {
-        return format!("{}...", truncate_bytes(&text, MAX_SUMMARY_VALUE));
+    cut_at(text, MAX_SUMMARY_VALUE)
+}
+
+fn cut_at(text: &str, max: usize) -> String {
+    let text = layout::clean_inline(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.len() > max {
+        return format!("{}...", truncate_bytes(&text, max));
     }
     text
 }
@@ -126,7 +165,7 @@ fn items(n: usize) -> String {
 
 pub fn summarize_result(out: &Outcome) -> String {
     if !out.ok {
-        return cut(&console::plain_error(&out.error));
+        return cut_at(&console::plain_error(&out.error), MAX_ERROR);
     }
 
     match &out.result {
@@ -183,65 +222,109 @@ mod tests {
         }
     }
 
+    fn inline(v: Value) -> Vec<String> {
+        describe_args(&args(v)).inline
+    }
+
     #[test]
     fn empty_arguments_have_no_summary() {
-        assert_eq!(summarize_args(&Map::new()), "");
+        assert_eq!(describe_args(&Map::new()), ArgView::default());
     }
 
     #[test]
     fn interesting_keys_come_first_in_a_fixed_order() {
-        let a = args(json!({"limit": 5, "path": "C:\\Temp", "name": "x"}));
-        assert_eq!(summarize_args(&a), "path=C:\\Temp name=x");
+        assert_eq!(
+            inline(json!({"limit": 5, "path": "C:\\Temp", "name": "x"})),
+            ["path=C:\\Temp", "name=x"]
+        );
     }
 
     #[test]
-    fn values_with_spaces_are_quoted() {
-        let a = args(json!({"path": "C:\\Program Files"}));
-        assert_eq!(summarize_args(&a), "path=\"C:\\\\Program Files\"");
+    fn short_values_with_spaces_are_quoted() {
+        assert_eq!(
+            inline(json!({"path": "C:\\Program Files"})),
+            ["path=\"C:\\\\Program Files\""]
+        );
     }
 
     #[test]
     fn bulk_payloads_show_their_size_not_their_content() {
-        let a = args(json!({"path": "f", "data_base64": "QUJD"}));
-        assert_eq!(summarize_args(&a), "path=f");
-        let a = args(json!({"data_base64": "QUJD"}));
-        assert_eq!(summarize_args(&a), "data_base64=<6 bytes>");
+        assert_eq!(
+            inline(json!({"path": "f", "data_base64": "QUJD"})),
+            ["path=f"]
+        );
+        assert_eq!(
+            inline(json!({"data_base64": "QUJD"})),
+            ["data_base64=<6 bytes>"]
+        );
     }
 
     #[test]
     fn falls_back_to_the_first_two_sorted_keys() {
-        let a = args(json!({"zeta": 1, "alpha": true, "mid": "m"}));
-        assert_eq!(summarize_args(&a), "alpha=true mid=m");
+        assert_eq!(
+            inline(json!({"zeta": 1, "alpha": true, "mid": "m"})),
+            ["alpha=true", "mid=m"]
+        );
     }
 
     #[test]
-    fn long_values_and_totals_are_cut() {
+    fn long_values_move_to_their_own_block_uncut() {
         let long = "a".repeat(300);
-        let a = args(json!({"path": long}));
-        let s = summarize_args(&a);
-        assert_eq!(s, format!("path={}...", "a".repeat(120)));
-
-        let a = args(json!({
-            "path": "p".repeat(120),
-            "target": "t".repeat(120),
-        }));
-        let s = summarize_args(&a);
-        assert!(s.ends_with("..."));
-        assert_eq!(s.len(), 203);
+        let view = describe_args(&args(json!({"path": long, "pid": 4})));
+        assert_eq!(view.inline, ["pid=4"]);
+        assert_eq!(view.blocks, [("path".to_string(), "a".repeat(300))]);
     }
 
     #[test]
-    fn newlines_are_flattened() {
-        let a = args(json!({"script": "a\r\nb"}));
-        assert_eq!(summarize_args(&a), "script=\"a b\"");
+    fn short_scripts_stay_on_the_header() {
+        assert_eq!(inline(json!({"script": "Get-Date"})), ["script=Get-Date"]);
+        assert_eq!(
+            inline(json!({"command": "Get-Process | Sort CPU"})),
+            ["command=\"Get-Process | Sort CPU\""]
+        );
+    }
+
+    #[test]
+    fn multi_line_values_become_blocks() {
+        let view = describe_args(&args(json!({"script": "a\r\nb"})));
+        assert!(view.inline.is_empty());
+        assert_eq!(view.blocks, [("script".to_string(), "a\r\nb".to_string())]);
+        let view = describe_args(&args(json!({"script": "\r\nGet-Date\r\n"})));
+        assert_eq!(view.inline, ["script=Get-Date"]);
+    }
+
+    #[test]
+    fn inline_values_lose_escape_sequences_and_hidden_characters() {
+        assert_eq!(
+            inline(json!({"path": "C:\\x\u{202E}y\u{1b}[31mz\u{7}"})),
+            ["path=C:\\xyz"]
+        );
+    }
+
+    #[test]
+    fn the_header_total_is_capped() {
+        let v = "v".repeat(45);
+        let parts = inline(json!({
+            "path": v, "target": v, "url": v, "host": v, "name": v, "query": v,
+        }));
+        assert_eq!(parts.last().map(String::as_str), Some("..."));
+        let total: usize = parts.iter().map(|p| p.len() + 1).sum();
+        assert!(total <= MAX_SUMMARY_TOTAL + 4);
+    }
+
+    #[test]
+    fn the_requested_grant_length_is_not_listed() {
+        assert_eq!(
+            inline(json!({"consent_minutes": 30, "pid": 42})),
+            ["pid=42"]
+        );
+        assert!(inline(json!({"consent_minutes": 30})).is_empty());
     }
 
     #[test]
     fn non_string_values_print_as_json() {
-        let a = args(json!({"pid": 42, "recursive": [1, 2]}));
-        assert_eq!(summarize_args(&a), "pid=42");
-        let a = args(json!({"recursive": [1, 2]}));
-        assert_eq!(summarize_args(&a), "recursive=[1,2]");
+        assert_eq!(inline(json!({"pid": 42, "recursive": [1, 2]})), ["pid=42"]);
+        assert_eq!(inline(json!({"recursive": [1, 2]})), ["recursive=[1,2]"]);
     }
 
     #[test]
@@ -286,7 +369,13 @@ line two"
             error: "e".repeat(200),
             ..Outcome::default()
         };
-        assert_eq!(summarize_result(&out), format!("{}...", "e".repeat(120)));
+        assert_eq!(summarize_result(&out), "e".repeat(200));
+        let out = Outcome {
+            ok: false,
+            error: "e".repeat(700),
+            ..Outcome::default()
+        };
+        assert_eq!(summarize_result(&out), format!("{}...", "e".repeat(600)));
         let out = Outcome {
             ok: false,
             error: "Post x: context deadline exceeded".into(),

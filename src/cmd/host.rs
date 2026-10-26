@@ -3,8 +3,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::layout;
+use super::summary::{ArgView, BODY_KEYS};
 use crate::consent::{self, ConsentError, Event, Step};
-use crate::console::{self, human_duration, plural, Tone};
+use crate::console::{self, display_width, human_duration, plural, Tone};
 use crate::dispatch::{Outcome, Spec};
 
 pub const PRESENCE_SETTLE: Duration = Duration::from_millis(1500);
@@ -216,10 +218,7 @@ pub fn consent_line(event: &Event) -> String {
             Tone::Yellow,
             "This would change your computer, so Handoff is asking you first. Look for the question on your screen.",
         ),
-        Step::Allowed => format!(
-            "You said yes, {}.",
-            consent::scope_text(event.request.category)
-        ),
+        Step::Allowed(term) => format!("You allowed it {}.", term.text()),
         Step::Denied => "You said no.".to_string(),
         Step::TimedOut => format!(
             "Nobody answered within {}, so Handoff said no for you.",
@@ -257,17 +256,10 @@ pub fn is_refusal(error: &str) -> bool {
     .any(|t| error == t)
 }
 
-pub fn result_line(out: &Outcome, ending: Ending, read_only: bool, detail: &str) -> String {
+fn result_parts(out: &Outcome, ending: Ending, read_only: bool) -> (String, Tone, Option<Tone>) {
     let took = human_duration(Duration::from_millis(out.elapsed_ms.max(0) as u64));
     match ending {
-        Ending::Done => {
-            let head = console::paint(Tone::Green, &format!("Done in {took}."));
-            if detail.is_empty() {
-                head
-            } else {
-                format!("{head} {detail}")
-            }
-        }
+        Ending::Done => (format!("Done in {took}."), Tone::Green, None),
         Ending::Refused => {
             let why = if read_only {
                 "Not allowed. This session can only look, not make changes."
@@ -276,18 +268,63 @@ pub fn result_line(out: &Outcome, ending: Ending, read_only: bool, detail: &str)
             } else {
                 "Not allowed, because you said no."
             };
-            console::paint(Tone::Yellow, why)
+            (why.to_string(), Tone::Yellow, None)
         }
-        Ending::Stopped => console::paint(Tone::Yellow, &format!("Stopped after {took}. {detail}")),
+        Ending::Stopped => (
+            format!("Stopped after {took}."),
+            Tone::Yellow,
+            Some(Tone::Yellow),
+        ),
         Ending::Failed => {
             let head = if out.elapsed_ms < 100 {
                 "Failed:".to_string()
             } else {
                 format!("Failed after {took}:")
             };
-            format!("{} {}", console::paint(Tone::Red, &head), detail)
+            (head, Tone::Red, None)
         }
     }
+}
+
+fn shown_detail(ending: Ending, detail: &str) -> String {
+    match ending {
+        Ending::Refused => String::new(),
+        _ => layout::clean_inline(detail),
+    }
+}
+
+pub fn result_line(out: &Outcome, ending: Ending, read_only: bool, detail: &str) -> String {
+    let (head, tone, detail_tone) = result_parts(out, ending, read_only);
+    let detail = shown_detail(ending, detail);
+    let head = console::paint(tone, &head);
+    if detail.is_empty() {
+        return head;
+    }
+    format!("{head} {}", paint_maybe(detail_tone, &detail))
+}
+
+pub fn result_lines(
+    num: usize,
+    out: &Outcome,
+    ending: Ending,
+    read_only: bool,
+    detail: &str,
+    width: usize,
+) -> Vec<String> {
+    let (head, tone, detail_tone) = result_parts(out, ending, read_only);
+    let detail = shown_detail(ending, detail);
+    let mut pieces: Vec<Piece> = head
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(|w| Piece::new(w, Some(tone)))
+        .collect();
+    pieces.extend(
+        detail
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .map(|w| Piece::new(w, detail_tone)),
+    );
+    flow(&lead(num), &pieces, " ", width, RESULT_ROWS)
 }
 
 pub fn exit_summary(stats: Stats, length: Duration) -> String {
@@ -328,22 +365,162 @@ fn join_words(parts: &[String]) -> String {
     }
 }
 
-pub fn command_line(num: usize, label: Option<&str>, kind: &str, args: &str) -> String {
-    let mut text = tag(num);
-    text.push_str("  ");
+const HEADER_ROWS: usize = 4;
+const SCRIPT_ROWS: usize = 12;
+const VALUE_ROWS: usize = 6;
+const RESULT_ROWS: usize = 6;
+const BODY_INDENT: &str = "  ";
+const GUTTER: &str = "\u{2502}";
+const MAX_KEY: usize = 24;
+
+struct Piece {
+    text: String,
+    tone: Option<Tone>,
+}
+
+impl Piece {
+    fn new(text: &str, tone: Option<Tone>) -> Piece {
+        Piece {
+            text: text.to_string(),
+            tone,
+        }
+    }
+}
+
+fn paint_maybe(tone: Option<Tone>, text: &str) -> String {
+    match tone {
+        Some(tone) => console::paint(tone, text),
+        None => text.to_string(),
+    }
+}
+
+fn lead(num: usize) -> Piece {
+    Piece::new(&format!("#{num}"), Some(Tone::Bold))
+}
+
+fn flow(lead: &Piece, pieces: &[Piece], sep: &str, width: usize, max_rows: usize) -> Vec<String> {
+    let lead_w = display_width(&lead.text);
+    let indent = (lead_w + 2).min(width / 2);
+    let room = width - indent;
+    let sep_w = display_width(sep);
+    let mut rows: Vec<String> = vec![paint_maybe(lead.tone, &lead.text)];
+    let mut used = lead_w;
+    for (i, piece) in pieces.iter().enumerate() {
+        let joint = if i == 0 { "  " } else { sep };
+        let gap = if i == 0 { 2 } else { sep_w };
+        let w = display_width(&piece.text);
+        if used + gap + w <= width {
+            if let Some(row) = rows.last_mut() {
+                row.push_str(joint);
+                row.push_str(&paint_maybe(piece.tone, &piece.text));
+            }
+            used += gap + w;
+            continue;
+        }
+        for chunk in layout::wrap(&piece.text, room, room) {
+            used = indent + display_width(&chunk);
+            rows.push(format!(
+                "{}{}",
+                " ".repeat(indent),
+                paint_maybe(piece.tone, &chunk)
+            ));
+        }
+    }
+    if rows.len() > max_rows.max(1) {
+        rows.truncate(max_rows.max(1));
+        if let Some(last) = rows.last_mut() {
+            if display_width(last) + 4 <= width {
+                last.push_str(" ...");
+            } else {
+                *last = format!("{}...", " ".repeat(indent));
+            }
+        }
+    }
+    rows
+}
+
+pub fn command_lines(
+    num: usize,
+    label: Option<&str>,
+    kind: &str,
+    args: &ArgView,
+    width: usize,
+) -> Vec<String> {
+    let mut pieces = Vec::new();
     match label {
         Some(label) => {
-            text.push_str(&console::paint(Tone::Cyan, label));
-            text.push_str("  ");
-            text.push_str(&console::paint(Tone::Dim, kind));
+            pieces.push(Piece::new(&layout::clean_inline(label), Some(Tone::Cyan)));
+            pieces.push(Piece::new(&layout::clean_inline(kind), Some(Tone::Dim)));
         }
-        None => text.push_str(&console::paint(Tone::Cyan, kind)),
+        None => pieces.push(Piece::new(&layout::clean_inline(kind), Some(Tone::Cyan))),
     }
-    if !args.is_empty() {
-        text.push_str("  ");
-        text.push_str(args);
+    pieces.extend(args.inline.iter().map(|a| Piece::new(a, None)));
+    let mut rows = flow(&lead(num), &pieces, "  ", width, HEADER_ROWS);
+    for (key, text) in &args.blocks {
+        rows.extend(block_rows(key, text, width));
     }
-    text
+    rows
+}
+
+fn block_rows(key: &str, text: &str, width: usize) -> Vec<String> {
+    let lines = layout::clean_lines(text);
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let key = short_key(key, width);
+    let code = BODY_KEYS.contains(&key.as_str());
+    let mut rows = Vec::new();
+    if code || lines.len() > 1 {
+        if !code {
+            rows.push(format!("{BODY_INDENT}{}", console::paint(Tone::Dim, &key)));
+        }
+        let gutter = format!("{BODY_INDENT}{} ", console::paint(Tone::Dim, GUTTER));
+        let inner = width - display_width(&gutter);
+        let folded = layout::fold(&lines, inner, SCRIPT_ROWS, 2);
+        for row in folded.rows {
+            rows.push(format!("{gutter}{row}").trim_end().to_string());
+        }
+        if let Some(more) = folded.more {
+            for piece in layout::wrap(&more.note(), inner, inner) {
+                rows.push(format!("{gutter}{}", console::paint(Tone::Dim, &piece)));
+            }
+        }
+        return rows;
+    }
+    let pad = " ".repeat(display_width(BODY_INDENT) + display_width(&key) + 2);
+    let inner = width - pad.len();
+    let folded = layout::fold(&lines, inner, VALUE_ROWS, 0);
+    for (i, row) in folded.rows.iter().enumerate() {
+        if i == 0 {
+            rows.push(format!(
+                "{BODY_INDENT}{}  {row}",
+                console::paint(Tone::Dim, &key)
+            ));
+        } else {
+            rows.push(format!("{pad}{row}"));
+        }
+    }
+    if let Some(more) = folded.more {
+        for piece in layout::wrap(&more.note(), inner, inner) {
+            rows.push(format!("{pad}{}", console::paint(Tone::Dim, &piece)));
+        }
+    }
+    rows
+}
+
+fn short_key(key: &str, width: usize) -> String {
+    let max = MAX_KEY.min(width / 4).max(1);
+    let mut out = String::new();
+    let mut used = 0;
+    for c in layout::clean_inline(key).chars() {
+        let w = console::char_width(c);
+        if used + w > max {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out
 }
 
 pub fn copy_to_clipboard(text: &str) -> bool {
@@ -384,14 +561,14 @@ pub fn copy_to_clipboard(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consent::{Category, Request};
+    use crate::consent::{Category, Request, Term};
 
     fn event(kind: &str, category: Option<Category>, step: Step) -> Event {
         Event {
             request: Request {
                 kind: kind.into(),
                 category,
-                summary: String::new(),
+                ..Request::default()
             },
             step,
         }
@@ -418,7 +595,10 @@ mod tests {
         b.begin("c2", "fs.delete");
         b.begin("c3", "fs.delete");
         assert_eq!(b.consent_target("fs.delete", &Step::Asking), Some(2));
-        assert_eq!(b.consent_target("fs.delete", &Step::Allowed), Some(2));
+        assert_eq!(
+            b.consent_target("fs.delete", &Step::Allowed(Term::Once)),
+            Some(2)
+        );
         assert_eq!(b.consent_target("fs.delete", &Step::Asking), Some(3));
         assert_eq!(b.consent_target("proc.kill", &Step::Asking), None);
     }
@@ -427,16 +607,28 @@ mod tests {
     fn consent_lines_say_what_happened() {
         console::set_color(false);
         assert_eq!(
-            consent_line(&event("fs.delete", Some(Category::Files), Step::Allowed)),
-            "You said yes, for the next 15 minutes."
+            consent_line(&event(
+                "fs.delete",
+                Some(Category::Files),
+                Step::Allowed(Term::Minutes(30))
+            )),
+            "You allowed it for the next 30 minutes."
         );
         assert_eq!(
             consent_line(&event(
-                "power.restart",
-                Some(Category::Power),
-                Step::Allowed
+                "fs.delete",
+                Some(Category::Files),
+                Step::Allowed(Term::Once)
             )),
-            "You said yes, this one time."
+            "You allowed it just this once."
+        );
+        assert_eq!(
+            consent_line(&event(
+                "tunnel.open",
+                Some(Category::Network),
+                Step::Allowed(Term::Session)
+            )),
+            "You allowed it until this session ends."
         );
         assert_eq!(
             consent_line(&event("fs.delete", None, Step::TimedOut)),
@@ -560,16 +752,175 @@ mod tests {
         );
     }
 
+    fn view(v: serde_json::Value) -> ArgView {
+        crate::cmd::summary::describe_args(v.as_object().unwrap())
+    }
+
     #[test]
     fn command_lines_show_number_label_and_kind() {
         console::set_color(false);
         assert_eq!(
-            command_line(1, Some("CPU"), "hw.cpu", ""),
-            "#1  CPU  hw.cpu"
+            command_lines(1, Some("CPU"), "hw.cpu", &ArgView::default(), 69),
+            ["#1  CPU  hw.cpu"]
         );
         assert_eq!(
-            command_line(2, None, "x.y", "path=C:\\a"),
-            "#2  x.y  path=C:\\a"
+            command_lines(
+                2,
+                None,
+                "x.y",
+                &view(serde_json::json!({"path": "C:\\a"})),
+                69
+            ),
+            ["#2  x.y  path=C:\\a"]
         );
+    }
+
+    #[test]
+    fn scripts_sit_under_the_header_with_their_line_breaks() {
+        console::set_color(false);
+        let script = "$a = Get-NetAdapter\r\nforeach ($n in $a) {\r\n\tWrite-Output $n.Name\r\n}";
+        let rows = command_lines(
+            4,
+            Some("Run script"),
+            "ps.exec",
+            &view(serde_json::json!({ "script": script })),
+            69,
+        );
+        assert_eq!(
+            rows,
+            [
+                "#4  Run script  ps.exec",
+                "  \u{2502} $a = Get-NetAdapter",
+                "  \u{2502} foreach ($n in $a) {",
+                "  \u{2502}     Write-Output $n.Name",
+                "  \u{2502} }",
+            ]
+        );
+    }
+
+    #[test]
+    fn long_scripts_show_twelve_rows_and_a_count() {
+        console::set_color(false);
+        let script: String = (1..=30).map(|i| format!("Write-Output {i}\n")).collect();
+        let rows = command_lines(
+            1,
+            Some("Run script"),
+            "ps.exec",
+            &view(serde_json::json!({ "script": script })),
+            69,
+        );
+        assert_eq!(rows.len(), 1 + 12 + 1);
+        assert_eq!(rows[12], "  \u{2502} Write-Output 12");
+        assert_eq!(rows[13], "  \u{2502} ... 18 more lines");
+    }
+
+    #[test]
+    fn long_values_wrap_beside_their_name() {
+        console::set_color(false);
+        let path = format!("C:\\Users\\ADMIN\\{}\\file.log", "Folder\\".repeat(20));
+        let rows = command_lines(
+            3,
+            Some("Read file"),
+            "fs.read",
+            &view(serde_json::json!({ "path": path })),
+            69,
+        );
+        assert_eq!(rows[0], "#3  Read file  fs.read");
+        assert!(rows[1].starts_with("  path  C:\\Users\\ADMIN\\"));
+        for row in &rows[2..] {
+            assert!(row.starts_with("        "));
+        }
+        let joined: String = rows[1..].iter().map(|r| r.replace(' ', "")).collect();
+        assert_eq!(joined, format!("path{path}"));
+    }
+
+    #[test]
+    fn long_results_wrap_under_the_number() {
+        console::set_color(false);
+        let out = Outcome {
+            ok: false,
+            elapsed_ms: 1200,
+            ..Outcome::default()
+        };
+        let detail = "Get-WinEvent : There is not an event log on the localhost computer that matches System. At line:1 char:1";
+        let rows = result_lines(2, &out, Ending::Failed, false, detail, 40);
+        assert!(rows.len() > 2);
+        assert!(rows[0].starts_with("#2  Failed after 1.2 s: Get-WinEvent"));
+        for row in &rows[1..] {
+            assert!(row.starts_with("    ") && !row.starts_with("     "));
+        }
+        assert!(rows.iter().all(|r| display_width(r) <= 40));
+        let joined = rows.iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+        assert_eq!(joined, format!("#2  Failed after 1.2 s: {detail}"));
+    }
+
+    #[test]
+    fn very_long_results_are_capped() {
+        console::set_color(false);
+        let out = Outcome {
+            ok: true,
+            elapsed_ms: 50,
+            ..Outcome::default()
+        };
+        let detail = "word ".repeat(200);
+        let rows = result_lines(9, &out, Ending::Done, false, &detail, 40);
+        assert_eq!(rows.len(), RESULT_ROWS);
+        assert!(rows[RESULT_ROWS - 1].ends_with(" ..."));
+        assert_eq!(
+            result_lines(9, &out, Ending::Done, false, "", 40),
+            ["#9  Done in under 0.1 s."]
+        );
+    }
+
+    #[test]
+    fn no_input_makes_a_line_wider_than_the_console() {
+        console::set_color(false);
+        let huge: String = (1..=2000)
+            .map(|i| format!("Write-Output {i}\r\n"))
+            .collect();
+        let samples = [
+            serde_json::json!({ "script": huge }),
+            serde_json::json!({ "script": "x".repeat(10_000) }),
+            serde_json::json!({ "script": format!("{}\n{}", "网络诊断".repeat(300), "🚀✅🔥".repeat(200)) }),
+            serde_json::json!({ "script": "\u{1b}[31mred\u{1b}[0m\r\n\u{1b}]0;title\u{7}x\u{8}\u{202E}y\n\t\t\tz".repeat(50) }),
+            serde_json::json!({ "path": "p".repeat(5000), "target": "网".repeat(2000), "url": "u/".repeat(3000) }),
+            serde_json::json!({ "k".repeat(500): "v".repeat(500) }),
+            serde_json::json!({ "path": "a b", "target": "c", "name": "d", "query": "q", "host": "h", "pid": 1, "key": "k" }),
+        ];
+        for columns in [40, 80, 120, 400] {
+            let width = console::body_width_for(columns);
+            for args in &samples {
+                let rows = command_lines(
+                    123,
+                    Some(&"Label ".repeat(30)),
+                    "very.long.kind",
+                    &view(args.clone()),
+                    width,
+                );
+                for row in &rows {
+                    assert!(
+                        display_width(row) <= width,
+                        "{columns}: {} > {width}: {row}",
+                        display_width(row)
+                    );
+                }
+                assert!(rows.len() <= HEADER_ROWS + 3 * (SCRIPT_ROWS + 2));
+            }
+            let out = Outcome {
+                ok: false,
+                elapsed_ms: 1,
+                ..Outcome::default()
+            };
+            for detail in [
+                "e".repeat(5000),
+                "网".repeat(600),
+                "a\u{1b}[2Jb ".repeat(100),
+            ] {
+                let rows = result_lines(7, &out, Ending::Failed, false, &detail, width);
+                assert!(rows.len() <= RESULT_ROWS);
+                assert!(rows.iter().all(|r| display_width(r) <= width));
+                assert!(rows.iter().all(|r| !r.contains('\u{1b}')));
+            }
+        }
     }
 }

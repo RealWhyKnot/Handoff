@@ -265,9 +265,134 @@ pub fn display_width(s: &str) -> usize {
             }
             continue;
         }
-        width += 1;
+        width += char_width(c);
     }
     width
+}
+
+pub fn char_width(c: char) -> usize {
+    let cp = c as u32;
+    if c.is_control() || zero_width(cp) {
+        return 0;
+    }
+    if wide(cp) {
+        2
+    } else {
+        1
+    }
+}
+
+fn zero_width(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x0300..=0x036F
+            | 0x0483..=0x0489
+            | 0x0591..=0x05BD
+            | 0x0610..=0x061A
+            | 0x064B..=0x065F
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0x20D0..=0x20FF
+            | 0xFE00..=0xFE0F
+            | 0xFE20..=0xFE2F
+            | 0xFEFF
+            | 0xE0000..=0xE0FFF
+    )
+}
+
+fn wide(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x1100..=0x115F
+            | 0x231A..=0x231B
+            | 0x2329..=0x232A
+            | 0x23E9..=0x23F3
+            | 0x25FD..=0x25FE
+            | 0x2600..=0x27BF
+            | 0x2B1B..=0x2B1C
+            | 0x2B50
+            | 0x2B55
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F000..=0x1FAFF
+            | 0x20000..=0x3FFFD
+    )
+}
+
+pub const STAMP_WIDTH: usize = 10;
+const DEFAULT_COLUMNS: usize = 100;
+const MIN_COLUMNS: usize = 40;
+const MAX_COLUMNS: usize = 400;
+
+pub fn columns() -> usize {
+    terminal_columns()
+        .unwrap_or(DEFAULT_COLUMNS)
+        .clamp(MIN_COLUMNS, MAX_COLUMNS)
+}
+
+pub fn body_width() -> usize {
+    body_width_for(columns())
+}
+
+pub fn body_width_for(columns: usize) -> usize {
+    columns.max(MIN_COLUMNS) - 1 - STAMP_WIDTH
+}
+
+#[cfg(windows)]
+fn terminal_columns() -> Option<usize> {
+    use windows::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
+    };
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE).ok()?;
+        let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+        GetConsoleScreenBufferInfo(handle, &mut info).ok()?;
+        let cols = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
+        usize::try_from(cols).ok().filter(|c| *c > 0)
+    }
+}
+
+#[cfg(not(windows))]
+fn terminal_columns() -> Option<usize> {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    util::env_var("COLUMNS").trim().parse().ok()
+}
+
+pub fn stamp_lines(lines: &[String]) -> String {
+    let indent = " ".repeat(STAMP_WIDTH);
+    let mut out = String::new();
+    for (i, text) in lines.iter().enumerate() {
+        if i == 0 {
+            out.push_str(&stamp(text));
+        } else {
+            out.push('\n');
+            out.push_str(&indent);
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+pub fn lines(lines: &[String]) {
+    println!("{}", stamp_lines(lines));
 }
 
 pub fn pad(s: &str, width: usize) -> String {
@@ -399,6 +524,34 @@ mod tests {
         assert_eq!(lines[1], "--------------------  ----");
         assert_eq!(lines[2], "explorer.exe          4120");
         assert_eq!(lines[3], format!("{}...  7", "a".repeat(17)));
+    }
+
+    #[test]
+    fn wide_and_zero_width_characters_are_measured() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("网络"), 4);
+        assert_eq!(display_width("\u{1F680}"), 2);
+        assert_eq!(display_width("e\u{301}"), 1);
+        assert_eq!(display_width("a\u{200B}b\u{FEFF}"), 2);
+        assert_eq!(display_width("\u{1b}[1m网\u{1b}[0mx"), 3);
+        assert_eq!(char_width('\u{7}'), 0);
+    }
+
+    #[test]
+    fn body_width_leaves_room_for_the_clock_and_the_last_column() {
+        assert_eq!(body_width_for(80), 69);
+        assert_eq!(body_width_for(120), 109);
+        assert_eq!(body_width_for(10), 29);
+    }
+
+    #[test]
+    fn continuation_lines_line_up_under_the_text() {
+        set_color(false);
+        let text = stamp_lines(&["#1  a".to_string(), "  b".to_string()]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), STAMP_WIDTH + 5);
+        assert_eq!(lines[1], format!("{}  b", " ".repeat(STAMP_WIDTH)));
     }
 
     #[test]

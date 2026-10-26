@@ -215,7 +215,7 @@ pub fn kill_pid_arg(args: &Args) -> Result<i64, HandlerError> {
 async fn proc_kill(ctx: Ctx, args: Args) -> CapResult {
     let pid = kill_pid_arg(&args)?;
     require_risk_consent(
-        &ctx.cancel,
+        &ctx,
         "proc.kill",
         &format!(
             "Terminates process ID {pid} on this computer. Unsaved work in that process can be lost."
@@ -344,6 +344,9 @@ pub fn control_args(args: &Args) -> Result<(String, String), HandlerError> {
     if name.is_empty() {
         return Err(HandlerError::plain("svc.control: 'name' is required"));
     }
+    if name.chars().count() > 256 {
+        return Err(HandlerError::plain("svc.control: 'name' is too long"));
+    }
     match action.as_str() {
         "start" | "stop" | "restart" => {}
         _ => {
@@ -358,7 +361,7 @@ pub fn control_args(args: &Args) -> Result<(String, String), HandlerError> {
 async fn svc_control(ctx: Ctx, args: Args) -> CapResult {
     let (name, action) = control_args(&args)?;
     require_risk_consent(
-        &ctx.cancel,
+        &ctx,
         "svc.control",
         &format!(
             "Runs '{}' against Windows service {}. This can interrupt software or device functionality.",
@@ -439,7 +442,11 @@ mod tests {
             let c = c.clone();
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
-                Ok(allow)
+                Ok(if allow {
+                    crate::consent::Answer::ForGrant
+                } else {
+                    crate::consent::Answer::No
+                })
             })
         });
         (prompt, calls)
@@ -604,6 +611,10 @@ mod tests {
         let (name, action) =
             control_args(&args(json!({"name": " x ", "action": " STOP "}))).unwrap();
         assert_eq!((name.as_str(), action.as_str()), ("x", "stop"));
+        let long = "s".repeat(257);
+        let err = control_args(&args(json!({"name": long, "action": "stop"}))).unwrap_err();
+        assert_eq!(err.message, "svc.control: 'name' is too long");
+        assert!(control_args(&args(json!({"name": "s".repeat(256), "action": "stop"}))).is_ok());
     }
 
     #[test]
