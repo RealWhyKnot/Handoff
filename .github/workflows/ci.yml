@@ -43,7 +43,7 @@ jobs:
 
       - name: Lint and test
         shell: pwsh
-        run: ./scripts/lint.ps1
+        run: ./.github/lint/lint.ps1
 
       - name: Fetch picotool
         shell: pwsh
