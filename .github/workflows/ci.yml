@@ -47,6 +47,8 @@ jobs:
 
       - name: Fetch picotool
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/fetch-picotool.ps1
 
       - name: cargo build (embedded)
