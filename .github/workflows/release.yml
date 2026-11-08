@@ -85,6 +85,7 @@ jobs:
           HANDOFF_TAG: ${{ steps.ver.outputs.tag }}
         run: |
           $sha = (Get-FileHash -Algorithm SHA256 handoff.exe).Hash.ToLower()
+          [System.IO.File]::WriteAllText("handoff.exe.sha256", "$sha  handoff.exe`n", (New-Object System.Text.UTF8Encoding($false)))
           $manifest = [ordered]@{
             version = $env:HANDOFF_VERSION
             sha256  = $sha
@@ -123,6 +124,9 @@ jobs:
           notes-file: ${{ steps.body.outputs.file }}
           prerelease: ${{ steps.ver.outputs.prerelease }}
           draft-first: 'true'
+          verify-asset: handoff.exe
+          verify-sha256: ${{ steps.manifest.outputs.sha256 }}
           assets: |
             handoff.exe
+            handoff.exe.sha256
             handoff-version.json
