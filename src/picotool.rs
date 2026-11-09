@@ -55,6 +55,7 @@ fn extract_once() -> Result<PathBuf, String> {
         }
         Err(e) => {
             state.error = Some(e.clone());
+            drop(state);
             Err(e)
         }
     }
@@ -64,7 +65,7 @@ fn extract(data: &[u8], dir: &std::path::Path) -> Result<PathBuf, String> {
     if data.is_empty() {
         return Err("not embedded".to_string());
     }
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     let sum = Sha256::digest(data);
     let name = format!("picotool-{}.exe", hex(&sum[..6]));
@@ -74,7 +75,7 @@ fn extract(data: &[u8], dir: &std::path::Path) -> Result<PathBuf, String> {
         return Ok(out);
     }
     let tmp = PathBuf::from(format!("{}.part", out.display()));
-    fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    fs::write(&tmp, data).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     if let Err(e) = fs::rename(&tmp, &out) {
         let _ = fs::remove_file(&tmp);
         if !out.exists() {

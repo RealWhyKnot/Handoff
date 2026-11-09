@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::{handler, CapResult, Failure, Handler, HandlerError};
+use crate::dispatch::{CapResult, Failure, Handler, HandlerError, handler};
 
 use super::pwsh;
 

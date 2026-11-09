@@ -33,13 +33,13 @@ jobs:
         run: |
           ./.github/scripts/Test-NightlyBetaPlan.ps1
           ./.github/scripts/Test-ResolveReleaseBaseTag.ps1
+          ./.github/scripts/Test-NewReleaseNotes.ps1
 
       - name: Rust toolchain
         uses: RealWhyKnot/workflows/setup-rust@v1
 
-      - name: Install PowerShell analyzer
-        shell: pwsh
-        run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+      - name: PowerShell analyzer
+        uses: RealWhyKnot/workflows/setup-pssa@v1
 
       - name: Lint and test
         shell: pwsh
@@ -53,3 +53,49 @@ jobs:
 
       - name: cargo build (embedded)
         run: cargo build --release --locked --features embed_picotool
+
+  shell:
+    name: shell lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install shell tools
+        env:
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+          SHFMT_VERSION: "3.14.1"
+          SHFMT_SHA256: "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf"
+        run: |
+          set -euo pipefail
+          shopt -s inherit_errexit
+          download_directory=$(mktemp -d)
+          trap 'rm -rf "${download_directory}"' EXIT
+          tool_directory="${RUNNER_TEMP}/shell-tools/bin"
+          shellcheck_release_url="https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}"
+          curl -fsSL --max-time 60 --retry 3 \
+            "${shellcheck_release_url}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            -o "${download_directory}/shellcheck.tar.xz"
+          shfmt_release_url="https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}"
+          curl -fsSL --max-time 60 --retry 3 \
+            "${shfmt_release_url}/shfmt_v${SHFMT_VERSION}_linux_amd64" \
+            -o "${download_directory}/shfmt"
+          printf '%s  %s\n' \
+            "${SHELLCHECK_SHA256}" "${download_directory}/shellcheck.tar.xz" \
+            "${SHFMT_SHA256}" "${download_directory}/shfmt" | sha256sum -c
+          mkdir -p "${tool_directory}"
+          tar -xJf "${download_directory}/shellcheck.tar.xz" -C "${tool_directory}" \
+            --strip-components=1 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          mv "${download_directory}/shfmt" "${tool_directory}/shfmt"
+          chmod 755 "${tool_directory}/shellcheck" "${tool_directory}/shfmt"
+          printf '%s\n' "${tool_directory}" >> "${GITHUB_PATH}"
+
+      - name: Lint shell
+        run: bash .githooks/check-shell

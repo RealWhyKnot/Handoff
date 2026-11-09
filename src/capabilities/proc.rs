@@ -1,6 +1,7 @@
 use serde_json::Value;
+use std::fmt::Write as _;
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router, Spec};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, Spec, handler};
 
 use super::consent::require_risk_consent;
 use super::pwsh::ps_single_quote;
@@ -145,7 +146,9 @@ pub(super) fn fill(template: &str, values: &[(&str, &str)]) -> String {
                 }
             }
         }
-        let ch = rest.chars().next().unwrap();
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
         out.push(ch);
         rest = &rest[ch.len_utf8()..];
     }
@@ -165,14 +168,14 @@ pub(super) fn go_quote(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             '\u{b}' => out.push_str("\\v"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
+            c if u32::from(c) < 0x20 || u32::from(c) == 0x7f => {
+                let _ = write!(out, "\\x{:02x}", u32::from(c));
             }
             c if c.is_control() => {
-                if (c as u32) < 0x10000 {
-                    out.push_str(&format!("\\u{:04x}", c as u32))
+                if u32::from(c) < 0x10000 {
+                    let _ = write!(out, "\\u{:04x}", u32::from(c));
                 } else {
-                    out.push_str(&format!("\\U{:08x}", c as u32))
+                    let _ = write!(out, "\\U{:08x}", u32::from(c));
                 }
             }
             c => out.push(c),
@@ -352,7 +355,7 @@ pub fn control_args(args: &Args) -> Result<(String, String), HandlerError> {
         _ => {
             return Err(HandlerError::plain(
                 "svc.control: action must be start, stop, or restart",
-            ))
+            ));
         }
     }
     Ok((name, action))
@@ -428,18 +431,18 @@ mod tests {
     use super::*;
     use crate::consent::Prompt;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn counting_prompt(allow: bool) -> (Prompt, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
-        let c = calls.clone();
+        let c = Arc::clone(&calls);
         let prompt: Prompt = Arc::new(move |_, _| {
-            let c = c.clone();
+            let c = Arc::clone(&c);
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
                 Ok(if allow {

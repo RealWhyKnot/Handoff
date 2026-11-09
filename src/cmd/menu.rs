@@ -8,7 +8,7 @@ use super::version::print_version;
 
 pub fn menu(args: &[String]) -> i32 {
     if !stdin_is_terminal() {
-        eprintln!("handoff needs a terminal for the menu; run 'handoff new' to host a session");
+        crate::errln!("handoff needs a terminal for the menu; run 'handoff new' to host a session");
         return 2;
     }
 
@@ -20,7 +20,7 @@ pub fn menu(args: &[String]) -> i32 {
             Ok(Some(c)) => c,
             Ok(None) => return 0,
             Err(err) => {
-                eprintln!("could not read input: {err}");
+                crate::errln!("could not read input: {err}");
                 return 0;
             }
         };
@@ -46,7 +46,7 @@ pub fn menu(args: &[String]) -> i32 {
             }
             "5" | "q" | "quit" | "exit" => return 0,
             "" => {}
-            _ => println!("not a valid choice; type a number from 1 to 5."),
+            _ => crate::outln!("not a valid choice; type a number from 1 to 5."),
         }
     }
 }
@@ -56,7 +56,7 @@ pub fn menu_text() -> &'static str {
 }
 
 fn print_menu() {
-    print!("{}", menu_text());
+    crate::out!("{}", menu_text());
     let _ = std::io::stdout().flush();
 }
 
@@ -71,36 +71,36 @@ fn read_choice(reader: &mut dyn BufRead) -> std::io::Result<Option<String>> {
 
 pub fn parse_port_choice(input: &str) -> Option<u16> {
     match input.trim().parse::<i64>() {
-        Ok(p) if p > 0 && p <= 65535 => Some(p as u16),
+        Ok(p) if p > 0 => u16::try_from(p).ok(),
         _ => None,
     }
 }
 
 fn run_tunnel_prompt(reader: &mut dyn BufRead, base_args: &[String]) -> i32 {
-    println!();
-    println!("Paste the connect token shown on the session page after the host");
-    println!("approves the tunnel (looks like 'tk_AbCdEfGh').");
-    print!("Connect token: ");
+    crate::outln!();
+    crate::outln!("Paste the connect token shown on the session page after the host");
+    crate::outln!("approves the tunnel (looks like 'tk_AbCdEfGh').");
+    crate::out!("Connect token: ");
     let _ = std::io::stdout().flush();
     let mut token_line = String::new();
     if let Err(err) = reader.read_line(&mut token_line) {
-        eprintln!("could not read token: {err}");
+        crate::errln!("could not read token: {err}");
         return 0;
     }
     let token = token_line.trim().to_string();
     if token.is_empty() {
-        println!("no token entered; aborting.");
+        crate::outln!("no token entered; aborting.");
         return 0;
     }
 
     let mut port: u16 = 47800;
     loop {
-        print!("Local port to bind on this computer [47800]: ");
+        crate::out!("Local port to bind on this computer [47800]: ");
         let _ = std::io::stdout().flush();
         let mut port_line = String::new();
         match reader.read_line(&mut port_line) {
             Ok(0) | Err(_) => {
-                eprintln!("could not read port: EOF");
+                crate::errln!("could not read port: EOF");
                 return 0;
             }
             Ok(_) => {}
@@ -114,7 +114,7 @@ fn run_tunnel_prompt(reader: &mut dyn BufRead, base_args: &[String]) -> i32 {
                 port = p;
                 break;
             }
-            None => println!("port must be a whole number between 1 and 65535; try again."),
+            None => crate::outln!("port must be a whole number between 1 and 65535; try again."),
         }
     }
 

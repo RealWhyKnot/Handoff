@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::flags::{parse_options, Def, FlagError};
+use super::flags::{Def, FlagError, parse_options};
 use super::version::{compare_versions, parse_version};
 use crate::util;
 
@@ -38,12 +38,12 @@ pub fn get_current_version() -> String {
 pub fn should_update(current: &str, latest: &str, force: bool) -> bool {
     let cur = parse_version(current);
     let Some(next) = parse_version(latest) else {
-        println!("the relay published an unreadable version; not updating");
+        crate::outln!("the relay published an unreadable version; not updating");
         return false;
     };
     let Some(cur) = cur else {
         if !force {
-            println!("this is a development build; not updating (use --force)");
+            crate::outln!("this is a development build; not updating (use --force)");
             return false;
         }
         return true;
@@ -51,11 +51,11 @@ pub fn should_update(current: &str, latest: &str, force: bool) -> bool {
 
     match compare_versions(&cur, &next) {
         0 => {
-            println!("up to date");
+            crate::outln!("up to date");
             false
         }
         1 => {
-            println!("already newer than the published build ({current} > {latest})");
+            crate::outln!("already newer than the published build ({current} > {latest})");
             false
         }
         _ => true,
@@ -98,16 +98,24 @@ fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("build the HTTP client: {e}"))
 }
 
 pub async fn fetch_manifest(url: &str) -> Result<VersionManifest, String> {
-    let resp = client()?.get(url).send().await.map_err(|e| e.to_string())?;
+    let resp = client()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch the update manifest: {e}"))?;
     if resp.status().as_u16() != 200 {
         return Err(format!("manifest fetch: {}", resp.status().as_u16()));
     }
-    let body = resp.bytes().await.map_err(|e| e.to_string())?;
-    let manifest: VersionManifest = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read the update manifest: {e}"))?;
+    let manifest: VersionManifest =
+        serde_json::from_slice(&body).map_err(|e| format!("parse the update manifest: {e}"))?;
     if manifest.version.is_empty() {
         return Err("manifest has empty version".to_string());
     }
@@ -115,20 +123,31 @@ pub async fn fetch_manifest(url: &str) -> Result<VersionManifest, String> {
 }
 
 pub async fn download_verified(url: &str, sha256_hex: &str, dst: &Path) -> Result<(), String> {
-    let mut resp = client()?.get(url).send().await.map_err(|e| e.to_string())?;
+    let mut resp = client()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("download the update: {e}"))?;
     if resp.status().as_u16() != 200 {
         return Err(resp.status().as_u16().to_string());
     }
 
-    let mut file = std::fs::File::create(dst).map_err(|e| e.to_string())?;
+    let mut file =
+        std::fs::File::create(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
     let mut hasher = Sha256::new();
     let mut written: u64 = 0;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("download the update: {e}"))?
+    {
+        file.write_all(&chunk)
+            .map_err(|e| format!("write {}: {e}", dst.display()))?;
         hasher.update(&chunk);
-        written += chunk.len() as u64;
+        written += u64::try_from(chunk.len()).unwrap_or(u64::MAX);
     }
-    file.flush().map_err(|e| e.to_string())?;
+    file.flush()
+        .map_err(|e| format!("write {}: {e}", dst.display()))?;
     drop(file);
 
     if written == 0 {
@@ -154,7 +173,7 @@ pub fn update(args: &[String]) -> i32 {
         Ok(v) => v,
         Err(FlagError::Help) => return 0,
         Err(err) => {
-            eprintln!("{err}");
+            crate::errln!("{err}");
             return 2;
         }
     };
@@ -168,45 +187,62 @@ pub fn update(args: &[String]) -> i32 {
     {
         Ok(rt) => rt,
         Err(err) => {
-            eprintln!("{err}");
+            crate::errln!("{err}");
             return 1;
         }
     };
-    runtime.block_on(run_update(&opts.relay, check, force, no_replace))
+    let flags = UpdateFlags {
+        check,
+        force,
+        no_replace,
+    };
+    runtime.block_on(run_update(&opts.relay, flags))
 }
 
-async fn run_update(relay: &str, check: bool, force: bool, no_replace: bool) -> i32 {
+#[derive(Clone, Copy)]
+struct UpdateFlags {
+    check: bool,
+    force: bool,
+    no_replace: bool,
+}
+
+async fn run_update(relay: &str, flags: UpdateFlags) -> i32 {
+    let UpdateFlags {
+        check,
+        force,
+        no_replace,
+    } = flags;
     let manifest_url = format!("{relay}/dl/handoff-version.json");
     let exe_url = format!("{relay}/dl/handoff.exe");
 
     let current = get_current_version();
-    println!("current: {current}");
-    println!("checking: {manifest_url}");
+    crate::outln!("current: {current}");
+    crate::outln!("checking: {manifest_url}");
 
     let man = match fetch_manifest(&manifest_url).await {
         Ok(m) => m,
         Err(err) => {
-            eprintln!("could not reach update manifest: {err}");
+            crate::errln!("could not reach update manifest: {err}");
             return 1;
         }
     };
-    println!("latest:  {}", man.version);
+    crate::outln!("latest:  {}", man.version);
     if !man.notes.is_empty() {
-        println!("notes:   {}", man.notes);
+        crate::outln!("notes:   {}", man.notes);
     }
 
     if !should_update(&current, &man.version, force) {
         return 0;
     }
     if check {
-        println!("(check-only; not downloading)");
+        crate::outln!("(check-only; not downloading)");
         return 0;
     }
 
     let exe_path = match std::env::current_exe() {
         Ok(p) => p,
         Err(err) => {
-            eprintln!("could not resolve current executable: {err}");
+            crate::errln!("could not resolve current executable: {err}");
             return 1;
         }
     };
@@ -215,30 +251,30 @@ async fn run_update(relay: &str, check: bool, force: bool, no_replace: bool) -> 
         .unwrap_or_else(|| Path::new("."))
         .join("handoff.exe.new");
 
-    println!("downloading: {exe_url} -> {}", dst.display());
+    crate::outln!("downloading: {exe_url} -> {}", dst.display());
     if let Err(err) = download_verified(&exe_url, &man.sha256, &dst).await {
-        eprintln!("download failed: {err}");
+        crate::errln!("download failed: {err}");
         let _ = std::fs::remove_file(&dst);
         return 1;
     }
-    println!("downloaded.");
+    crate::outln!("downloaded.");
 
     if no_replace {
-        println!();
-        println!("To finish the update:");
-        println!("  1) Close any running 'handoff' processes.");
-        println!("  2) Replace {}", exe_path.display());
-        println!("     with     {}", dst.display());
-        println!("  3) Start a new session.");
+        crate::outln!();
+        crate::outln!("To finish the update:");
+        crate::outln!("  1) Close any running 'handoff' processes.");
+        crate::outln!("  2) Replace {}", exe_path.display());
+        crate::outln!("     with     {}", dst.display());
+        crate::outln!("  3) Start a new session.");
         return 0;
     }
 
     if let Err(err) = replace_executable(&exe_path, &dst) {
-        eprintln!("could not install the update: {err}");
-        eprintln!("the new build is at {}", dst.display());
+        crate::errln!("could not install the update: {err}");
+        crate::errln!("the new build is at {}", dst.display());
         return 1;
     }
-    println!("updated. Restart handoff to use {}", man.version);
+    crate::outln!("updated. Restart handoff to use {}", man.version);
     0
 }
 
@@ -275,7 +311,8 @@ mod tests {
 
     #[test]
     fn runtime_version_override_is_gone() {
-        std::env::set_var("HANDOFF_VERSION", "9999.1.1.0");
+        // SAFETY: no other test reads or writes HANDOFF_VERSION, and the lookup below ignores it.
+        unsafe { std::env::set_var("HANDOFF_VERSION", "9999.1.1.0") };
         assert_eq!(get_current_version(), crate::VERSION);
         assert_ne!(get_current_version(), "9999.1.1.0");
     }
@@ -306,7 +343,7 @@ mod tests {
     fn manifest_decodes_with_missing_fields() {
         let m: VersionManifest = serde_json::from_str(r#"{"version":"2026.8.19.0"}"#).unwrap();
         assert_eq!(m.version, "2026.8.19.0");
-        assert!(m.sha256.is_empty());
+        assert_eq!(m.sha256, "");
     }
 
     #[test]

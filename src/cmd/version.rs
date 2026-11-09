@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::flags::parse_options;
 use super::paths::{audit_dir, support_log_path};
@@ -68,15 +68,15 @@ pub fn print_version(args: &[String], version: &str) -> i32 {
     });
 
     if opts.json {
-        println!("{}", util::go_pretty_json(&info));
+        crate::outln!("{}", util::go_pretty_json(&info));
         return 0;
     }
 
     let field = |key: &str| info[key].as_str().unwrap_or("").to_string();
-    println!("handoff {version}");
-    println!("relay:  {}", field("relay"));
-    println!("log:    {}", field("log_path"));
-    println!("audit:  {}", field("audit_dir"));
+    crate::outln!("handoff {version}");
+    crate::outln!("relay:  {}", field("relay"));
+    crate::outln!("log:    {}", field("log_path"));
+    crate::outln!("audit:  {}", field("audit_dir"));
     0
 }
 

@@ -84,11 +84,11 @@ pub fn describe_args(args: &Map<String, Value>) -> ArgView {
             view.inline.push(format!("{key}=<{} bytes>", raw.len()));
             return true;
         }
-        if let Value::String(text) = value {
-            if goes_in_block(text) {
-                view.blocks.push((key.to_string(), text.clone()));
-                return true;
-            }
+        if let Value::String(text) = value
+            && goes_in_block(text)
+        {
+            view.blocks.push((key.to_string(), text.clone()));
+            return true;
         }
         let part = format!("{key}={}", summary_value(value));
         if total + part.len() > MAX_SUMMARY_TOTAL {
@@ -179,11 +179,11 @@ pub fn summarize_result(out: &Outcome) -> String {
                 return format!(
                     "Exit code {}, {} of output",
                     util::go_value_string(code),
-                    console::human_bytes(printed as u64)
+                    console::human_bytes(u64::try_from(printed).unwrap_or(u64::MAX))
                 );
             }
             if let Some(n) = res.get("count").and_then(Value::as_u64) {
-                return items(n as usize);
+                return items(usize::try_from(n).unwrap_or(usize::MAX));
             }
             if let Some(size) = res.get("size").and_then(Value::as_u64) {
                 return console::human_bytes(size);
@@ -192,10 +192,10 @@ pub fn summarize_result(out: &Outcome) -> String {
                 return items(entries.len());
             }
             for key in NAME_KEYS {
-                if let Some(Value::String(name)) = res.get(key) {
-                    if !name.trim().is_empty() {
-                        return cut(name);
-                    }
+                if let Some(Value::String(name)) = res.get(key)
+                    && !name.trim().is_empty()
+                {
+                    return cut(name);
                 }
             }
             String::new()
@@ -211,7 +211,7 @@ mod tests {
     use serde_json::json;
 
     fn args(v: Value) -> Map<String, Value> {
-        v.as_object().cloned().unwrap()
+        serde_json::from_value(v).unwrap()
     }
 
     fn ok(result: Value) -> Outcome {
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn multi_line_values_become_blocks() {
         let view = describe_args(&args(json!({"script": "a\r\nb"})));
-        assert!(view.inline.is_empty());
+        assert_eq!(view.inline, Vec::<String>::new());
         assert_eq!(view.blocks, [("script".to_string(), "a\r\nb".to_string())]);
         let view = describe_args(&args(json!({"script": "\r\nGet-Date\r\n"})));
         assert_eq!(view.inline, ["script=Get-Date"]);
@@ -318,7 +318,7 @@ mod tests {
             inline(json!({"consent_minutes": 30, "pid": 42})),
             ["pid=42"]
         );
-        assert!(inline(json!({"consent_minutes": 30})).is_empty());
+        assert_eq!(inline(json!({"consent_minutes": 30})), Vec::<String>::new());
     }
 
     #[test]

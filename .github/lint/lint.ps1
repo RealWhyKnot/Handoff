@@ -3,34 +3,60 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-Set-Location $RepoRoot
+Set-StrictMode -Version Latest
 
-function Invoke-Native {
-    param([string]$Name, [scriptblock]$Command)
+function Invoke-Step {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][string] $Exe,
+        [string[]] $Arguments = @()
+    )
     Write-Host "== $Name"
-    & $Command
+    & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
 }
 
-& git config --local core.hooksPath .githooks
-
-if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
-    throw 'PSScriptAnalyzer is required. Install it with: Install-Module PSScriptAnalyzer -Scope CurrentUser'
-}
-Import-Module PSScriptAnalyzer
-$psFiles = & git ls-files '*.ps1' '*.psm1' '*.psd1'
-if ($psFiles) {
-    Write-Host '== PSScriptAnalyzer'
-    $findings = foreach ($file in $psFiles) {
-        Invoke-ScriptAnalyzer -Path (Join-Path $RepoRoot $file) -Severity Error
-    }
-    if ($findings) {
-        $findings | Format-Table -AutoSize
-        throw "PSScriptAnalyzer reported $($findings.Count) error(s)."
-    }
+function Resolve-Awk {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $onPath = Get-Command -Name awk -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    $git = Get-Command -Name git -CommandType Application | Select-Object -First 1
+    $bundled = Join-Path (Split-Path -Parent (Split-Path -Parent $git.Source)) 'usr\bin\awk.exe'
+    if (-not (Test-Path -LiteralPath $bundled)) { throw 'awk is required; it ships with Git for Windows' }
+    $bundled
 }
 
-Invoke-Native 'cargo fmt' { cargo fmt --check }
-Invoke-Native 'cargo clippy' { cargo clippy --all-targets --locked -- -D warnings }
-Invoke-Native 'cargo test' { cargo test --locked }
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
+Set-Location -LiteralPath $repoRoot
+
+git config --local core.hooksPath .githooks
+if ($LASTEXITCODE -ne 0) { throw "git config failed with exit code $LASTEXITCODE" }
+
+$rustFiles = @(git ls-files -- '*.rs')
+if ($LASTEXITCODE -ne 0) { throw "git ls-files failed with exit code $LASTEXITCODE" }
+
+Invoke-Step -Name 'style check' -Exe 'python' -Arguments @('-B', '.github/lint/style_check.py')
+Invoke-Step -Name 'cargo fmt' -Exe 'cargo' -Arguments @('fmt', '--check')
+$clippy = @('clippy', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings')
+Invoke-Step -Name 'cargo clippy' -Exe 'cargo' -Arguments $clippy
+Invoke-Step -Name 'cargo test' -Exe 'cargo' -Arguments @('test', '--workspace', '--all-targets', '--locked')
+if ($rustFiles.Count -gt 0) {
+    Invoke-Step -Name 'rust style' -Exe (Resolve-Awk) -Arguments (@('-f', '.github/lint/rust-style.awk') + $rustFiles)
+}
+$psLint = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'Invoke-PSLint.ps1'))
+Invoke-Step -Name 'PowerShell lint' -Exe 'pwsh' -Arguments $psLint
+
+if ($env:OS -ne 'Windows_NT') {
+    Invoke-Step -Name 'shell lint' -Exe 'bash' -Arguments @('.githooks/check-shell')
+} elseif ($env:LINT_WSL_DISTRO) {
+    $wsl = @('--distribution', $env:LINT_WSL_DISTRO, '--cd', $repoRoot, '--', 'bash', '.githooks/check-shell')
+    Invoke-Step -Name 'shell lint' -Exe 'wsl' -Arguments $wsl
+} else {
+    Write-Host '== shell lint skipped: set LINT_WSL_DISTRO to a WSL distro with shellcheck and shfmt'
+}
+exit 0

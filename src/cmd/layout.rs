@@ -63,7 +63,7 @@ pub fn clean_lines(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     for line in lines {
         let line = line.trim_end().to_string();
-        if line.is_empty() && out.last().map_or(true, |l: &String| l.is_empty()) {
+        if line.is_empty() && out.last().is_none_or(|l: &String| l.is_empty()) {
             continue;
         }
         out.push(line);
@@ -239,7 +239,7 @@ mod tests {
             clean_lines("\n\n  \nfirst   \n\n\n\nsecond\n\n"),
             owned(&["first", "", "second"])
         );
-        assert!(clean_lines(" \r\n\t\n").is_empty());
+        assert_eq!(clean_lines(" \r\n\t\n"), Vec::<String>::new());
     }
 
     #[test]

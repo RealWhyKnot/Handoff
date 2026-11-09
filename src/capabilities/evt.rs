@@ -1,4 +1,4 @@
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::proc::{fill, go_quote, int_arg, string_arg};
 use super::pwsh::ps_single_quote;
@@ -174,7 +174,7 @@ pub fn event_ids(raw: &str) -> Result<Vec<u32>, HandlerError> {
                 return Err(HandlerError::plain(format!(
                     "evt.snapshot: event ID {} is not a number from 0 to 65535",
                     go_quote(part)
-                )))
+                )));
             }
         }
     }
@@ -212,9 +212,11 @@ pub fn snapshot_script(args: &Args) -> Result<String, HandlerError> {
         "warning" => "1,2,3",
         "information" => "0,1,2,3,4",
         "verbose" => "0,1,2,3,4,5",
-        _ => return Err(HandlerError::plain(
-            "evt.snapshot: level must be all, critical, error, warning, information, or verbose",
-        )),
+        _ => {
+            return Err(HandlerError::plain(
+                "evt.snapshot: level must be all, critical, error, warning, information, or verbose",
+            ));
+        }
     };
     if !valid_log_name(&channel) {
         return Err(HandlerError::plain(format!(
@@ -303,10 +305,10 @@ async fn evt_providers(ctx: Ctx, args: Args) -> CapResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     #[test]

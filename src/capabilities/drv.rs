@@ -1,4 +1,4 @@
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::proc::{bool_arg, fill};
 use super::pwsh_out::{json_script_handler, run_pwsh_json};

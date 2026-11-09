@@ -1,182 +1,38 @@
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures_util::future::BoxFuture;
-use serde_json::{Map, Value};
-use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::for_display;
+pub use super::consent_ledger::Grant;
+pub use super::consent_ledger::Ledger;
+pub use super::consent_ledger::scope_text;
+pub use super::consent_policy::Ask;
+pub use super::consent_policy::CONSENT_ARG;
+pub use super::consent_policy::Category;
+pub use super::consent_policy::Decision;
+pub use super::consent_policy::GATED_KINDS;
+pub use super::consent_policy::MAX_CONSENT_MINUTES;
+pub use super::consent_policy::Term;
+pub use super::consent_policy::category_for;
+pub use super::consent_policy::grant_ttl;
+pub use super::consent_policy::take_ask;
+pub use super::consent_policy::term_for;
+pub use super::consent_prompt::PROMPT_TITLE;
+pub use super::consent_prompt::PromptParts;
+pub use super::consent_prompt::countdown_text;
+pub use super::consent_prompt::prompt_parts;
+pub use super::consent_prompt::prompt_text;
+pub use super::consent_prompt::system_prompt;
+pub use super::consent_prompt::typed_answer;
+pub use super::consent_prompt::typed_question;
 
 pub const EXEC_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 pub const FILES_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 pub const DENY_BACKOFF: Duration = Duration::from_secs(60);
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
-const PROMPT_CLOSE_WAIT: Duration = Duration::from_secs(3);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Category {
-    Files,
-    Processes,
-    Services,
-    Devices,
-    Network,
-    Capture,
-    Exec,
-    Power,
-}
-
-impl Category {
-    pub const ALL: [Category; 8] = [
-        Category::Files,
-        Category::Processes,
-        Category::Services,
-        Category::Devices,
-        Category::Network,
-        Category::Capture,
-        Category::Exec,
-        Category::Power,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Category::Files => "files",
-            Category::Processes => "processes",
-            Category::Services => "services",
-            Category::Devices => "devices",
-            Category::Network => "network",
-            Category::Capture => "capture",
-            Category::Exec => "exec",
-            Category::Power => "power",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Category::Files => "read, add, change, and delete your files",
-            Category::Processes => "start and stop programs",
-            Category::Services => "start and stop Windows services",
-            Category::Devices => "reprogram attached devices such as a Pico board",
-            Category::Network => {
-                "open connections to this PC and to devices on your local network such as your router"
-            }
-            Category::Capture => "capture your screen and set your clipboard",
-            Category::Exec => "run PowerShell commands",
-            Category::Power => "restart or shut down this computer",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    NotRequired,
-    PromptAllow,
-    PromptAllowOnce,
-    PromptAllowFor(u32),
-    PromptDeny,
-    GrantCached,
-    GrantExpired,
-}
-
-impl Decision {
-    pub fn as_str(self) -> Cow<'static, str> {
-        match self {
-            Decision::NotRequired => "not_required".into(),
-            Decision::PromptAllow => "prompt_allow".into(),
-            Decision::PromptAllowOnce => "prompt_allow_once".into(),
-            Decision::PromptAllowFor(minutes) => format!("prompt_allow_{minutes}m").into(),
-            Decision::PromptDeny => "prompt_deny".into(),
-            Decision::GrantCached => "grant_cached".into(),
-            Decision::GrantExpired => "grant_expired".into(),
-        }
-    }
-}
-
-pub const CONSENT_ARG: &str = "consent_minutes";
-pub const MAX_CONSENT_MINUTES: u32 = 240;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Ask {
-    #[default]
-    Default,
-    Once,
-    Minutes(u32),
-}
-
-pub fn take_ask(kind: &str, args: &mut Map<String, Value>) -> Result<Ask, String> {
-    let ask = match args.remove(CONSENT_ARG) {
-        None | Some(Value::Null) => return Ok(Ask::Default),
-        Some(v) => v.as_u64(),
-    };
-    match ask {
-        Some(0) => Ok(Ask::Once),
-        Some(n) if n <= u64::from(MAX_CONSENT_MINUTES) => Ok(Ask::Minutes(n as u32)),
-        _ => Err(format!(
-            "{kind}: '{CONSENT_ARG}' must be a whole number from 0 to {MAX_CONSENT_MINUTES} (0 means just this once)"
-        )),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Term {
-    Once,
-    Minutes(u32),
-    Session,
-}
-
-impl Term {
-    pub fn length(self) -> Option<Duration> {
-        match self {
-            Term::Minutes(m) => Some(Duration::from_secs(u64::from(m) * 60)),
-            _ => None,
-        }
-    }
-
-    pub fn text(self) -> String {
-        match self {
-            Term::Once => "just this once".to_string(),
-            Term::Minutes(m) => format!("for the next {}", minutes_text(m, true)),
-            Term::Session => "until this session ends".to_string(),
-        }
-    }
-
-    pub fn button(self) -> Option<String> {
-        match self {
-            Term::Once => None,
-            Term::Minutes(m) => Some(format!("Allow for {}", minutes_text(m, false))),
-            Term::Session => Some("Allow until this session ends".to_string()),
-        }
-    }
-}
-
-fn minutes_text(m: u32, after_next: bool) -> String {
-    match (m, m % 60) {
-        (1, _) if after_next => "minute".to_string(),
-        (1, _) => "1 minute".to_string(),
-        (60, _) if after_next => "hour".to_string(),
-        (60, _) => "1 hour".to_string(),
-        (m, 0) => format!("{} hours", m / 60),
-        (m, _) => format!("{m} minutes"),
-    }
-}
-
-pub fn term_for(category: Category, ask: Ask) -> Term {
-    if category == Category::Power {
-        return Term::Once;
-    }
-    match ask {
-        Ask::Once => Term::Once,
-        Ask::Minutes(m) => Term::Minutes(m),
-        Ask::Default => match grant_ttl(category) {
-            Some(ttl) if ttl.is_zero() => Term::Once,
-            Some(ttl) => Term::Minutes((ttl.as_secs() / 60) as u32),
-            None => Term::Session,
-        },
-    }
-}
+pub(super) const PROMPT_CLOSE_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
@@ -276,7 +132,7 @@ pub fn set_observer(observer: Option<Observer>) {
     *OBSERVER.lock().unwrap_or_else(|e| e.into_inner()) = observer;
 }
 
-fn tell(request: &Request, step: Step) {
+pub(super) fn tell(request: &Request, step: Step) {
     let observer = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(observer) = observer {
         observer(&Event {
@@ -286,538 +142,48 @@ fn tell(request: &Request, step: Step) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Grant {
-    pub category: Category,
-    pub granted_at: Instant,
-    pub expires_at: Option<Instant>,
-}
-
-impl Grant {
-    pub fn expires(&self) -> bool {
-        self.expires_at.is_some()
-    }
-}
-
-pub const GATED_KINDS: [(&str, Category); 18] = [
-    ("fs.upload", Category::Files),
-    ("fs.mkdir", Category::Files),
-    ("fs.delete", Category::Files),
-    ("fs.write", Category::Files),
-    ("pico.save", Category::Files),
-    ("proc.kill", Category::Processes),
-    ("proc.start", Category::Processes),
-    ("svc.control", Category::Services),
-    ("pico.bootsel", Category::Devices),
-    ("pico.flash", Category::Devices),
-    ("pico.reset", Category::Devices),
-    ("tunnel.open", Category::Network),
-    ("net.repair", Category::Network),
-    ("sys.screenshot", Category::Capture),
-    ("clip.set", Category::Capture),
-    ("ps.exec", Category::Exec),
-    ("sys.restart", Category::Power),
-    ("sys.shutdown", Category::Power),
-];
-
-pub fn category_for(kind: &str) -> Option<Category> {
-    GATED_KINDS
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map(|(_, c)| *c)
-}
-
-#[derive(Default)]
-struct State {
-    grants: BTreeMap<Category, Grant>,
-    denied: BTreeMap<Category, Instant>,
-    asking: BTreeSet<Category>,
-    deny_all: bool,
-    offset: Duration,
-}
-
-impl State {
-    fn now(&self) -> Instant {
-        Instant::now() + self.offset
-    }
-}
-
-pub struct Ledger {
-    prompt: Prompt,
-    timeout: Duration,
-    state: Mutex<State>,
-    notify: Notify,
-}
-
-struct AskGuard<'a> {
-    ledger: &'a Ledger,
-    category: Category,
-    armed: bool,
-}
-
-impl Drop for AskGuard<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            if let Ok(mut st) = self.ledger.state.lock() {
-                st.asking.remove(&self.category);
-            }
-            self.ledger.notify.notify_waiters();
-        }
-    }
-}
-
-type Gate = (Decision, Result<(), ConsentError>);
-
-impl Ledger {
-    pub fn new(prompt: Prompt) -> Ledger {
-        Ledger::with_timeout(prompt, PROMPT_TIMEOUT)
-    }
-
-    pub fn with_timeout(prompt: Prompt, timeout: Duration) -> Ledger {
-        Ledger {
-            prompt,
-            timeout,
-            state: Mutex::new(State::default()),
-            notify: Notify::new(),
-        }
-    }
-
-    pub fn prompt_timeout(&self) -> Duration {
-        self.timeout
-    }
-
-    async fn ask(&self, cancel: &CancellationToken, req: &Request) -> Result<Answer, ConsentError> {
-        let ask_cancel = cancel.child_token();
-        let prompt = (self.prompt)(ask_cancel.clone(), req.clone());
-        tokio::pin!(prompt);
-        tokio::select! {
-            answer = &mut prompt => answer,
-            _ = tokio::time::sleep(self.timeout) => {
-                ask_cancel.cancel();
-                let _ = tokio::time::timeout(PROMPT_CLOSE_WAIT, &mut prompt).await;
-                Err(ConsentError::TimedOut)
-            }
-            _ = cancel.cancelled() => {
-                ask_cancel.cancel();
-                let _ = tokio::time::timeout(PROMPT_CLOSE_WAIT, &mut prompt).await;
-                Err(ConsentError::Cancelled)
-            }
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub fn deny_everything(&self) {
-        self.lock().deny_all = true;
-    }
-
-    pub fn is_deny_everything(&self) -> bool {
-        self.lock().deny_all
-    }
-
-    #[cfg(test)]
-    pub fn advance(&self, by: Duration) {
-        self.lock().offset += by;
-    }
-
-    pub async fn require(&self, cancel: &CancellationToken, mut req: Request) -> Gate {
-        let category = match req.category {
-            Some(c) => c,
-            None => match category_for(&req.kind) {
-                Some(c) => {
-                    req.category = Some(c);
-                    c
-                }
-                None => return (Decision::NotRequired, Ok(())),
-            },
-        };
-        let term = term_for(category, req.ask);
-        let needs = match req.ask {
-            Ask::Minutes(_) => term.length(),
-            _ => None,
-        };
-
-        loop {
-            if cancel.is_cancelled() {
-                return (Decision::PromptDeny, Err(ConsentError::Cancelled));
-            }
-
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            let ask = {
-                let mut st = self.lock();
-                if st.deny_all {
-                    return (Decision::PromptDeny, Err(ConsentError::Denied));
-                }
-                let now = st.now();
-                if let Some(g) = st.grants.get(&category).copied() {
-                    match g.expires_at {
-                        Some(exp) if now >= exp => {
-                            st.grants.remove(&category);
-                        }
-                        Some(exp) if needs.is_some_and(|d| exp - now < d) => {}
-                        _ => return (Decision::GrantCached, Ok(())),
-                    }
-                }
-                if let Some(until) = st.denied.get(&category).copied() {
-                    if now < until {
-                        return (Decision::PromptDeny, Err(ConsentError::Denied));
-                    }
-                    st.denied.remove(&category);
-                }
-                if st.asking.contains(&category) {
-                    false
-                } else {
-                    st.asking.insert(category);
-                    true
-                }
-            };
-
-            if !ask {
-                tokio::select! {
-                    _ = &mut notified => {}
-                    _ = cancel.cancelled() => {
-                        return (Decision::PromptDeny, Err(ConsentError::Cancelled));
-                    }
-                }
-                continue;
-            }
-
-            let mut guard = AskGuard {
-                ledger: self,
-                category,
-                armed: true,
-            };
-            tell(&req, Step::Asking);
-            let picked = self.ask(cancel, &req).await.map(|answer| match answer {
-                Answer::No => None,
-                Answer::Once => Some(Term::Once),
-                Answer::ForGrant => Some(term),
-            });
-            tell(
-                &req,
-                match &picked {
-                    Ok(Some(term)) => Step::Allowed(*term),
-                    Ok(None) => Step::Denied,
-                    Err(ConsentError::TimedOut) => Step::TimedOut,
-                    Err(ConsentError::Cancelled) => Step::Withdrawn,
-                    Err(ConsentError::Denied) => Step::Denied,
-                    Err(ConsentError::Other(msg)) => Step::Failed(msg.clone()),
-                },
-            );
-            {
-                let mut st = self.lock();
-                st.asking.remove(&category);
-                match &picked {
-                    Ok(Some(Term::Once)) | Err(_) => {}
-                    Ok(Some(term)) => {
-                        let grant = new_grant(category, *term, st.now());
-                        st.grants.insert(category, grant);
-                    }
-                    Ok(None) => {
-                        let until = st.now() + DENY_BACKOFF;
-                        st.denied.insert(category, until);
-                    }
-                }
-            }
-            guard.armed = false;
-            self.notify.notify_waiters();
-
-            return match picked {
-                Err(e) => (Decision::PromptDeny, Err(e)),
-                Ok(None) => (Decision::PromptDeny, Err(ConsentError::Denied)),
-                Ok(Some(Term::Once)) => (Decision::PromptAllowOnce, Ok(())),
-                Ok(Some(Term::Minutes(m))) => (Decision::PromptAllowFor(m), Ok(())),
-                Ok(Some(Term::Session)) => (Decision::PromptAllow, Ok(())),
-            };
-        }
-    }
-
-    pub fn grants(&self) -> Vec<Grant> {
-        let st = self.lock();
-        let now = st.now();
-        let mut out: Vec<Grant> = st
-            .grants
-            .values()
-            .filter(|g| match g.expires_at {
-                Some(exp) => now < exp,
-                None => true,
-            })
-            .copied()
-            .collect();
-        out.sort_by_key(|g| g.category.as_str());
-        out
-    }
-
-    pub fn revoke_all(&self) -> usize {
-        let mut st = self.lock();
-        let n = st.grants.len();
-        st.grants.clear();
-        st.denied.clear();
-        n
-    }
-}
-
-pub fn grant_ttl(category: Category) -> Option<Duration> {
-    match category {
-        Category::Exec => Some(EXEC_GRANT_TTL),
-        Category::Files => Some(FILES_GRANT_TTL),
-        Category::Power => Some(Duration::ZERO),
-        _ => None,
-    }
-}
-
-pub fn scope_text(category: Option<Category>) -> String {
-    match category {
-        Some(c) => term_for(c, Ask::Default).text(),
-        None => Term::Session.text(),
-    }
-}
-
-fn new_grant(category: Category, term: Term, now: Instant) -> Grant {
-    Grant {
-        category,
-        granted_at: now,
-        expires_at: term.length().map(|d| now + d),
-    }
-}
-
-const SUMMARY_CHARS: usize = 2000;
-const SUMMARY_LINES: usize = 40;
-const DETAIL_CHARS: usize = 200_000;
-const DETAIL_LINES: usize = 20_000;
-const CUT_NOTE: &str = "(The rest is too long to show here.)";
-
-pub const PROMPT_TITLE: &str = "Allow this Handoff request?";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptParts {
-    pub instruction: String,
-    pub summary: String,
-    pub scope: String,
-    pub caution: String,
-    pub command: Option<String>,
-    pub detail: Option<String>,
-    pub grant_button: Option<String>,
-}
-
-pub fn prompt_parts(req: &Request) -> PromptParts {
-    let shown = for_display(&req.summary, SUMMARY_CHARS, SUMMARY_LINES);
-    let text = shown.text.trim();
-    let (head, command) = match text.split_once("\n\n") {
-        Some((head, rest)) => (head.trim().to_string(), Some(rest.trim().to_string())),
-        None if text.contains('\n') => (String::new(), Some(text.to_string())),
-        None => (text.to_string(), None),
-    };
-    let mut command = command.filter(|c| !c.is_empty());
-    if shown.cut {
-        match &mut command {
-            Some(c) => c.push_str(&format!("\n{CUT_NOTE}")),
-            None => command = Some(CUT_NOTE.to_string()),
-        }
-    }
-    let detail = match &req.detail {
-        Some(full) => {
-            let shown = for_display(full, DETAIL_CHARS, DETAIL_LINES);
-            let mut text = shown.text;
-            if shown.cut {
-                text.push_str(&format!("\n{CUT_NOTE}"));
-            }
-            Some(text).filter(|t| !t.is_empty())
-        }
-        None => command.clone(),
-    };
-    let head = if head.is_empty() && command.is_none() {
-        "Run a command that can change this computer.".to_string()
-    } else {
-        head
-    };
-    let term = req.term();
-    let granted = req
-        .category
-        .map(Category::label)
-        .unwrap_or("run this kind of command");
-    let scope = match term {
-        Term::Once => "If you allow it, only this request goes ahead. They have to ask again for anything else."
-            .to_string(),
-        term => format!(
-            "If you allow it, they can {granted} {}. For any other kind of change they have to ask you again.",
-            term.text()
-        ),
-    };
-    PromptParts {
-        instruction: "The person helping you wants to make a change on this computer".to_string(),
-        summary: head,
-        scope,
-        caution: "Only allow it if you know this person and asked them for help.".to_string(),
-        command,
-        detail,
-        grant_button: term.button(),
-    }
-}
-
-impl PromptParts {
-    pub fn scope_line(&self) -> String {
-        let mut out = self.scope.clone();
-        if self.grant_button.is_some() {
-            out.push_str(" Choose Just this once to allow only this request.");
-        }
-        out
-    }
-}
-
-pub fn countdown_text(left: Duration) -> String {
-    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
-    format!(
-        "If you don't answer, Handoff says no for you in {}:{:02}.",
-        secs / 60,
-        secs % 60
-    )
-}
-
-pub fn prompt_text(req: &Request) -> String {
-    let parts = prompt_parts(req);
-    let mut out = format!("{}.\n\n", parts.instruction);
-    for piece in [Some(&parts.summary), parts.command.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        if !piece.is_empty() {
-            out.push_str(piece);
-            out.push_str("\n\n");
-        }
-    }
-    out.push_str(&parts.scope);
-    out.push_str("\n\n");
-    out.push_str(&parts.caution);
-    out.push_str(&format!(
-        " If you don't answer within {} minutes, Handoff says no for you.",
-        PROMPT_TIMEOUT.as_secs() / 60
-    ));
-    out
-}
-
-pub fn system_prompt() -> Prompt {
-    Arc::new(|cancel, req| Box::pin(system_prompt_impl(cancel, req)))
-}
-
 #[cfg(windows)]
 #[path = "consent_dialog.rs"]
 pub mod dialog;
 
 #[cfg(windows)]
-async fn system_prompt_impl(
-    cancel: CancellationToken,
-    req: Request,
-) -> Result<Answer, ConsentError> {
-    use std::sync::atomic::{AtomicU32, Ordering};
+#[path = "consent_dialog_layout.rs"]
+mod dialog_layout;
 
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetCurrentThreadId() -> u32;
-    }
+#[cfg(windows)]
+#[path = "consent_dialog_proc.rs"]
+mod dialog_proc;
 
-    if cancel.is_cancelled() {
-        return Err(ConsentError::Cancelled);
-    }
-    let thread = Arc::new(AtomicU32::new(0));
-    let seen = thread.clone();
-    let shown = req.clone();
-    let mut task = tokio::task::spawn_blocking(move || {
-        seen.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
-        dialog::show(&shown, &dialog::Options::default())
-    });
-    tokio::select! {
-        joined = &mut task => {
-            joined.map_err(|e| ConsentError::Other(format!("consent prompt failed: {e}")))?
-        }
-        _ = cancel.cancelled() => {
-            let deadline = Instant::now() + PROMPT_CLOSE_WAIT;
-            let mut closed = false;
-            loop {
-                let id = thread.load(Ordering::SeqCst);
-                if id != 0 {
-                    dialog::close(id);
-                }
-                match tokio::time::timeout(Duration::from_millis(100), &mut task).await {
-                    Ok(_) => {
-                        closed = true;
-                        break;
-                    }
-                    Err(_) if Instant::now() >= deadline => break,
-                    Err(_) => {}
-                }
-            }
-            crate::slog!("consent prompt withdrawn kind={} closed={closed}", req.kind);
-            Err(ConsentError::Cancelled)
-        }
-    }
-}
-
-pub fn typed_question(term: Term) -> String {
-    match term {
-        Term::Once => {
-            "Type y and press Enter to allow it. Press Enter on its own to say no: ".to_string()
-        }
-        term => format!(
-            "Type y and press Enter to allow it {}, or o to allow just this once. Press Enter on its own to say no: ",
-            term.text()
-        ),
-    }
-}
-
-pub fn typed_answer(line: &str, term: Term) -> Answer {
-    match line.trim().to_lowercase().as_str() {
-        "y" | "yes" if term == Term::Once => Answer::Once,
-        "y" | "yes" => Answer::ForGrant,
-        "o" | "once" => Answer::Once,
-        _ => Answer::No,
-    }
-}
-
-#[cfg(not(windows))]
-async fn system_prompt_impl(
-    cancel: CancellationToken,
-    req: Request,
-) -> Result<Answer, ConsentError> {
-    if cancel.is_cancelled() {
-        return Err(ConsentError::Cancelled);
-    }
-    let term = req.term();
-    eprintln!("{}", prompt_text(&req));
-    eprint!("{}", typed_question(term));
-    let read = tokio::task::spawn_blocking(move || {
-        let mut line = String::new();
-        match std::io::stdin().read_line(&mut line) {
-            Ok(0) => Err(ConsentError::Other("no answer could be read".into())),
-            Ok(_) => Ok(typed_answer(&line, term)),
-            Err(e) => Err(ConsentError::Other(e.to_string())),
-        }
-    });
-    tokio::select! {
-        joined = read => joined.map_err(|e| ConsentError::Other(e.to_string()))?,
-        _ = cancel.cancelled() => Err(ConsentError::Cancelled),
-    }
-}
-
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg(windows)]
 #[path = "consent_preview.rs"]
 mod preview;
 
 #[cfg(test)]
+#[cfg(windows)]
+#[path = "consent_preview_capture.rs"]
+mod preview_capture;
+
+#[cfg(test)]
+#[cfg(windows)]
+#[path = "consent_preview_inspect.rs"]
+mod preview_inspect;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consent_prompt::CUT_NOTE;
+    use crate::consent_prompt::DETAIL_LINES;
+    use serde_json::Map;
+    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     fn counting(answer: Answer, delay_ms: u64) -> (Prompt, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
-        let c = calls.clone();
+        let c = Arc::clone(&calls);
         let prompt: Prompt = Arc::new(move |_, _| {
-            let c = c.clone();
+            let c = Arc::clone(&c);
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
                 if delay_ms > 0 {
@@ -863,7 +229,7 @@ mod tests {
         let l = Arc::new(Ledger::new(p));
         let mut tasks = Vec::new();
         for _ in 0..8 {
-            let l = l.clone();
+            let l = Arc::clone(&l);
             tasks.push(tokio::spawn(async move {
                 l.require(&CancellationToken::new(), Request::for_kind("ps.exec", ""))
                     .await
@@ -881,7 +247,7 @@ mod tests {
         let l = Arc::new(Ledger::new(p));
         let mut tasks = Vec::new();
         for kind in ["ps.exec", "fs.delete", "svc.control"] {
-            let l = l.clone();
+            let l = Arc::clone(&l);
             tasks.push(tokio::spawn(async move {
                 l.require(&CancellationToken::new(), Request::for_kind(kind, ""))
                     .await
@@ -993,7 +359,7 @@ mod tests {
     async fn dropped_prompt_releases_the_category() {
         let (slow, _) = counting(Answer::ForGrant, 5_000);
         let l = Arc::new(Ledger::new(slow));
-        let l2 = l.clone();
+        let l2 = Arc::clone(&l);
         let task = tokio::spawn(async move {
             l2.require(&CancellationToken::new(), Request::for_kind("ps.exec", ""))
                 .await
@@ -1011,7 +377,7 @@ mod tests {
             assert_eq!(category_for(kind), Some(category));
         }
         for category in Category::ALL {
-            assert!(!category.as_str().is_empty());
+            assert_ne!(category.as_str(), "");
         }
     }
 
@@ -1111,9 +477,9 @@ mod tests {
 
     fn waits_for_cancel() -> (Prompt, Arc<AtomicUsize>) {
         let closed = Arc::new(AtomicUsize::new(0));
-        let c = closed.clone();
+        let c = Arc::clone(&closed);
         let prompt: Prompt = Arc::new(move |cancel: CancellationToken, _| {
-            let c = c.clone();
+            let c = Arc::clone(&c);
             Box::pin(async move {
                 cancel.cancelled().await;
                 c.fetch_add(1, Ordering::SeqCst);
@@ -1140,7 +506,7 @@ mod tests {
         let (p, closed) = waits_for_cancel();
         let l = Arc::new(Ledger::new(p));
         let cancel = tok();
-        let l2 = l.clone();
+        let l2 = Arc::clone(&l);
         let c2 = cancel.clone();
         let task = tokio::spawn(async move { l2.require(&c2, req("fs.delete")).await });
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -1171,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn observer_hears_the_question_and_the_answer() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let s2 = seen.clone();
+        let s2 = Arc::clone(&seen);
         set_observer(Some(Arc::new(move |e: &Event| {
             if e.request.summary == "observer-test" {
                 s2.lock().unwrap().push(e.step.clone());
@@ -1191,7 +557,7 @@ mod tests {
     }
 
     fn args_of(v: serde_json::Value) -> Map<String, Value> {
-        v.as_object().cloned().unwrap()
+        serde_json::from_value(v).unwrap()
     }
 
     #[test]
@@ -1414,7 +780,7 @@ mod tests {
     #[tokio::test]
     async fn power_stays_one_time_whatever_is_asked() {
         let terms = Arc::new(Mutex::new(Vec::new()));
-        let t2 = terms.clone();
+        let t2 = Arc::clone(&terms);
         let p: Prompt = Arc::new(move |_, req: Request| {
             t2.lock().unwrap().push(req.term());
             Box::pin(async { Ok(Answer::ForGrant) })
@@ -1433,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn observer_hears_what_the_host_picked() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let s2 = seen.clone();
+        let s2 = Arc::clone(&seen);
         set_observer(Some(Arc::new(move |e: &Event| {
             if e.request.summary == "picked-test" {
                 s2.lock().unwrap().push(e.step.clone());

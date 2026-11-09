@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::{json_script_handler, run_pwsh_json};
@@ -316,11 +316,11 @@ pub fn connections_script(args: &Args) -> Result<String, HandlerError> {
     let raw_state = arg_string(args, "state").unwrap_or_default();
     let mut max_results = arg_int(args, "max_results").unwrap_or(200);
     let pid_filter = match arg_int(args, "pid") {
-        Some(pid) if (1..=u32::MAX as i64).contains(&pid) => format!(" -OwningProcess {pid}"),
+        Some(pid) if (1..=i64::from(u32::MAX)).contains(&pid) => format!(" -OwningProcess {pid}"),
         Some(_) => {
             return Err(HandlerError::plain(
                 "net.connections: pid must be a positive process id",
-            ))
+            ));
         }
         None => String::new(),
     };
@@ -391,7 +391,7 @@ mod tests {
     use serde_json::json;
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn err_of<T>(r: Result<T, HandlerError>) -> String {

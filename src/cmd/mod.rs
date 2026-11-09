@@ -1,16 +1,27 @@
 pub mod connect;
 pub mod exec;
+mod exec_describe;
+mod exec_relay;
+mod exec_render;
 pub mod flags;
 pub mod host;
 pub mod keys;
 pub mod layout;
 pub mod menu;
 pub mod new;
+mod new_jobs;
+mod new_progress;
+mod new_reconnect;
 pub mod paths;
 pub mod pause;
 #[cfg(test)]
 mod preview;
 pub mod summary;
 pub mod tunnel;
+mod tunnel_args;
+mod tunnel_client;
+mod tunnel_http;
+mod tunnel_session;
+mod tunnel_wire;
 pub mod update;
 pub mod version;

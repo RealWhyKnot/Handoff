@@ -1,3 +1,14 @@
+use super::fs::bool_arg;
+use super::fs::err;
+use super::fs::hex;
+use super::fs::path_err;
+use super::fs::run_blocking;
+use super::fs::str_arg;
+use super::fs_meta::fmt_time;
+use super::fs_meta::lstat;
+use super::fs_meta::stat;
+use super::fs_path::local_path;
+use super::fs_path::volume_len;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -5,13 +16,9 @@ use std::path::Path;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::dispatch::{for_display, handler, CapResult, HandlerError, Router};
+use crate::dispatch::{CapResult, HandlerError, Router, for_display, handler};
 
 use super::consent::require_risk_consent_showing;
-use super::fs::{
-    bool_arg, err, fmt_time, hex, local_path, lstat, path_err, run_blocking, stat, str_arg,
-    volume_len,
-};
 pub(crate) use super::fs_guard::{guard_delete_path, guard_write_path};
 
 pub fn register(r: &mut Router) {
@@ -39,7 +46,7 @@ pub fn register(r: &mut Router) {
                 "fs.download",
                 handler(|ctx, args| async move {
                     let cancel = ctx.cancel.clone();
-                    run_blocking(move || super::fs::download(args, &cancel)).await
+                    run_blocking(move || super::fs_read::download(&args, &cancel)).await
                 }),
             ),
             (
@@ -238,17 +245,17 @@ pub(crate) fn mkdir_all(path: &str) -> Result<(), HandlerError> {
     match fs::create_dir(path) {
         Ok(()) => Ok(()),
         Err(e) => {
-            if let Ok(info) = lstat(path) {
-                if info.dir {
-                    return Ok(());
-                }
+            if let Ok(info) = lstat(path)
+                && info.dir
+            {
+                return Ok(());
             }
             Err(path_err("mkdir", path, &e))
         }
     }
 }
 
-fn delete(path: &str, recursive: bool) -> CapResult {
+pub(super) fn delete(path: &str, recursive: bool) -> CapResult {
     let info = lstat(path).map_err(|e| path_err("GetFileAttributesEx", path, &e))?;
     if info.dir && !recursive {
         return Err(err(format!(
@@ -258,7 +265,7 @@ fn delete(path: &str, recursive: bool) -> CapResult {
     let res: io::Result<()> = if info.dir {
         fs::remove_dir_all(path)
     } else {
-        fs::remove_file(path).or_else(|e| fs::remove_dir(path).map_err(|_| e))
+        fs::remove_file(path).or_else(|e| fs::remove_dir(path).map_err(|_also_failed| e))
     };
     res.map_err(|e| path_err("remove", path, &e))?;
     Ok(json!({
@@ -334,11 +341,12 @@ pub(crate) fn go_base64_decode(src: &str) -> Result<Vec<u8>, usize> {
             dlen = j;
             break;
         }
-        let v = (dbuf[0] as u32) << 18
-            | (dbuf[1] as u32) << 12
-            | (dbuf[2] as u32) << 6
-            | dbuf[3] as u32;
-        let bytes = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
+        let v = u32::from(dbuf[0]) << 18
+            | u32::from(dbuf[1]) << 12
+            | u32::from(dbuf[2]) << 6
+            | u32::from(dbuf[3]);
+        let [_, high, mid, low] = v.to_be_bytes();
+        let bytes = [high, mid, low];
         out.extend_from_slice(&bytes[..dlen - 1]);
         if let Some(off) = trailing {
             return Err(off);
@@ -354,11 +362,11 @@ mod tests {
     use crate::consent::Prompt;
     use crate::dispatch::{Args, Ctx};
     use serde_json::Value;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn router() -> Router {
@@ -369,9 +377,9 @@ mod tests {
 
     fn prompt(allow: bool) -> (Prompt, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
-        let c = calls.clone();
+        let c = Arc::clone(&calls);
         let p: Prompt = Arc::new(move |_, _| {
-            let c = c.clone();
+            let c = Arc::clone(&c);
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
                 Ok(if allow {
@@ -485,8 +493,14 @@ mod tests {
             ("C:\\Users\\bob\\.ssh", "SSH keys"),
             ("C:\\Users\\bob\\.SSH.\\authorized_keys", "SSH keys"),
             ("C:\\Users\\bob\\.ssh \\config", "SSH keys"),
-            ("C:\\Users\\bob\\.ssh\\new\\deeper\\authorized_keys", "SSH keys"),
-            ("C:\\ProgramData\\ssh\\administrators_authorized_keys", "SSH keys"),
+            (
+                "C:\\Users\\bob\\.ssh\\new\\deeper\\authorized_keys",
+                "SSH keys",
+            ),
+            (
+                "C:\\ProgramData\\ssh\\administrators_authorized_keys",
+                "SSH keys",
+            ),
             ("C:\\ProgramData\\ssh\\sshd_config", "SSH keys"),
             ("C:\\ProgramData\\ssh", "SSH keys"),
             ("D:\\ProgramData\\SSH\\sshd_config", "SSH keys"),
@@ -521,14 +535,22 @@ mod tests {
         ] {
             for kind in ["fs.upload", "fs.mkdir", "fs.write"] {
                 let out = guard_write_path(kind, path);
-                let msg = out.as_ref().err().map(|e| e.message.clone()).unwrap_or_default();
+                let msg = out
+                    .as_ref()
+                    .err()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_default();
                 assert!(
                     msg.starts_with(&format!("{kind}: ")) && msg.contains(why),
                     "{kind} {path}: {out:?}"
                 );
             }
             let startup_entry = why == "Startup folder" && !path.ends_with("Startup");
-            assert_eq!(guard_delete_path(path).is_ok(), startup_entry, "delete {path}");
+            assert_eq!(
+                guard_delete_path(path).is_ok(),
+                startup_entry,
+                "delete {path}"
+            );
         }
         for path in [
             "C:\\Users\\bob\\Documents\\ssh-notes.txt",
@@ -538,7 +560,10 @@ mod tests {
             "C:\\Users\\bob\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Tools\\x.lnk",
             "C:\\ProgramData\\sshd-backup\\notes.txt",
         ] {
-            assert!(guard_write_path("fs.upload", path).is_ok(), "{path} was blocked");
+            assert!(
+                guard_write_path("fs.upload", path).is_ok(),
+                "{path} was blocked"
+            );
             assert!(guard_delete_path(path).is_ok(), "delete {path} was blocked");
         }
     }
@@ -688,9 +713,11 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"hi");
 
         let again = run("fs.upload", json!({"path": path, "data_base64": "eW8="})).await;
-        assert!(again
-            .error
-            .contains("already exists (pass overwrite=true to replace)"));
+        assert!(
+            again
+                .error
+                .contains("already exists (pass overwrite=true to replace)")
+        );
         let over = run(
             "fs.upload",
             json!({"path": path, "data_base64": "eW8=", "overwrite": true}),
@@ -738,9 +765,9 @@ mod tests {
 
     fn recording_prompt() -> (Prompt, Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let s = seen.clone();
+        let s = Arc::clone(&seen);
         let p: Prompt = Arc::new(move |_, req| {
-            s.lock().unwrap().push(req.summary.clone());
+            s.lock().unwrap().push(req.summary);
             Box::pin(async move { Ok(crate::consent::Answer::No) })
         });
         (p, seen)
@@ -784,11 +811,9 @@ mod tests {
             "deep\\".repeat(90)
         );
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let s = seen.clone();
+        let s = Arc::clone(&seen);
         let p: Prompt = Arc::new(move |_, req| {
-            s.lock()
-                .unwrap()
-                .push((req.summary.clone(), req.detail.clone()));
+            s.lock().unwrap().push((req.summary, req.detail));
             Box::pin(async move { Ok(crate::consent::Answer::No) })
         });
         let _guard = SessionGuard::with_prompt(p);
@@ -819,11 +844,11 @@ mod tests {
         )
         .await;
         super::super::consent::set_session_ledger(Arc::new(crate::consent::Ledger::new(
-            recording_prompt_into(seen.clone()),
+            recording_prompt_into(Arc::clone(&seen)),
         )));
         run("fs.mkdir", json!({ "path": sneaky })).await;
         super::super::consent::set_session_ledger(Arc::new(crate::consent::Ledger::new(
-            recording_prompt_into(seen.clone()),
+            recording_prompt_into(Arc::clone(&seen)),
         )));
         run("fs.delete", json!({"path": sneaky, "recursive": true})).await;
 
@@ -831,9 +856,15 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                format!("Saves a file from your helper to {clean} on this computer (2 bytes). If a file is already there, it will be replaced."),
-                format!("Creates the folder {clean} on this computer, along with any missing parent folders."),
-                format!("Deletes {clean} from this computer. If this is a folder, everything inside it is deleted too. Handoff can't undo this."),
+                format!(
+                    "Saves a file from your helper to {clean} on this computer (2 bytes). If a file is already there, it will be replaced."
+                ),
+                format!(
+                    "Creates the folder {clean} on this computer, along with any missing parent folders."
+                ),
+                format!(
+                    "Deletes {clean} from this computer. If this is a folder, everything inside it is deleted too. Handoff can't undo this."
+                ),
             ]
         );
         assert!(!Path::new(&clean).exists());
@@ -841,7 +872,7 @@ mod tests {
 
     fn recording_prompt_into(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Prompt {
         Arc::new(move |_, req| {
-            seen.lock().unwrap().push(req.summary.clone());
+            seen.lock().unwrap().push(req.summary);
             Box::pin(async move { Ok(crate::consent::Answer::No) })
         })
     }

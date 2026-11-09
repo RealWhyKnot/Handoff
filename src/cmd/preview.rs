@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::host::{self, Ending};
 use super::summary::{describe_args, summarize_result};
 use crate::console;
 use crate::dispatch::Outcome;
 
-pub struct Sample {
+pub(crate) struct Sample {
     pub label: Option<&'static str>,
     pub kind: &'static str,
     pub args: Map<String, Value>,
@@ -56,7 +56,7 @@ fn pipeline() -> String {
 }
 
 fn args(v: Value) -> Map<String, Value> {
-    v.as_object().cloned().unwrap()
+    serde_json::from_value(v).unwrap()
 }
 
 fn done(ms: i64, result: Value) -> Outcome {
@@ -77,7 +77,7 @@ fn failed(ms: i64, error: &str) -> Outcome {
     }
 }
 
-pub fn samples() -> Vec<Sample> {
+pub(crate) fn samples() -> Vec<Sample> {
     let huge: String = (1..=2000)
         .map(|i| format!("Write-Output \"line {i}\"\n"))
         .collect();
@@ -93,10 +93,7 @@ pub fn samples() -> Vec<Sample> {
             label: Some("Run script"),
             kind: "ps.exec",
             args: args(json!({"script": WIFI})),
-            out: done(
-                3420,
-                json!({"exit_code": 0, "stdout": "x".repeat(1843)}),
-            ),
+            out: done(3420, json!({"exit_code": 0, "stdout": "x".repeat(1843)})),
             ending: Ending::Done,
         },
         Sample {
@@ -113,7 +110,10 @@ pub fn samples() -> Vec<Sample> {
             label: Some("Run script"),
             kind: "ps.exec",
             args: args(json!({"script": "Get-Date"})),
-            out: done(380, json!({"exit_code": 0, "stdout": "Monday, 19 October 2026 14:02:11\r\n"})),
+            out: done(
+                380,
+                json!({"exit_code": 0, "stdout": "Monday, 19 October 2026 14:02:11\r\n"}),
+            ),
             ending: Ending::Done,
         },
         Sample {
@@ -133,7 +133,9 @@ pub fn samples() -> Vec<Sample> {
         Sample {
             label: Some("Fetch URL"),
             kind: "net.curl",
-            args: args(json!({"url": format!("https://example.com/api/v2/search?q={}&page=1", "network%20diagnostics%20".repeat(12)), "method": "GET"})),
+            args: args(
+                json!({"url": format!("https://example.com/api/v2/search?q={}&page=1", "network%20diagnostics%20".repeat(12)), "method": "GET"}),
+            ),
             out: done(640, json!({"size": 1520})),
             ending: Ending::Done,
         },

@@ -9,6 +9,7 @@ pub fn owns_console() -> bool {
     use windows::Win32::System::Console::GetConsoleProcessList;
 
     let mut pids = [0u32; 4];
+    // SAFETY: pids is a live buffer the call fills with at most its own length.
     let n = unsafe { GetConsoleProcessList(&mut pids) };
     n == 1
 }
@@ -22,7 +23,7 @@ pub fn pause_if_own_console() {
     if !owns_console() || !stdin_is_terminal() {
         return;
     }
-    print!("\npress Enter to close...");
+    crate::out!("\npress Enter to close...");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     let _ = std::io::stdin().lock().read_line(&mut line);

@@ -1,10 +1,35 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub fn millis_i64(d: std::time::Duration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+}
+
+pub fn count_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+pub fn count_i64(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+pub fn size_usize(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+pub fn positive_u64(n: i64) -> u64 {
+    u64::try_from(n).unwrap_or(0)
+}
+
+pub fn to_usize(n: u32) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
 pub fn now_ms() -> i64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_millis() as i64,
-        Err(e) => -(e.duration().as_millis() as i64),
+        Ok(d) => millis_i64(d),
+        Err(e) => -millis_i64(e.duration()),
     }
 }
 
@@ -16,8 +41,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1)
+        .expect("the day of a month is between 1 and 31");
+    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 })
+        .expect("the month of a year is between 1 and 12");
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
@@ -127,14 +154,15 @@ pub fn look_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(windows)]
 pub fn hostname() -> String {
-    use windows::core::PWSTR;
     use windows::Win32::System::WindowsProgramming::GetComputerNameW;
+    use windows::core::PWSTR;
 
     let mut buf = [0u16; 64];
-    let mut len = buf.len() as u32;
+    let mut len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+    // SAFETY: buf is a live array and len holds its length in UTF-16 units.
     let ok = unsafe { GetComputerNameW(Some(PWSTR(buf.as_mut_ptr())), &mut len) };
     match ok {
-        Ok(()) => String::from_utf16_lossy(&buf[..len as usize]),
+        Ok(()) => String::from_utf16_lossy(&buf[..to_usize(len)]),
         Err(_) => env_var("COMPUTERNAME"),
     }
 }
@@ -197,8 +225,8 @@ pub fn go_quote(s: &str) -> String {
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
             '\u{b}' => out.push_str("\\v"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
+            c if u32::from(c) < 0x20 || u32::from(c) == 0x7f => {
+                let _ = write!(out, "\\x{:02x}", u32::from(c));
             }
             c => out.push(c),
         }
@@ -276,7 +304,7 @@ pub fn parse_go_duration(input: &str) -> Option<std::time::Duration> {
         if !frac_digits.is_empty() {
             let digits = &frac_digits[..frac_digits.len().min(18)];
             let frac: u128 = digits.parse().ok()?;
-            nanos += frac * unit / 10u128.pow(digits.len() as u32);
+            nanos += frac * unit / 10u128.pow(u32::try_from(digits.len()).ok()?);
         }
         total = total.checked_add(nanos)?;
     }
@@ -293,7 +321,7 @@ fn fmt_frac(v: u128, prec: u32) -> String {
     if frac == 0 {
         return int.to_string();
     }
-    let frac = format!("{frac:0width$}", width = prec as usize);
+    let frac = format!("{frac:0width$}", width = to_usize(prec));
     format!("{int}.{}", frac.trim_end_matches('0'))
 }
 

@@ -4,7 +4,7 @@ use std::time::Duration;
 use handoff::capabilities::{self, consent::set_session_ledger};
 use handoff::consent::{Ledger, Prompt};
 use handoff::dispatch::{Ctx, Router};
-use handoff::relay::{mint, Bridge};
+use handoff::relay::{Bridge, mint};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -54,7 +54,7 @@ async fn live_tunnel_host() {
                 if cancel.is_cancelled() {
                     break;
                 }
-                eprintln!("recv: {err}; reconnecting");
+                handoff::errln!("recv: {err}; reconnecting");
                 if bridge.reconnect(&cancel).await.is_err() {
                     break;
                 }
@@ -65,14 +65,17 @@ async fn live_tunnel_host() {
             capabilities::enqueue_tunnel_frame(&cmd.kind, &cmd.extras);
             continue;
         }
-        let router = router.clone();
+        let router = Arc::clone(&router);
         let bridge = bridge.clone();
         let ctx = Ctx::new(cancel.child_token());
         tokio::spawn(async move {
             let outcome = router.dispatch(ctx, &cmd.kind, cmd.extras.clone()).await;
-            eprintln!(
+            handoff::errln!(
                 "{} {} ok={} err={}",
-                cmd.id, cmd.kind, outcome.ok, outcome.error
+                cmd.id,
+                cmd.kind,
+                outcome.ok,
+                outcome.error
             );
             let _ = bridge.send_command_result(&cmd.id, &outcome).await;
         });

@@ -98,7 +98,7 @@ impl Logger {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| io::Error::other("audit log lock poisoned"))?;
+            .map_err(|_poisoned| io::Error::other("audit log lock poisoned"))?;
 
         let day = util::utc_day();
         if inner.file.is_none() || inner.day != day {
@@ -133,7 +133,7 @@ mod tests {
     use serde_json::json;
 
     fn args(v: Value) -> Map<String, Value> {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     #[test]

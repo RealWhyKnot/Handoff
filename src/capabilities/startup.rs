@@ -1,4 +1,4 @@
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::proc::{fill, int_arg, load_specs};
 use super::pwsh_out::run_pwsh_json;
@@ -56,10 +56,10 @@ async fn startup_list(ctx: Ctx, args: Args) -> CapResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     #[test]

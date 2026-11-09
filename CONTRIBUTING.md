@@ -17,7 +17,7 @@ cargo build --release
 
 1. Fork and branch off `main`.
 2. Keep the change small. A cleanup you noticed on the way goes in its own PR.
-3. Run `./.github/lint/lint.ps1`. It runs `cargo fmt --check`, `cargo clippy` with warnings as errors and `cargo test`, the same checks CI runs.
+3. Run `./.github/lint/lint.ps1`. It runs the style check, `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` and the PowerShell and shell lint, the same checks CI runs. On Windows the shell lint runs in WSL: set `LINT_WSL_DISTRO` to a distro that has shellcheck and shfmt, or it is skipped.
 4. Open the PR and fill in the template.
 
 Commit subjects look like `type(scope): summary`, where `type` is one of `feat`, `fix`, `chore`, `ci`, `docs`, `refactor`, `revert`, `test`, `perf`, `diag` or `style`. The commit-msg hook adds the version stamp at the end.

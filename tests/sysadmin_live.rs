@@ -7,10 +7,10 @@ use handoff::capabilities::consent::set_session_ledger;
 use handoff::capabilities::{app, evt, proc, ps, reg, sec, startup, storage, task};
 use handoff::consent::{Ledger, Prompt};
 use handoff::dispatch::{Args, Ctx, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn args(v: Value) -> Args {
-    v.as_object().cloned().unwrap_or_default()
+    serde_json::from_value(v).unwrap_or_default()
 }
 
 fn router() -> Router {

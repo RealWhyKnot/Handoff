@@ -1,12 +1,19 @@
+use super::exec_describe::describe_command;
+use super::exec_describe::exec_list;
+use super::exec_relay::run_command;
+use super::exec_render::print_exec_result;
+use super::exec_render::reply_field;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
-use super::flags::{parse_options, Def, FlagError};
-use crate::capabilities::{self, pwsh::normalize_numbers};
-use crate::consent::{self, category_for};
+pub use super::exec_describe::describe_spec;
+pub use super::exec_relay::build_exec_payload;
+pub use super::exec_relay::reshape_result;
+pub use super::exec_relay::view_token_from;
+pub use super::exec_render::render_table;
+use super::flags::{Def, FlagError, parse_options};
 use crate::console::{self, human_duration, plain_error};
-use crate::dispatch::{ParamType, Router, Spec};
 use crate::util;
 
 pub const EXIT_USAGE: i32 = 2;
@@ -26,16 +33,15 @@ const EXEC_FLAGS: [Def; 5] = [
 ];
 
 const USAGE: &str = "usage: handoff exec <view-url-or-token> <kind> [--arg k=v]...\n       handoff exec --describe <kind>";
-const MAX_CELL: usize = 60;
 
-type Reply = Map<String, Value>;
+pub(super) type Reply = Map<String, Value>;
 
 pub fn exec(args: &[String]) -> i32 {
     let (opts, parsed) = match parse_options("exec", args, &EXEC_FLAGS) {
         Ok(v) => v,
         Err(FlagError::Help) => return 0,
         Err(err) => {
-            eprintln!("{err}");
+            crate::errln!("{err}");
             return EXIT_USAGE;
         }
     };
@@ -53,7 +59,7 @@ pub fn exec(args: &[String]) -> i32 {
         return describe_command(describe_kind.trim());
     }
     if rest.is_empty() {
-        eprintln!("{USAGE}");
+        crate::errln!("{USAGE}");
         return EXIT_USAGE;
     }
     let token = view_token_from(&rest[0]);
@@ -64,7 +70,7 @@ pub fn exec(args: &[String]) -> i32 {
     {
         Ok(rt) => rt,
         Err(err) => {
-            eprintln!("{err}");
+            crate::errln!("{err}");
             return 1;
         }
     };
@@ -74,14 +80,14 @@ pub fn exec(args: &[String]) -> i32 {
         return runtime.block_on(exec_list(&opts.relay, &token, deadline));
     }
     if rest.len() < 2 {
-        eprintln!("{USAGE}");
+        crate::errln!("{USAGE}");
         return EXIT_USAGE;
     }
 
     let payload = match build_exec_payload(&rest[1], &pairs, &args_json) {
         Ok(p) => p,
         Err(err) => {
-            eprintln!("{err}");
+            crate::errln!("{err}");
             return EXIT_USAGE;
         }
     };
@@ -96,7 +102,7 @@ pub fn exec(args: &[String]) -> i32 {
     let (body, status) = match result {
         Ok(v) => v,
         Err(err) => {
-            eprintln!("request failed: {}", plain_error(&err));
+            crate::errln!("request failed: {}", plain_error(&err));
             return 1;
         }
     };
@@ -105,7 +111,7 @@ pub fn exec(args: &[String]) -> i32 {
         Ok(Value::Object(map)) => map,
         Ok(Value::Null) => Reply::new(),
         _ => {
-            eprintln!(
+            crate::errln!(
                 "relay returned {status}: {}",
                 String::from_utf8_lossy(&body).trim()
             );
@@ -114,7 +120,7 @@ pub fn exec(args: &[String]) -> i32 {
     };
 
     if opts.json {
-        println!("{}", util::go_pretty_json(&Value::Object(reply.clone())));
+        crate::outln!("{}", util::go_pretty_json(&Value::Object(reply.clone())));
     }
 
     match status {
@@ -123,15 +129,11 @@ pub fn exec(args: &[String]) -> i32 {
             if !opts.json {
                 print_exec_result(&reply, ok);
             }
-            if ok {
-                0
-            } else {
-                EXIT_FAILED
-            }
+            if ok { 0 } else { EXIT_FAILED }
         }
         202 => {
             if !opts.json {
-                eprintln!(
+                crate::errln!(
                     "Still running after {}. Fetch the result later at {}",
                     human_duration(timeout),
                     reply_field(&reply, "result_url")
@@ -141,524 +143,23 @@ pub fn exec(args: &[String]) -> i32 {
         }
         _ => {
             if !opts.json {
-                eprintln!("relay returned {status}: {}", reply_field(&reply, "error"));
+                crate::errln!("relay returned {status}: {}", reply_field(&reply, "error"));
             }
             1
         }
     }
 }
 
-fn reply_field(reply: &Reply, key: &str) -> String {
-    match reply.get(key) {
-        Some(v) => util::go_value_string(v),
-        None => "<nil>".to_string(),
-    }
-}
-
-fn print_exec_result(reply: &Reply, ok: bool) {
-    if !ok {
-        eprintln!(
-            "command failed: {}",
-            plain_error(&reply_field(reply, "error"))
-        );
-        if let Some(detail) = reply.get("detail") {
-            if !detail.is_null() {
-                eprintln!("{}", util::go_pretty_json(detail));
-            }
-        }
-        return;
-    }
-    match reply.get("result") {
-        None | Some(Value::Null) => println!("ok"),
-        Some(Value::String(s)) => println!("{s}"),
-        Some(other) => match render_table(other) {
-            Some(text) => println!("{text}"),
-            None => println!("{}", util::go_pretty_json(other)),
-        },
-    }
-}
-
-fn cell(v: &Value) -> String {
-    match v {
-        Value::Null => String::new(),
-        Value::String(s) => s.trim().to_string(),
-        Value::Number(_) | Value::Bool(_) => util::go_value_string(v),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
-fn rows_of(list: &[Value]) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    if list.is_empty() {
-        return None;
-    }
-    let mut headers: Vec<String> = Vec::new();
-    for item in list {
-        match item {
-            Value::Object(map) => {
-                for key in map.keys() {
-                    if !headers.contains(key) {
-                        headers.push(key.clone());
-                    }
-                }
-            }
-            Value::Null | Value::Array(_) => return None,
-            _ => {}
-        }
-    }
-    if headers.is_empty() {
-        let rows = list.iter().map(|v| vec![cell(v)]).collect();
-        return Some((vec!["Value".to_string()], rows));
-    }
-    let rows = list
-        .iter()
-        .map(|item| match item {
-            Value::Object(map) => headers
-                .iter()
-                .map(|h| map.get(h).map(cell).unwrap_or_default())
-                .collect(),
-            other => {
-                let mut row = vec![cell(other)];
-                row.resize(headers.len(), String::new());
-                row
-            }
-        })
-        .collect();
-    Some((headers, rows))
-}
-
-pub fn render_table(result: &Value) -> Option<String> {
-    match result {
-        Value::Array(list) => {
-            let (headers, rows) = rows_of(list)?;
-            Some(console::table(&headers, &rows, MAX_CELL))
-        }
-        Value::Object(map) => {
-            let lists: Vec<(&String, &Vec<Value>)> = map
-                .iter()
-                .filter_map(|(k, v)| match v {
-                    Value::Array(list) if list.iter().any(Value::is_object) => Some((k, list)),
-                    _ => None,
-                })
-                .collect();
-            if lists.len() != 1 {
-                return None;
-            }
-            let (name, list) = lists[0];
-            if map
-                .iter()
-                .any(|(k, v)| k != name && (v.is_object() || v.is_array()))
-            {
-                return None;
-            }
-            let (headers, rows) = rows_of(list)?;
-            let mut out = Vec::new();
-            let width = map.keys().map(|k| k.len()).max().unwrap_or(0);
-            for (k, v) in map {
-                if k != name {
-                    out.push(format!("{}  {}", console::pad(k, width), cell(v)));
-                }
-            }
-            if !out.is_empty() {
-                out.push(String::new());
-            }
-            out.push(format!("{name}:"));
-            out.push(console::table(&headers, &rows, MAX_CELL));
-            Some(out.join("\n"))
-        }
-        _ => None,
-    }
-}
-
-fn local_specs() -> Vec<Spec> {
-    let mut router = Router::new();
-    capabilities::register_all(&mut router, None);
-    let mut specs = router.specs();
-    specs.sort_by(|a, b| a.kind.cmp(&b.kind));
-    specs
-}
-
-fn describe_command(kind: &str) -> i32 {
-    let specs = local_specs();
-    match specs.iter().find(|s| s.kind == kind) {
-        Some(spec) => {
-            println!("{}", describe_spec(spec));
-            0
-        }
-        None => {
-            let close: Vec<&str> = specs
-                .iter()
-                .map(|s| s.kind.as_str())
-                .filter(|k| {
-                    let group = kind.split('.').next().unwrap_or(kind);
-                    k.starts_with(&format!("{group}."))
-                })
-                .collect();
-            if close.is_empty() {
-                eprintln!("There's no command called {kind}.");
-            } else {
-                eprintln!(
-                    "There's no command called {kind}. Similar ones: {}",
-                    close.join(", ")
-                );
-            }
-            EXIT_USAGE
-        }
-    }
-}
-
-fn param_type(kind: &ParamType) -> &'static str {
-    match kind {
-        ParamType::String => "text",
-        ParamType::Int => "number",
-        ParamType::Bool => "true/false",
-        ParamType::Enum => "choice",
-        ParamType::BytesBase64 => "file data",
-    }
-}
-
-pub fn describe_spec(spec: &Spec) -> String {
-    let mut out = Vec::new();
-    let title = if spec.label.is_empty() {
-        spec.kind.clone()
-    } else {
-        format!("{} ({})", spec.label, spec.kind)
-    };
-    out.push(console::paint(console::Tone::Bold, &title));
-    if !spec.description.is_empty() {
-        out.push(spec.description.clone());
-    }
-    out.push(String::new());
-    let category = category_for(&spec.kind);
-    match category {
-        Some(c) => out.push(format!(
-            "This changes the computer. Handoff asks the person at the computer first. A yes lets the helper {} {}.",
-            c.label(),
-            consent::scope_text(Some(c))
-        )),
-        None if spec.risky => out.push("This can change the computer.".to_string()),
-        None => out.push("This only reads information. It doesn't change anything.".to_string()),
-    }
-    if spec.default_timeout_ms > 0 {
-        out.push(format!(
-            "It stops on its own after {}.",
-            human_duration(Duration::from_millis(spec.default_timeout_ms as u64))
-        ));
-    }
-    out.push(String::new());
-    if spec.params.is_empty() {
-        out.push("It takes no arguments.".to_string());
-        return out.join("\n");
-    }
-    let headers: Vec<String> = [
-        "Argument", "Type", "Required", "Default", "Allowed", "About",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    let rows: Vec<Vec<String>> = spec
-        .params
-        .iter()
-        .map(|p| {
-            let allowed = if !p.enum_values.is_empty() {
-                p.enum_values.join(", ")
-            } else {
-                match (p.min, p.max) {
-                    (Some(lo), Some(hi)) => format!("{lo} to {hi}"),
-                    (Some(lo), None) => format!("{lo} or more"),
-                    (None, Some(hi)) => format!("up to {hi}"),
-                    (None, None) => String::new(),
-                }
-            };
-            vec![
-                p.name.clone(),
-                param_type(&p.kind).to_string(),
-                if p.required { "yes" } else { "no" }.to_string(),
-                p.default.as_ref().map(cell).unwrap_or_default(),
-                allowed,
-                p.description.clone(),
-            ]
-        })
-        .collect();
-    out.push(console::table(&headers, &rows, MAX_CELL));
-    out.join("\n")
-}
-
-fn client() -> Result<reqwest::Client, String> {
-    util::install_crypto_provider();
-    reqwest::Client::builder()
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-fn remaining(deadline: Instant) -> Duration {
-    deadline.saturating_duration_since(Instant::now())
-}
-
-fn describe(err: reqwest::Error, method: &str, url: &str) -> String {
-    let reason = if err.is_timeout() {
-        "it took too long to answer".to_string()
-    } else {
-        let mut text = err.to_string();
-        let mut source = std::error::Error::source(&err);
-        while let Some(inner) = source {
-            text = format!("{text}: {inner}");
-            source = inner.source();
-        }
-        text
-    };
-    format!("{method} {}: {reason}", util::go_quote(url))
-}
-
-async fn exec_list(relay: &str, token: &str, deadline: Instant) -> i32 {
-    let url = format!("{relay}/api/sessions/{token}/meta");
-    let http = match client() {
-        Ok(c) => c,
-        Err(err) => {
-            eprintln!("{err}");
-            return 1;
-        }
-    };
-    let resp = match http.get(&url).timeout(remaining(deadline)).send().await {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!(
-                "request failed: {}",
-                plain_error(&describe(err, "Get", &url))
-            );
-            return 1;
-        }
-    };
-
-    let body = match resp.bytes().await {
-        Ok(b) => b,
-        Err(err) => {
-            eprintln!("could not read session metadata: {err}");
-            return 1;
-        }
-    };
-    let meta: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("could not read session metadata: {err}");
-            return 1;
-        }
-    };
-    if !meta.get("ready").and_then(Value::as_bool).unwrap_or(false) {
-        eprintln!("no host is connected to this session yet");
-        return 1;
-    }
-    if let Some(kinds) = meta.get("allowed_kinds").and_then(Value::as_array) {
-        for kind in kinds.iter().filter_map(Value::as_str) {
-            println!("{kind}");
-        }
-    }
-    0
-}
-
-pub fn build_exec_payload(
-    kind: &str,
-    pairs: &[String],
-    args_json: &str,
-) -> Result<Map<String, Value>, String> {
-    let mut payload = Map::new();
-    payload.insert("kind".to_string(), json!(kind));
-
-    if !args_json.trim().is_empty() {
-        match serde_json::from_str::<Value>(args_json) {
-            Ok(Value::Object(parsed)) => {
-                for (k, v) in parsed {
-                    payload.insert(k, normalize_numbers(v));
-                }
-            }
-            Ok(Value::Null) => {}
-            Ok(other) => {
-                let kind_name = match other {
-                    Value::Array(_) => "a list",
-                    Value::String(_) => "text",
-                    Value::Number(_) => "a number",
-                    _ => "true or false",
-                };
-                return Err(format!(
-                    "--args-json needs a JSON object such as {{\"count\": 4}}, but got {kind_name}"
-                ));
-            }
-            Err(err) => return Err(format!("--args-json isn't valid JSON: {err}")),
-        }
-    }
-
-    for pair in pairs {
-        let (key, value) = match pair.split_once('=') {
-            Some((k, v)) if !k.is_empty() => (k, v),
-            _ => {
-                return Err(format!(
-                    "--arg must be key=value, got {}",
-                    util::go_quote(pair)
-                ))
-            }
-        };
-        let typed = serde_json::from_str::<Value>(value)
-            .map(normalize_numbers)
-            .unwrap_or_else(|_| Value::String(value.to_string()));
-        payload.insert(key.to_string(), typed);
-    }
-    Ok(payload)
-}
-
-pub fn view_token_from(input: &str) -> String {
-    let s = input.trim();
-    if let Some(i) = s.rfind("/v/") {
-        return s[i + 3..].trim_matches('/').to_string();
-    }
-    s.trim_matches('/').to_string()
-}
-
-async fn post_json(
-    url: &str,
-    payload: &Map<String, Value>,
-    deadline: Instant,
-) -> Result<(Vec<u8>, u16), String> {
-    let body = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
-    let resp = client()?
-        .post(url)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .timeout(remaining(deadline))
-        .send()
-        .await
-        .map_err(|e| describe(e, "Post", url))?;
-    let status = resp.status().as_u16();
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    Ok((bytes.to_vec(), status))
-}
-
-async fn run_command(
-    relay: &str,
-    token: &str,
-    payload: &Map<String, Value>,
-    timeout: Duration,
-    deadline: Instant,
-) -> Result<(Vec<u8>, u16), String> {
-    let run_url = format!(
-        "{relay}/api/sessions/{token}/run?wait_ms={}",
-        timeout.as_millis()
-    );
-    let (body, status) = post_json(&run_url, payload, deadline).await?;
-    if status != 404 {
-        return Ok((body, status));
-    }
-
-    if let Ok(Value::Object(probe)) = serde_json::from_slice::<Value>(&body) {
-        let msg = probe.get("error").and_then(Value::as_str).unwrap_or("");
-        if msg.contains("view token") {
-            return Ok((body, status));
-        }
-    }
-    queue_and_await(relay, token, payload, timeout, deadline).await
-}
-
-async fn queue_and_await(
-    relay: &str,
-    token: &str,
-    payload: &Map<String, Value>,
-    timeout: Duration,
-    ctx_deadline: Instant,
-) -> Result<(Vec<u8>, u16), String> {
-    let (ack_body, ack_status) = post_json(
-        &format!("{relay}/api/sessions/{token}/cmd"),
-        payload,
-        ctx_deadline,
-    )
-    .await?;
-    if ack_status != 200 {
-        return Ok((ack_body, ack_status));
-    }
-
-    let command_id = match serde_json::from_slice::<Value>(&ack_body) {
-        Ok(v) => v
-            .get("command_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        Err(_) => String::new(),
-    };
-    if command_id.is_empty() {
-        return Ok((ack_body, ack_status));
-    }
-
-    let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("");
-    let deadline = Instant::now() + timeout;
-    let result_url = format!("{relay}/api/sessions/{token}/cmd/{command_id}");
-    let http = client()?;
-
-    while Instant::now() < deadline {
-        let wait = remaining(deadline).min(Duration::from_secs(25));
-        let url = format!("{result_url}?wait_ms={}", wait.as_millis());
-        let resp = http
-            .get(&url)
-            .timeout(remaining(ctx_deadline))
-            .send()
-            .await
-            .map_err(|e| describe(e, "Get", &url))?;
-        let status = resp.status().as_u16();
-        let raw = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
-
-        let got: Reply = match serde_json::from_slice::<Value>(&raw) {
-            Ok(Value::Object(map)) => map,
-            _ => Reply::new(),
-        };
-
-        match status {
-            200 => {
-                if let Some(Value::Object(inner)) = got.get("payload") {
-                    return Ok((reshape_result(inner, kind, &command_id), 200));
-                }
-                if got.get("status") == Some(&json!("pending")) {
-                    continue;
-                }
-                return Ok((raw, 200));
-            }
-            410 => return Ok((raw, 410)),
-            404 => continue,
-            other => return Ok((raw, other)),
-        }
-    }
-
-    let pending = json!({
-        "command_id": command_id,
-        "kind": kind,
-        "status": "pending",
-        "ok": false,
-        "result_url": format!("/api/sessions/{token}/cmd/{command_id}"),
-    });
-    Ok((serde_json::to_vec(&pending).unwrap_or_default(), 202))
-}
-
-pub fn reshape_result(inner: &Map<String, Value>, kind: &str, command_id: &str) -> Vec<u8> {
-    let ok = inner.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    let field = |key: &str| inner.get(key).cloned().unwrap_or(Value::Null);
-    let mut out = Map::new();
-    out.insert("command_id".into(), json!(command_id));
-    out.insert("kind".into(), json!(kind));
-    out.insert("ok".into(), json!(ok));
-    out.insert("status".into(), json!(if ok { "ok" } else { "error" }));
-    out.insert("result".into(), field("result"));
-    out.insert("error".into(), field("error"));
-    out.insert("elapsed_ms".into(), field("elapsed_ms"));
-    if let Some(detail) = inner.get("detail") {
-        out.insert("detail".into(), detail.clone());
-    }
-    serde_json::to_vec(&Value::Object(out))
-        .unwrap_or_else(|_| br#"{"ok":false,"error":"could not read the relay's result"}"#.to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capabilities::consent::testing::SessionGuard;
+    use crate::cmd::exec_describe::local_specs;
+    use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Request {
         method: String,
@@ -673,7 +174,7 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                let responder = responder.clone();
+                let responder = Arc::clone(&responder);
                 std::thread::spawn(move || {
                     let mut buf = Vec::new();
                     let mut chunk = [0u8; 4096];
@@ -723,7 +224,8 @@ mod tests {
     }
 
     fn quiet_env() {
-        std::env::set_var("HANDOFF_CONFIG", "");
+        // SAFETY: every test that touches HANDOFF_CONFIG sets it to the same empty value.
+        unsafe { std::env::set_var("HANDOFF_CONFIG", "") };
     }
 
     #[test]
@@ -851,7 +353,7 @@ mod tests {
     fn exec_posts_to_run_with_wait_ms() {
         quiet_env();
         let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let seen2 = seen.clone();
+        let seen2 = Arc::clone(&seen);
         let relay = serve(Arc::new(move |r| {
             seen2
                 .lock()
@@ -879,7 +381,7 @@ mod tests {
         quiet_env();
         let saw_cmd = Arc::new(AtomicUsize::new(0));
         let saw_result = Arc::new(AtomicUsize::new(0));
-        let (c, r) = (saw_cmd.clone(), saw_result.clone());
+        let (c, r) = (Arc::clone(&saw_cmd), Arc::clone(&saw_result));
         let relay = serve(Arc::new(move |req| {
             let path = req.path.split('?').next().unwrap_or("").to_string();
             if path.ends_with("/run") {
@@ -913,7 +415,7 @@ mod tests {
     fn exec_does_not_fall_back_for_an_unknown_session() {
         quiet_env();
         let cmd_calls = Arc::new(AtomicUsize::new(0));
-        let c = cmd_calls.clone();
+        let c = Arc::clone(&cmd_calls);
         let relay = serve(Arc::new(move |req| {
             if req.path.ends_with("/cmd") {
                 c.fetch_add(1, Ordering::SeqCst);

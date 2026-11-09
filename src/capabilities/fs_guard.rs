@@ -1,9 +1,9 @@
+use super::fs::err;
+use super::fs_path::local_path;
 use std::fs;
 use std::path::Path;
 
 use crate::dispatch::HandlerError;
-
-use super::fs::{err, local_path};
 
 const SECRET_DIRS: &[&str] = &[
     ".ssh",
@@ -752,7 +752,9 @@ mod tests {
                 let msg = refusal(&rules, kind, path, false);
                 assert_eq!(
                     msg,
-                    format!("{kind}: won't change {path} because files there can run on their own later")
+                    format!(
+                        "{kind}: won't change {path} because files there can run on their own later"
+                    )
                 );
             }
             assert_eq!(refusal(&rules, "fs.delete", path, true), "", "{path}");
@@ -786,7 +788,9 @@ mod tests {
                 let msg = refusal(&rules, kind, path, deleting);
                 assert_eq!(
                     msg,
-                    format!("{kind}: won't change {path} because Handoff keeps its settings and logs there")
+                    format!(
+                        "{kind}: won't change {path} because Handoff keeps its settings and logs there"
+                    )
                 );
             }
         }

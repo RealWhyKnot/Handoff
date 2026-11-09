@@ -1,5 +1,8 @@
-use handoff::app::{run, wants_support_log, Commands};
-use handoff::{slog, supportlog, util};
+use handoff::app::{Commands, run, wants_support_log};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
+
+use handoff::{supportlog, util};
 
 fn main() {
     util::install_crypto_provider();
@@ -11,7 +14,7 @@ fn main() {
 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        slog!("panic: {info}");
+        tracing::info!("panic: {info}");
         default_hook(info);
     }));
 
@@ -20,11 +23,14 @@ fn main() {
         match supportlog::init() {
             Ok(path) => {
                 log_open = true;
+                tracing_subscriber::registry()
+                    .with(supportlog::FileLayer)
+                    .init();
                 if args.first().map(String::as_str) != Some("new") {
-                    eprintln!("log: {}", path.display());
+                    handoff::errln!("log: {}", path.display());
                 }
             }
-            Err(err) => eprintln!("warning: support log unavailable: {err}"),
+            Err(err) => handoff::errln!("warning: support log unavailable: {err}"),
         }
     }
 

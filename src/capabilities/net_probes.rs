@@ -2,15 +2,15 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::net::{arg_int, arg_string};
 use super::net_resolve::{ip_string, is_v4, lookup_ip_addrs};
-use super::pwsh::{parse_pwsh_json, ps_single_quote, run_pwsh_echo, run_pwsh_json, Echo};
+use super::pwsh::{Echo, parse_pwsh_json, ps_single_quote, run_pwsh_echo, run_pwsh_json};
 
 const TCP_TEST_LIMIT: usize = 30;
 const TCP_TEST_WINDOW: Duration = Duration::from_secs(60);
@@ -60,6 +60,7 @@ fn take_tcp_test_slot(now: Instant) -> Result<(), HandlerError> {
         )));
     }
     history.push(now);
+    drop(history);
     Ok(())
 }
 
@@ -93,7 +94,7 @@ async fn net_ping(ctx: Ctx, args: Args) -> CapResult {
     let script = ping_script(&args)?;
     let res = run_pwsh_echo(&ctx.cancel, &script, ctx.progress.clone(), Echo::Stderr)
         .await
-        .map_err(|(_, failure)| HandlerError::from(failure))?;
+        .map_err(|failed| HandlerError::from(failed.1))?;
     parse_pwsh_json(&res.stdout).map_err(HandlerError::from)
 }
 
@@ -156,7 +157,7 @@ fn fail_fast_on_loopback(socket: &TcpSocket, target: &SocketAddr) {
     }
 
     #[link(name = "ws2_32")]
-    extern "system" {
+    unsafe extern "system" {
         fn WSAIoctl(
             s: usize,
             code: u32,
@@ -182,13 +183,20 @@ fn fail_fast_on_loopback(socket: &TcpSocket, target: &SocketAddr) {
         rtt: u16::MAX,
         max_syn_retransmissions: 0xfe,
     };
+    let (Ok(raw), Ok(params_len)) = (
+        usize::try_from(socket.as_raw_socket()),
+        u32::try_from(std::mem::size_of::<InitialRtoParameters>()),
+    ) else {
+        return;
+    };
     let mut returned = 0u32;
+    // SAFETY: raw is this live socket's handle, params outlives the call and params_len is its size.
     unsafe {
         WSAIoctl(
-            socket.as_raw_socket() as usize,
+            raw,
             SIO_TCP_INITIAL_RTO,
-            &params as *const InitialRtoParameters as *const std::ffi::c_void,
-            std::mem::size_of::<InitialRtoParameters>() as u32,
+            std::ptr::from_ref(&params).cast(),
+            params_len,
             std::ptr::null_mut(),
             0,
             &mut returned,
@@ -233,7 +241,7 @@ async fn dial_serial(
             let e = format!("dial tcp {shown}: i/o timeout");
             return Err(first_err.unwrap_or(e));
         }
-        let left = (total - i) as u32;
+        let left = u32::try_from(total - i).unwrap_or(u32::MAX);
         let mut slice = remaining / left;
         let sane = Duration::from_secs(2);
         if slice < sane {
@@ -248,10 +256,10 @@ async fn dial_serial(
                 Err(_) => Err(format!("dial tcp {shown}: i/o timeout")),
             },
         };
-        if let Err(e) = attempt {
-            if first_err.is_none() {
-                first_err = Some(e);
-            }
+        if let Err(e) = attempt
+            && first_err.is_none()
+        {
+            first_err = Some(e);
         }
     }
     Err(first_err.unwrap_or_else(|| "dial tcp: no addresses".to_string()))
@@ -259,7 +267,7 @@ async fn dial_serial(
 
 pub async fn tcp_test(cancel: &CancellationToken, opts: &TcpTestOptions) -> Value {
     let start = Instant::now();
-    let timeout = Duration::from_millis(opts.timeout_ms as u64);
+    let timeout = Duration::from_millis(u64::try_from(opts.timeout_ms).unwrap_or(0));
     let mut result = Map::new();
     result.insert("target".into(), json!(opts.target));
     result.insert("port".into(), json!(opts.port));
@@ -278,7 +286,7 @@ pub async fn tcp_test(cancel: &CancellationToken, opts: &TcpTestOptions) -> Valu
         result.insert("error".into(), json!(e));
         result.insert(
             "elapsed_ms".into(),
-            json!(start.elapsed().as_millis() as i64),
+            json!(crate::util::millis_i64(start.elapsed())),
         );
         return Value::Object(result);
     }
@@ -289,12 +297,19 @@ pub async fn tcp_test(cancel: &CancellationToken, opts: &TcpTestOptions) -> Valu
         );
     }
 
-    match dial_serial(cancel, &addrs, opts.port as u16, timeout).await {
+    match dial_serial(
+        cancel,
+        &addrs,
+        u16::try_from(opts.port).unwrap_or(0),
+        timeout,
+    )
+    .await
+    {
         Err(e) => {
             result.insert("error".into(), json!(e));
             result.insert(
                 "elapsed_ms".into(),
-                json!(start.elapsed().as_millis() as i64),
+                json!(crate::util::millis_i64(start.elapsed())),
             );
         }
         Ok(stream) => {
@@ -307,7 +322,7 @@ pub async fn tcp_test(cancel: &CancellationToken, opts: &TcpTestOptions) -> Valu
             }
             result.insert(
                 "elapsed_ms".into(),
-                json!(start.elapsed().as_millis() as i64),
+                json!(crate::util::millis_i64(start.elapsed())),
             );
         }
     }
@@ -327,7 +342,7 @@ mod tests {
     static LIMIT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn msg<T>(r: Result<T, HandlerError>) -> String {
@@ -453,7 +468,7 @@ mod tests {
         {
             let mut h = TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
             h.clear();
-            h.extend(std::iter::repeat(Instant::now()).take(TCP_TEST_LIMIT));
+            h.extend(std::iter::repeat_n(Instant::now(), TCP_TEST_LIMIT));
         }
         let out = r
             .dispatch(
@@ -556,10 +571,12 @@ mod tests {
         assert_eq!(out["tcp_test_succeeded"], json!(true), "{out}");
         assert_eq!(out["resolved_addresses"], json!(["127.0.0.1"]));
         assert_eq!(out["remote_address"], json!(format!("127.0.0.1:{port}")));
-        assert!(out["local_address"]
-            .as_str()
-            .unwrap()
-            .starts_with("127.0.0.1:"));
+        assert!(
+            out["local_address"]
+                .as_str()
+                .unwrap()
+                .starts_with("127.0.0.1:")
+        );
         assert!(out.get("error").is_none());
         assert_eq!(out["timeout_ms"], json!(2000));
     }
@@ -602,10 +619,12 @@ mod tests {
         .await;
         assert_eq!(out["tcp_test_succeeded"], json!(false));
         assert_eq!(out["resolved_addresses"], json!([]));
-        assert!(out["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("lookup this-name-should-not-exist.invalid: "));
+        assert!(
+            out["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("lookup this-name-should-not-exist.invalid: ")
+        );
         assert!(out.get("remote_address").is_none());
     }
 }

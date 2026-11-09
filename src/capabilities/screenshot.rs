@@ -1,10 +1,10 @@
 use std::future::Future;
 
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router, Spec};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, Spec, handler};
 
 use super::consent::require_risk_consent;
 
@@ -124,16 +124,15 @@ pub fn png_to_jpeg(png_data: &[u8], quality: i64) -> Result<Vec<u8>, HandlerErro
         .next_frame(&mut buf)
         .map_err(|e| decode_err(e.to_string()))?;
     buf.truncate(info.buffer_size());
-    let (width, height) = (info.width, info.height);
-    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+    let (Ok(width), Ok(height)) = (u16::try_from(info.width), u16::try_from(info.height)) else {
         return Err(HandlerError::plain(
             "sys.screenshot: encode jpeg: image dimensions exceed the JPEG limit",
         ));
-    }
+    };
     let (pixels, color) = match info.color_type {
         png::ColorType::Grayscale => (buf, jpeg_encoder::ColorType::Luma),
         png::ColorType::GrayscaleAlpha => (
-            buf.chunks_exact(2).map(|p| p[0]).collect(),
+            buf.as_chunks::<2>().0.iter().map(|p| p[0]).collect(),
             jpeg_encoder::ColorType::Luma,
         ),
         png::ColorType::Rgb => (buf, jpeg_encoder::ColorType::Rgb),
@@ -142,14 +141,13 @@ pub fn png_to_jpeg(png_data: &[u8], quality: i64) -> Result<Vec<u8>, HandlerErro
             return Err(decode_err("unexpected indexed color".to_string()));
         }
     };
-    let quality = if (1..=100).contains(&quality) {
-        quality as u8
-    } else {
-        70
-    };
+    let quality = u8::try_from(quality)
+        .ok()
+        .filter(|q| (1..=100).contains(q))
+        .unwrap_or(70);
     let mut out = Vec::new();
     jpeg_encoder::Encoder::new(&mut out, quality)
-        .encode(&pixels, width as u16, height as u16, color)
+        .encode(&pixels, width, height, color)
         .map_err(|e| HandlerError::plain(format!("sys.screenshot: encode jpeg: {e}")))?;
     Ok(out)
 }
@@ -285,8 +283,8 @@ pub fn screenshot_script(out_path: &str, opts: &ScreenshotOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn opts() -> ScreenshotOptions {
         ScreenshotOptions {
@@ -306,7 +304,7 @@ mod tests {
         };
         let mut data = Vec::new();
         for i in 0..(w * h * channels) {
-            data.push((i % 251) as u8);
+            data.push(u8::try_from(i % 251).unwrap());
         }
         let mut out = Vec::new();
         let mut enc = png::Encoder::new(&mut out, w, h);
@@ -408,9 +406,9 @@ mod tests {
     #[tokio::test]
     async fn oversize_capture_retries_once_at_half_width() {
         let widths = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let w = widths.clone();
+        let w = Arc::clone(&widths);
         let out = capture_within_budget(opts(), move |o| {
-            let w = w.clone();
+            let w = Arc::clone(&w);
             async move {
                 w.lock().unwrap().push(o.max_width);
                 let size = if o.max_width == 1600 {
@@ -435,7 +433,7 @@ mod tests {
     #[tokio::test]
     async fn still_oversize_after_retry_is_an_error() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let c = calls.clone();
+        let c = Arc::clone(&calls);
         let err = capture_within_budget(opts(), move |_| {
             c.fetch_add(1, Ordering::SeqCst);
             async {
@@ -458,11 +456,11 @@ mod tests {
     #[tokio::test]
     async fn retry_width_never_drops_below_the_minimum() {
         let widths = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let w = widths.clone();
+        let w = Arc::clone(&widths);
         let mut o = opts();
         o.max_width = 400;
         let _ = capture_within_budget(o, move |o| {
-            let w = w.clone();
+            let w = Arc::clone(&w);
             async move {
                 w.lock().unwrap().push(o.max_width);
                 Ok(Screenshot {
@@ -564,7 +562,10 @@ mod tests {
             .decode(out["image_base64"].as_str().unwrap())
             .unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
-        assert_eq!(out["bytes"].as_u64().unwrap() as usize, bytes.len());
+        assert_eq!(
+            usize::try_from(out["bytes"].as_u64().unwrap()).unwrap(),
+            bytes.len()
+        );
         assert_eq!(out["format"], "jpeg");
         assert_eq!(out["width"], 640);
         assert!(out["height"].as_i64().unwrap() > 0);

@@ -1,10 +1,11 @@
+use std::fmt::Write as _;
 use std::process::Stdio;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router, Spec};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, Spec, handler};
 use crate::picotool;
 
 use super::consent::require_risk_consent;
@@ -56,7 +57,7 @@ impl Run {
 
 fn exit_text(status: &std::process::ExitStatus) -> String {
     match status.code() {
-        Some(code) => format!("exit status {}", code as u32),
+        Some(code) => format!("exit status {}", code.cast_unsigned()),
         None => "signal: killed".to_string(),
     }
 }
@@ -173,8 +174,8 @@ fn go_quote(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
+            c if u32::from(c) < 0x20 || u32::from(c) == 0x7f => {
+                let _ = write!(out, "\\x{:02x}", u32::from(c));
             }
             c => out.push(c),
         }
@@ -205,7 +206,7 @@ fn pico_verify_args(args: &Args) -> Result<(Vec<String>, String), HandlerError> 
     Ok((with_serial(cmd, &pico_string_arg(args, "serial")), path))
 }
 
-fn failed(run: &Run, reason: String) -> Value {
+fn failed(run: &Run, reason: &str) -> Value {
     json!({
         "ok": false,
         "reason": reason,
@@ -217,7 +218,7 @@ fn failed(run: &Run, reason: String) -> Value {
 async fn pico_list(ctx: Ctx, _args: Args) -> CapResult {
     let run = run_picotool(&ctx.cancel, &strings(&["info", "-a"])).await;
     if let Some(reason) = run.error.clone() {
-        return Ok(failed(&run, reason));
+        return Ok(failed(&run, &reason));
     }
     Ok(json!({"ok": true, "raw": run.stdout, "format": "picotool-info-text"}))
 }
@@ -244,7 +245,7 @@ async fn pico_bootsel(ctx: Ctx, args: Args) -> CapResult {
     .await?;
     let run = run_picotool(&ctx.cancel, &cmd).await;
     if let Some(reason) = run.error.clone() {
-        return Ok(failed(&run, reason));
+        return Ok(failed(&run, &reason));
     }
     Ok(json!({"ok": true, "raw": run.stdout}))
 }
@@ -259,7 +260,7 @@ async fn pico_flash(ctx: Ctx, args: Args) -> CapResult {
     .await?;
     let run = run_picotool(&ctx.cancel, &cmd).await;
     if let Some(reason) = run.error.clone() {
-        return Ok(failed(&run, reason));
+        return Ok(failed(&run, &reason));
     }
     Ok(json!({"ok": true, "uf2": uf2, "raw": run.stdout}))
 }
@@ -296,7 +297,7 @@ async fn pico_save(ctx: Ctx, args: Args) -> CapResult {
     );
     let run = run_picotool(&ctx.cancel, &cmd).await;
     if let Some(reason) = run.error.clone() {
-        return Ok(failed(&run, reason));
+        return Ok(failed(&run, &reason));
     }
     Ok(json!({"ok": true, "out_path": out, "raw": run.stdout}))
 }
@@ -311,7 +312,7 @@ async fn pico_reset(ctx: Ctx, args: Args) -> CapResult {
     .await?;
     let run = run_picotool(&ctx.cancel, &cmd).await;
     if let Some(reason) = run.error.clone() {
-        return Ok(failed(&run, reason));
+        return Ok(failed(&run, &reason));
     }
     Ok(json!({"ok": true, "raw": run.stdout}))
 }
@@ -321,7 +322,7 @@ mod tests {
     use super::*;
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn v(parts: &[&str]) -> Vec<String> {
@@ -363,7 +364,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             got,
-            v(&["reboot", "-f", "-u", "-c", "riscv", "-g", "boot-a", "--id", "ABCD1234"])
+            v(&[
+                "reboot", "-f", "-u", "-c", "riscv", "-g", "boot-a", "--id", "ABCD1234"
+            ])
         );
     }
 

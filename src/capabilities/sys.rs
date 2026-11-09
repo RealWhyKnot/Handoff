@@ -1,6 +1,7 @@
-use serde_json::{json, Map, Value};
+use num_traits::ToPrimitive;
+use serde_json::{Map, Value, json};
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::{json_script_handler, run_pwsh_json};
@@ -338,7 +339,7 @@ pub fn env_script(args: &Args) -> Result<String, HandlerError> {
         _ => {
             return Err(HandlerError::plain(
                 "sys.env: scope must be all, machine, user, or process",
-            ))
+            ));
         }
     }
     let scope = if scope.is_empty() {
@@ -400,7 +401,7 @@ fn in_parens(s: &str) -> Option<String> {
 
 fn num_value(v: Option<f64>) -> Value {
     match v {
-        Some(f) if f.fract() == 0.0 && f.abs() < 9.0e15 => json!(f as i64),
+        Some(f) if f.fract() == 0.0 && f.abs() < 9.0e15 => json!(f.to_i64()),
         Some(f) => json!(f),
         None => Value::Null,
     }
@@ -476,7 +477,7 @@ pub fn parse_w32tm_status(lines: &[String], now_ms: i64) -> Map<String, Value> {
                     num_value(secs.map(f64::round)),
                 );
                 if let Some(s) = secs {
-                    let at = now_ms - (s * 1000.0) as i64;
+                    let at = now_ms - (s * 1000.0).to_i64().unwrap_or(0);
                     out.insert(
                         "last_good_sync_utc".into(),
                         json!(crate::util::format_utc_ms(at)),
@@ -528,7 +529,7 @@ pub fn shape_time_sync(raw: &Value, now_ms: i64) -> Value {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
+        .map(crate::util::millis_i64)
         .unwrap_or(0)
 }
 
@@ -545,7 +546,7 @@ mod tests {
     use serde_json::json;
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     #[test]

@@ -1,15 +1,24 @@
+use super::fs::bool_arg;
+use super::fs::err;
+use super::fs::hex;
+use super::fs::path_err;
+use super::fs::run_blocking;
+use super::fs::str_arg;
+use super::fs_guard::guard_write_path;
+use super::fs_path::local_path;
+use super::fs_write::mkdir_all;
+use super::fs_write::path_detail;
+use super::fs_write::shown_path;
 use std::fs;
 use std::io::Write;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::dispatch::{handler, Spec};
 use crate::dispatch::{Args, CapResult, Router};
+use crate::dispatch::{Spec, handler};
 
 use super::consent::require_risk_consent_showing;
-use super::fs::{bool_arg, err, hex, local_path, path_err, run_blocking, str_arg};
-use super::fs_write::{guard_write_path, mkdir_all, path_detail, shown_path};
 
 const WRITE_CAP: usize = 1 << 20;
 
@@ -33,7 +42,7 @@ pub fn register(r: &mut Router) {
                 )
                 .await?;
                 guard_write_path("fs.write", &prep.path)?;
-                run_blocking(move || fs_write_commit(prep)).await
+                run_blocking(move || fs_write_commit(&prep)).await
             }),
         );
     }
@@ -77,7 +86,7 @@ fn fs_write_prepare(args: &Args) -> Result<Prep, crate::dispatch::HandlerError> 
     })
 }
 
-fn fs_write_commit(p: Prep) -> CapResult {
+fn fs_write_commit(p: &Prep) -> CapResult {
     let lf = p.content.replace("\r\n", "\n");
     let body = if p.newline == "crlf" {
         lf.replace('\n', "\r\n")
@@ -86,10 +95,10 @@ fn fs_write_commit(p: Prep) -> CapResult {
     };
 
     let mut data = body.into_bytes();
-    if p.encoding == "ascii" {
-        if let Some(i) = data.iter().position(|b| *b > 0x7f) {
-            return Err(err(format!("fs.write: content is not ascii at byte {i}")));
-        }
+    if p.encoding == "ascii"
+        && let Some(i) = data.iter().position(|b| *b > 0x7f)
+    {
+        return Err(err(format!("fs.write: content is not ascii at byte {i}")));
     }
 
     let existed = fs::metadata(&p.path).is_ok();
@@ -148,7 +157,7 @@ mod tests {
     use std::sync::Arc;
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn allow() -> Prompt {

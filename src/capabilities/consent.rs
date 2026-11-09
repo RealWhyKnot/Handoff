@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::consent::{system_prompt, Decision, Ledger, Request};
+use crate::consent::{Decision, Ledger, Request, system_prompt};
 use crate::dispatch::{Ctx, HandlerError};
 
 static SESSION_LEDGER: LazyLock<Mutex<Arc<Ledger>>> =
@@ -81,19 +81,19 @@ pub(crate) mod testing {
 
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    pub struct SessionGuard {
+    pub(crate) struct SessionGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl SessionGuard {
-        pub fn new() -> SessionGuard {
+        pub(crate) fn new() -> SessionGuard {
             let lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             DENY_ALL_RISKY.store(false, Ordering::SeqCst);
             reset_risk_consent();
             SessionGuard { _lock: lock }
         }
 
-        pub fn with_prompt(prompt: Prompt) -> SessionGuard {
+        pub(crate) fn with_prompt(prompt: Prompt) -> SessionGuard {
             let guard = SessionGuard::new();
             set_session_ledger(Arc::new(Ledger::new(prompt)));
             guard
@@ -117,9 +117,9 @@ mod tests {
 
     fn allow_all() -> (Prompt, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
-        let c = calls.clone();
+        let c = Arc::clone(&calls);
         let prompt: Prompt = Arc::new(move |_, _| {
-            let c = c.clone();
+            let c = Arc::clone(&c);
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
                 Ok(crate::consent::Answer::ForGrant)

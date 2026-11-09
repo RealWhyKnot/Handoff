@@ -1,13 +1,14 @@
+use std::fmt::Write as _;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::dispatch::{for_display, handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, for_display, handler};
 
 use super::consent::require_risk_consent_showing;
 use super::proc::{load_specs, string_arg};
-use super::pwsh::{run_pwsh_echo, truncation_note, Echo};
+use super::pwsh::{Echo, run_pwsh_echo, truncation_note};
 
 const SCRIPT_CAP: usize = 64 * 1024;
 const LIMIT: usize = 10;
@@ -32,6 +33,7 @@ fn take_slot(now: Instant) -> Result<(), HandlerError> {
         )));
     }
     history.push(now);
+    drop(history);
     Ok(())
 }
 
@@ -59,12 +61,13 @@ pub fn consent_summary(script: &str) -> String {
         shown.text
     );
     if shown.cut {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "
 
 (Only the start is shown. The whole script is {} characters long.)",
             script.chars().count()
-        ));
+        );
     }
     text
 }
@@ -86,7 +89,8 @@ async fn ps_exec(ctx: Ctx, args: Args) -> CapResult {
             }
             Ok(out)
         }
-        Err((res, mut failure)) => {
+        Err(failed) => {
+            let (res, mut failure) = *failed;
             if let Some(note) = truncation_note(&res) {
                 failure.message = format!("{} ({note})", failure.message);
             }
@@ -101,11 +105,11 @@ mod tests {
     use super::*;
     use crate::consent::Prompt;
     use serde_json::Value;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn reset_history() {
@@ -114,9 +118,9 @@ mod tests {
 
     fn counting_prompt(allow: bool) -> (Prompt, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
-        let c = calls.clone();
+        let c = Arc::clone(&calls);
         let prompt: Prompt = Arc::new(move |_, _| {
-            let c = c.clone();
+            let c = Arc::clone(&c);
             Box::pin(async move {
                 c.fetch_add(1, Ordering::SeqCst);
                 Ok(if allow {
@@ -131,9 +135,9 @@ mod tests {
 
     fn recording_prompt() -> (Prompt, Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let s = seen.clone();
+        let s = Arc::clone(&seen);
         let prompt: Prompt = Arc::new(move |_, req| {
-            s.lock().unwrap().push(req.summary.clone());
+            s.lock().unwrap().push(req.summary);
             Box::pin(async move { Ok(crate::consent::Answer::No) })
         });
         (prompt, seen)
@@ -160,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn the_whole_script_reaches_the_prompt() {
         let seen = Arc::new(std::sync::Mutex::new(None));
-        let s = seen.clone();
+        let s = Arc::clone(&seen);
         let prompt: Prompt = Arc::new(move |_, req| {
             *s.lock().unwrap() = Some(req);
             Box::pin(async move { Ok(crate::consent::Answer::No) })
@@ -176,10 +180,12 @@ mod tests {
         assert!(req.summary.contains("Only the start is shown"));
         assert_eq!(req.detail.as_deref(), Some(script.as_str()));
         let parts = crate::consent::prompt_parts(&req);
-        assert!(parts
-            .detail
-            .unwrap()
-            .ends_with("Get-Date\nWrite-Output end"));
+        assert!(
+            parts
+                .detail
+                .unwrap()
+                .ends_with("Get-Date\nWrite-Output end")
+        );
     }
 
     #[test]

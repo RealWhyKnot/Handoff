@@ -1,3 +1,4 @@
+use num_traits::ToPrimitive;
 use std::io::BufRead;
 use std::sync::Arc;
 use std::time::Instant;
@@ -91,7 +92,7 @@ fn print_running(board: &Board) {
     console::line("Running now:");
     for job in running {
         let label = board.label(&job.kind).unwrap_or_else(|| job.kind.clone());
-        println!(
+        crate::outln!(
             "          {}  {label}  {}",
             host::tag(job.num),
             console::paint(
@@ -103,7 +104,7 @@ fn print_running(board: &Board) {
 }
 
 pub fn round_to_minute(secs: f64) -> std::time::Duration {
-    std::time::Duration::from_secs((secs / 60.0).round() as u64 * 60)
+    std::time::Duration::from_secs((secs / 60.0).round().to_u64().unwrap_or(0) * 60)
 }
 
 pub fn expiry_text(remaining_secs: Option<f64>) -> String {
@@ -134,7 +135,7 @@ fn print_grants() {
             }
             _ => None,
         };
-        println!(
+        crate::outln!(
             "          {} ({})",
             g.category.label(),
             expiry_text(remaining)
@@ -157,7 +158,7 @@ pub fn key_help() -> String {
 }
 
 fn print_key_help() {
-    println!("{}", key_help());
+    crate::outln!("{}", key_help());
 }
 
 #[cfg(test)]

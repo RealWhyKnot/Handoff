@@ -1,4 +1,4 @@
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::proc::{fill, int_arg, string_arg};
 use super::pwsh::ps_single_quote;
@@ -126,10 +126,10 @@ async fn print_jobs(ctx: Ctx, args: Args) -> CapResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     #[test]

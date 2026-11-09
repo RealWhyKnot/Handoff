@@ -1,1 +1,10 @@
+* text=auto eol=lf
+*.png binary
+*.ico binary
 *.go text eol=lf
+*.sh text eol=lf
+*.bash text eol=lf
+*.sh.tpl text eol=lf
+*.bash.tpl text eol=lf
+.githooks/* text eol=lf
+.shellcheckrc text eol=lf

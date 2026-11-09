@@ -1,8 +1,13 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
 
 use crate::util;
 
@@ -16,13 +21,6 @@ struct Logger {
 
 static CURRENT: Mutex<Option<Logger>> = Mutex::new(None);
 static DIR_OVERRIDE: Mutex<String> = Mutex::new(String::new());
-
-#[macro_export]
-macro_rules! slog {
-    ($($arg:tt)*) => {
-        $crate::supportlog::write(::std::format_args!($($arg)*))
-    };
-}
 
 pub fn set_dir(dir: &str) {
     if let Ok(mut guard) = DIR_OVERRIDE.lock() {
@@ -130,6 +128,29 @@ pub fn write(args: fmt::Arguments<'_>) {
     }
 }
 
+pub struct FileLayer;
+
+struct Message(String);
+
+impl Visit for Message {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?}");
+        }
+    }
+}
+
+impl<S: Subscriber> Layer<S> for FileLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if !event.metadata().target().starts_with("handoff") {
+            return;
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        write(format_args!("{}", message.0));
+    }
+}
+
 pub fn close() {
     if let Ok(mut guard) = CURRENT.lock() {
         *guard = None;
@@ -177,7 +198,7 @@ mod tests {
     fn rotation_moves_the_log_aside() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("handoff.log");
-        fs::write(&path, vec![b'x'; (MAX_BYTES + 1) as usize]).unwrap();
+        fs::write(&path, vec![b'x'; usize::try_from(MAX_BYTES + 1).unwrap()]).unwrap();
         rotate_if_large(&path);
         assert!(!path.exists());
         assert!(dir.path().join("handoff.log.1").exists());
@@ -190,5 +211,29 @@ mod tests {
         fs::write(&path, b"small").unwrap();
         rotate_if_large(&path);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn events_from_this_crate_reach_the_log_file() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        set_dir(&dir.path().display().to_string());
+        let path = init().unwrap();
+        let subscriber = tracing_subscriber::registry().with(FileLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("session start relay={} version={}", "r", 7);
+            tracing::info!(target: "hyper", "not ours");
+        });
+        close();
+        set_dir("");
+        let text = fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].contains(" handoff start pid="), "{text}");
+        assert!(
+            lines[1].ends_with("Z session start relay=r version=7"),
+            "{text}"
+        );
     }
 }

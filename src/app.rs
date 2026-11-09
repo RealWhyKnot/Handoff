@@ -66,12 +66,12 @@ pub fn run(args: &[String], commands: &Commands) -> i32 {
         "update" => cmd::update::update(rest),
         "version" | "-v" | "--version" => cmd::version::print_version(rest, crate::VERSION),
         "help" | "-h" | "--help" => {
-            print!("{}", usage_text());
+            crate::out!("{}", usage_text());
             0
         }
         other => {
-            eprintln!("unknown subcommand: {other}\n");
-            print!("{}", usage_text());
+            crate::errln!("unknown subcommand: {other}\n");
+            crate::out!("{}", usage_text());
             2
         }
     }
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn run_without_args_shows_menu() {
         let called = Rc::new(RefCell::new(None::<Vec<String>>));
-        let seen = called.clone();
+        let seen = Rc::clone(&called);
         let commands = Commands {
             new: Box::new(|_| 0),
             menu: Box::new(move |args| {
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn run_new_explicit_still_calls_host_session() {
         let called = Rc::new(RefCell::new(false));
-        let seen = called.clone();
+        let seen = Rc::clone(&called);
         let commands = Commands {
             new: Box::new(move |_| {
                 *seen.borrow_mut() = true;
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn new_passes_its_arguments_through() {
         let seen = Rc::new(RefCell::new(Vec::<String>::new()));
-        let sink = seen.clone();
+        let sink = Rc::clone(&seen);
         let commands = Commands {
             new: Box::new(move |args| {
                 *sink.borrow_mut() = args.to_vec();

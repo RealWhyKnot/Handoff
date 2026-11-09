@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use super::layout;
 use super::summary::{ArgView, BODY_KEYS};
 use crate::consent::{self, ConsentError, Event, Step};
-use crate::console::{self, display_width, human_duration, plural, Tone};
+use crate::console::{self, Tone, display_width, human_duration, plural};
 use crate::dispatch::{Outcome, Spec};
 
 pub const PRESENCE_SETTLE: Duration = Duration::from_millis(1500);
@@ -127,6 +127,7 @@ impl Board {
             Ending::Failed => stats.failed += 1,
             Ending::Stopped => stats.stopped += 1,
         }
+        drop(stats);
         Some(job)
     }
 
@@ -159,7 +160,9 @@ impl Board {
             .iter_mut()
             .find(|r| r.kind == kind && r.consent == from)?;
         job.consent = to;
-        Some(job.num)
+        let num = job.num;
+        drop(running);
+        Some(num)
     }
 
     pub fn on_consent(&self, event: &Event) {
@@ -183,11 +186,12 @@ impl Board {
         let mut v = guard(&self.viewers);
         let text = presence_line(v.shown, v.latest)?;
         v.shown = v.latest;
+        drop(v);
         Some(text)
     }
 
     pub fn watch_consent(self: &Arc<Self>) {
-        let board = self.clone();
+        let board = Arc::clone(self);
         consent::set_observer(Some(Arc::new(move |event: &Event| board.on_consent(event))));
     }
 }
@@ -257,7 +261,9 @@ pub fn is_refusal(error: &str) -> bool {
 }
 
 fn result_parts(out: &Outcome, ending: Ending, read_only: bool) -> (String, Tone, Option<Tone>) {
-    let took = human_duration(Duration::from_millis(out.elapsed_ms.max(0) as u64));
+    let took = human_duration(Duration::from_millis(
+        u64::try_from(out.elapsed_ms).unwrap_or(0),
+    ));
     match ending {
         Ending::Done => (format!("Done in {took}."), Tone::Green, None),
         Ending::Refused => {
@@ -641,9 +647,11 @@ mod tests {
     fn presence_lines_follow_the_viewer_count() {
         assert_eq!(presence_line(0, 0), None);
         assert_eq!(presence_line(0, 1).unwrap(), "Someone opened your link.");
-        assert!(presence_line(1, 0)
-            .unwrap()
-            .starts_with("The helper closed the page."));
+        assert!(
+            presence_line(1, 0)
+                .unwrap()
+                .starts_with("The helper closed the page.")
+        );
         assert_eq!(
             presence_line(1, 2).unwrap(),
             "Someone else opened your link. It's open in 2 places now."
@@ -753,7 +761,10 @@ mod tests {
     }
 
     fn view(v: serde_json::Value) -> ArgView {
-        crate::cmd::summary::describe_args(v.as_object().unwrap())
+        let serde_json::Value::Object(map) = v else {
+            panic!("view takes a JSON object");
+        };
+        crate::cmd::summary::describe_args(&map)
     }
 
     #[test]

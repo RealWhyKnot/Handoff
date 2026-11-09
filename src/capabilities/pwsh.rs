@@ -1,3 +1,4 @@
+use num_traits::ToPrimitive;
 use std::process::Stdio;
 
 use serde_json::Value;
@@ -6,7 +7,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::{handler, CapResult, Failure, Handler, Progress};
+use crate::dispatch::{CapResult, Failure, Handler, Progress, handler};
 
 pub const STDOUT_CAP: usize = 4 << 20;
 pub const STDERR_CAP: usize = 512 << 10;
@@ -36,44 +37,42 @@ pub enum Echo {
 pub async fn process_slot(cancel: &CancellationToken) -> Result<SemaphorePermit<'static>, Failure> {
     tokio::select! {
         permit = PROCESSES.acquire() => {
-            permit.map_err(|_| Failure::new("could not start a process: the process limit is closed"))
+            permit.map_err(|_closed| Failure::new("could not start a process: the process limit is closed"))
         }
         _ = cancel.cancelled() => Err(Failure::new("cancelled while waiting for a free process slot")),
     }
 }
 
-#[allow(clippy::result_large_err)]
 pub async fn run_pwsh_full(
     cancel: &CancellationToken,
     script: &str,
-) -> Result<PwshResult, (PwshResult, Failure)> {
+) -> Result<PwshResult, Box<(PwshResult, Failure)>> {
     run_pwsh_echo(cancel, script, None, Echo::Both).await
 }
 
-#[allow(clippy::result_large_err)]
 pub async fn run_pwsh_echo(
     cancel: &CancellationToken,
     script: &str,
     progress: Option<Progress>,
     echo: Echo,
-) -> Result<PwshResult, (PwshResult, Failure)> {
+) -> Result<PwshResult, Box<(PwshResult, Failure)>> {
     let spawn_failed = |e: std::io::Error| {
         failure_for(
             PwshResult {
                 exit_code: -1,
                 ..PwshResult::default()
             },
-            e.to_string(),
+            &e.to_string(),
         )
     };
     let _slot = process_slot(cancel).await.map_err(|f| {
-        (
+        Box::new((
             PwshResult {
                 exit_code: -1,
                 ..PwshResult::default()
             },
             f,
-        )
+        ))
     })?;
     let mut command = Command::new("powershell.exe");
     command
@@ -118,7 +117,7 @@ pub async fn run_pwsh_echo(
         _ = cancel.cancelled() => {
             return Err(failure_for(
                 PwshResult { exit_code: -1, ..PwshResult::default() },
-                "cancelled".to_string(),
+                "cancelled",
             ));
         }
     };
@@ -132,16 +131,16 @@ pub async fn run_pwsh_echo(
         stdout_truncated,
         stderr_truncated,
     };
-    if let Err(e) = fed {
-        if res.stderr.is_empty() {
-            let msg = format!("could not send the script to powershell: {e}");
-            return Err(failure_for(res, msg));
-        }
+    if let Err(e) = fed
+        && res.stderr.is_empty()
+    {
+        let msg = format!("could not send the script to powershell: {e}");
+        return Err(failure_for(res, &msg));
     }
     if status.success() {
         return Ok(res);
     }
-    Err(failure_for(res, "no error output".to_string()))
+    Err(failure_for(res, "no error output"))
 }
 
 async fn collect_lines<R: AsyncRead + Unpin>(
@@ -190,14 +189,10 @@ async fn collect_lines<R: AsyncRead + Unpin>(
     }
 }
 
-fn failure_for(res: PwshResult, fallback: String) -> (PwshResult, Failure) {
+fn failure_for(res: PwshResult, fallback: &str) -> Box<(PwshResult, Failure)> {
     let stderr_text = String::from_utf8_lossy(&res.stderr).into_owned();
     let msg = stderr_text.trim();
-    let msg = if msg.is_empty() {
-        fallback.as_str()
-    } else {
-        msg
-    };
+    let msg = if msg.is_empty() { fallback } else { msg };
     let msg = match msg.char_indices().nth(MESSAGE_CAP) {
         Some((i, _)) => format!("{}...", &msg[..i]),
         None => msg.to_string(),
@@ -208,7 +203,7 @@ fn failure_for(res: PwshResult, fallback: String) -> (PwshResult, Failure) {
         stdout: String::from_utf8_lossy(&res.stdout).into_owned(),
         stderr: stderr_text,
     };
-    (res, failure)
+    Box::new((res, failure))
 }
 
 pub fn truncation_note(res: &PwshResult) -> Option<String> {
@@ -223,7 +218,9 @@ pub fn truncation_note(res: &PwshResult) -> Option<String> {
 }
 
 pub async fn run_pwsh(cancel: &CancellationToken, script: &str) -> Result<Vec<u8>, Failure> {
-    let res = run_pwsh_full(cancel, script).await.map_err(|(_, f)| f)?;
+    let res = run_pwsh_full(cancel, script)
+        .await
+        .map_err(|failed| failed.1)?;
     if res.stdout_truncated {
         return Err(Failure {
             message: format!(
@@ -251,12 +248,11 @@ pub fn parse_pwsh_json(out: &[u8]) -> Result<Value, Failure> {
     match serde_json::from_str::<Value>(trimmed) {
         Ok(v) => Ok(normalize_numbers(v)),
         Err(err) => {
-            if let Some(i) = trimmed.find(['[', '{']) {
-                if i > 0 {
-                    if let Ok(v) = serde_json::from_str::<Value>(&trimmed[i..]) {
-                        return Ok(normalize_numbers(v));
-                    }
-                }
+            if let Some(i) = trimmed.find(['[', '{'])
+                && i > 0
+                && let Ok(v) = serde_json::from_str::<Value>(&trimmed[i..])
+            {
+                return Ok(normalize_numbers(v));
             }
             Err(Failure::new(format!(
                 "decode powershell json: {} (got {} bytes)",
@@ -270,10 +266,13 @@ pub fn parse_pwsh_json(out: &[u8]) -> Result<Value, Failure> {
 pub fn normalize_numbers(v: Value) -> Value {
     match v {
         Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                if n.is_f64() && f.fract() == 0.0 && f.abs() < 9.0e15 {
-                    return Value::from(f as i64);
-                }
+            if let Some(f) = n.as_f64()
+                && n.is_f64()
+                && f.fract() == 0.0
+                && f.abs() < 9.0e15
+                && let Some(whole) = f.to_i64()
+            {
+                return Value::from(whole);
             }
             Value::Number(n)
         }
@@ -331,7 +330,7 @@ mod tests {
 
     fn char_codes(s: &str) -> String {
         s.chars()
-            .map(|c| (c as u32).to_string())
+            .map(|c| u32::from(c).to_string())
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -350,8 +349,13 @@ mod tests {
             );
             let out = run_pwsh(&cancel, &script).await.unwrap();
             let out = String::from_utf8_lossy(&out);
-            assert_eq!(out.trim(), char_codes(&hostile), "quote U+{:04X}", q as u32);
-            assert!(!out.contains("pwned"), "quote U+{:04X}", q as u32);
+            assert_eq!(
+                out.trim(),
+                char_codes(&hostile),
+                "quote U+{:04X}",
+                u32::from(q)
+            );
+            assert!(!out.contains("pwned"), "quote U+{:04X}", u32::from(q));
         }
     }
 
@@ -473,7 +477,7 @@ mod tests {
 
     fn recorder() -> (Progress, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = seen.clone();
+        let sink = std::sync::Arc::clone(&seen);
         let progress: Progress = std::sync::Arc::new(move |t| sink.lock().unwrap().push(t));
         (progress, seen)
     }

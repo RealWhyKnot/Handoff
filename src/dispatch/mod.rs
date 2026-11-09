@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::consent::{take_ask, Ask};
+use crate::consent::{Ask, take_ask};
 
 pub use failure::{Failure, HandlerError};
 pub use spec::{Bound, Clamp, Param, ParamType, Spec};
@@ -178,7 +178,7 @@ impl Router {
 
     pub async fn dispatch(&self, ctx: Ctx, kind: &str, args: Args) -> Outcome {
         let t0 = Instant::now();
-        let elapsed = |t0: Instant| t0.elapsed().as_millis() as i64;
+        let elapsed = |t0: Instant| crate::util::millis_i64(t0.elapsed());
         let Some(h) = self.handlers.get(kind).cloned() else {
             return Outcome {
                 error: format!("unknown kind: {kind}"),
@@ -201,21 +201,21 @@ impl Router {
         }
         let mut clamped = Vec::new();
         let mut ignored = Vec::new();
-        if let Some(spec) = self.specs.get(kind) {
-            if !spec.params.is_empty() {
-                match spec.bind(&args) {
-                    Ok(bound) => {
-                        args = bound.args;
-                        clamped = bound.clamped;
-                        ignored = bound.ignored;
-                    }
-                    Err(message) => {
-                        return Outcome {
-                            error: message,
-                            elapsed_ms: elapsed(t0),
-                            ..Outcome::default()
-                        };
-                    }
+        if let Some(spec) = self.specs.get(kind)
+            && !spec.params.is_empty()
+        {
+            match spec.bind(&args) {
+                Ok(bound) => {
+                    args = bound.args;
+                    clamped = bound.clamped;
+                    ignored = bound.ignored;
+                }
+                Err(message) => {
+                    return Outcome {
+                        error: message,
+                        elapsed_ms: elapsed(t0),
+                        ..Outcome::default()
+                    };
                 }
             }
         }
@@ -280,15 +280,15 @@ impl Router {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn noop() -> Handler {
         handler(|_, _| async { Ok(Value::Null) })
     }
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn list_spec() -> Spec {
@@ -441,11 +441,11 @@ mod tests {
     async fn dispatch_binds_before_handler() {
         let mut r = Router::new();
         let seen = Arc::new(Mutex::new(Value::Null));
-        let seen_in = seen.clone();
+        let seen_in = Arc::clone(&seen);
         r.register_spec(
             list_spec(),
             handler(move |_, a| {
-                let seen = seen_in.clone();
+                let seen = Arc::clone(&seen_in);
                 async move {
                     *seen.lock().unwrap() = a["limit"].clone();
                     Ok(json!("ok"))
@@ -463,11 +463,11 @@ mod tests {
     async fn dispatch_surfaces_bind_error_without_calling_handler() {
         let mut r = Router::new();
         let called = Arc::new(AtomicBool::new(false));
-        let called_in = called.clone();
+        let called_in = Arc::clone(&called);
         r.register_spec(
             list_spec(),
             handler(move |_, _| {
-                let called = called_in.clone();
+                let called = Arc::clone(&called_in);
                 async move {
                     called.store(true, Ordering::SeqCst);
                     Ok(Value::Null)
@@ -524,11 +524,11 @@ mod tests {
     async fn register_without_spec_leaves_args_untouched() {
         let mut r = Router::new();
         let got = Arc::new(Mutex::new(Value::Null));
-        let got_in = got.clone();
+        let got_in = Arc::clone(&got);
         r.register(
             "legacy.kind",
             handler(move |_, a| {
-                let got = got_in.clone();
+                let got = Arc::clone(&got_in);
                 async move {
                     *got.lock().unwrap() = a["anything"].clone();
                     Ok(Value::Null)
@@ -550,11 +550,11 @@ mod tests {
     async fn consent_minutes_reaches_the_ctx_and_never_the_capability() {
         let mut r = Router::new();
         let got = Arc::new(Mutex::new(None));
-        let got_in = got.clone();
+        let got_in = Arc::clone(&got);
         r.register_spec(
             list_spec(),
             handler(move |ctx: Ctx, a: Args| {
-                let got = got_in.clone();
+                let got = Arc::clone(&got_in);
                 async move {
                     *got.lock().unwrap() = Some((ctx.consent, a));
                     Ok(Value::Null)
@@ -597,7 +597,7 @@ mod tests {
     async fn bad_consent_minutes_stop_the_command_before_it_runs() {
         let mut r = Router::new();
         let called = Arc::new(AtomicBool::new(false));
-        let c = called.clone();
+        let c = Arc::clone(&called);
         r.register(
             "ps.exec",
             handler(move |_, _| {
@@ -614,9 +614,10 @@ mod tests {
                 )
                 .await;
             assert!(!out.ok);
-            assert!(out
-                .error
-                .contains("'consent_minutes' must be a whole number from 0 to 240"));
+            assert!(
+                out.error
+                    .contains("'consent_minutes' must be a whole number from 0 to 240")
+            );
         }
         assert!(!called.load(Ordering::SeqCst));
     }

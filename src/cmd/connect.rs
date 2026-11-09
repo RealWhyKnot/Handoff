@@ -27,17 +27,17 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 
 pub fn connect(args: &[String]) -> i32 {
     let Some(arg) = args.first() else {
-        eprintln!("{USAGE}");
+        crate::errln!("{USAGE}");
         return 2;
     };
     let url = connect_url(arg, &default_relay());
 
     if let Err(err) = open_browser(&url) {
-        eprintln!("could not open browser: {err}");
-        eprintln!("open this URL manually: {url}");
+        crate::errln!("could not open browser: {err}");
+        crate::errln!("open this URL manually: {url}");
         return 1;
     }
-    println!("opened: {url}");
+    crate::outln!("opened: {url}");
     0
 }
 

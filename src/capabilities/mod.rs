@@ -3,9 +3,21 @@ pub mod consent;
 pub mod drv;
 pub mod evt;
 pub mod fs;
+mod fs_dir;
+mod fs_glob;
 pub mod fs_guard;
 pub mod fs_lines;
+mod fs_lines_grep;
+mod fs_lines_range;
+mod fs_lines_reader;
+mod fs_lines_reply;
+mod fs_lines_tail;
+mod fs_meta;
+mod fs_path;
+mod fs_read;
+mod fs_search;
 pub mod fs_text;
+mod fs_walk;
 pub mod fs_write;
 pub mod hw;
 pub mod net;
@@ -28,10 +40,13 @@ pub mod storage;
 pub mod sys;
 pub mod task;
 pub mod tunnel;
+mod tunnel_host;
+mod tunnel_mgr;
+mod tunnel_state;
 
 use std::time::Duration;
 
-use crate::dispatch::{handler, Ctx, Handler, HandlerError, Param, ParamType, Router, Spec};
+use crate::dispatch::{Ctx, Handler, HandlerError, Param, ParamType, Router, Spec, handler};
 use crate::relay::Bridge;
 
 pub use consent::{deny_all_risky, last_consent_decision, ledger};
@@ -88,7 +103,7 @@ pub(crate) fn register_specs(r: &mut Router, json: &str, handlers: Vec<(&str, Ha
 pub(crate) fn with_time_limit(kind: &str, ms: u32, h: Handler) -> Handler {
     let kind = kind.to_string();
     handler(move |ctx: Ctx, args| {
-        let h = h.clone();
+        let h = std::sync::Arc::clone(&h);
         let kind = kind.clone();
         async move {
             let child = ctx.cancel.child_token();
@@ -116,9 +131,11 @@ pub fn register_control(r: &mut Router) {
             kind: "control.cancel".into(),
             label: "Cancel command".into(),
             description: "Ask the host to stop a running command.".into(),
-            params: vec![Param::new("target_id", ParamType::String)
-                .required()
-                .describe("Id of the command to stop.")],
+            params: vec![
+                Param::new("target_id", ParamType::String)
+                    .required()
+                    .describe("Id of the command to stop."),
+            ],
             ..Spec::default()
         },
         handler(|_ctx, _args| async {
@@ -134,7 +151,7 @@ mod tests {
     use super::consent::testing::SessionGuard;
     use super::*;
     use crate::dispatch::{Args, Ctx};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn spec_router() -> Router {
         let mut r = Router::new();
@@ -143,7 +160,7 @@ mod tests {
     }
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     #[tokio::test]
@@ -151,9 +168,9 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(
             None::<tokio_util::sync::CancellationToken>,
         ));
-        let s = seen.clone();
+        let s = std::sync::Arc::clone(&seen);
         let slow = handler(move |ctx: Ctx, _args| {
-            *s.lock().unwrap() = Some(ctx.cancel.clone());
+            *s.lock().unwrap() = Some(ctx.cancel);
             async move {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Ok(json!("late"))
@@ -283,7 +300,7 @@ mod tests {
         let spec = r.spec_for("app.list").expect("app.list is registered");
         let bound = spec.bind(&args(json!({"max_results": 42}))).unwrap();
         assert_eq!(bound.args["limit"], json!(42));
-        assert!(bound.ignored.is_empty());
+        assert_eq!(bound.ignored, Vec::<String>::new());
     }
 
     #[test]

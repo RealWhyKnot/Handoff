@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -204,9 +205,9 @@ impl FlagSet {
             line.push_str(&d.usage.replace('\n', "\n    \t"));
             if !d.is_zero_default() {
                 if d.kind == Kind::Str {
-                    line.push_str(&format!(" (default {})", util::go_quote(d.default)));
+                    let _ = write!(line, " (default {})", util::go_quote(d.default));
                 } else {
-                    line.push_str(&format!(" (default {})", d.default));
+                    let _ = write!(line, " (default {})", d.default);
                 }
             }
             line.push('\n');
@@ -216,8 +217,8 @@ impl FlagSet {
     }
 
     fn fail(&self, message: String) -> FlagError {
-        println!("{message}");
-        print!("{}", self.usage_text());
+        crate::outln!("{message}");
+        crate::out!("{}", self.usage_text());
         FlagError::Message(message)
     }
 
@@ -290,7 +291,7 @@ impl FlagSet {
 
             let Some(def) = self.lookup(name).copied() else {
                 if name == "help" || name == "h" {
-                    print!("{}", self.usage_text());
+                    crate::out!("{}", self.usage_text());
                     return Err(FlagError::Help);
                 }
                 return Err(self.fail(format!("flag provided but not defined: -{name}")));
@@ -420,7 +421,7 @@ fn load_config(explicit: &str, env: Env<'_>) -> FileConfig {
         Ok(d) => d,
         Err(err) => {
             if !explicit.is_empty() && err.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("warning: could not read config {}: {err}", path.display());
+                crate::errln!("warning: could not read config {}: {err}", path.display());
             }
             return FileConfig::default();
         }
@@ -429,7 +430,7 @@ fn load_config(explicit: &str, env: Env<'_>) -> FileConfig {
     match serde_json::from_slice::<Option<FileConfig>>(&data) {
         Ok(cfg) => cfg.unwrap_or_default(),
         Err(err) => {
-            eprintln!(
+            crate::errln!(
                 "warning: ignoring malformed config {}: {err}",
                 path.display()
             );
@@ -482,7 +483,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> String {
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> String + use<> {
         let map: HashMap<String, String> = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

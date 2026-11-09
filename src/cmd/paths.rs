@@ -4,13 +4,13 @@ use super::flags::Options;
 use crate::{audit, supportlog};
 
 pub fn support_log_path(opts: Option<&Options>) -> String {
-    if let Some(opts) = opts {
-        if !opts.log_dir.is_empty() {
-            return PathBuf::from(&opts.log_dir)
-                .join("handoff.log")
-                .display()
-                .to_string();
-        }
+    if let Some(opts) = opts
+        && !opts.log_dir.is_empty()
+    {
+        return PathBuf::from(&opts.log_dir)
+            .join("handoff.log")
+            .display()
+            .to_string();
     }
     supportlog::path()
         .map(|p| p.display().to_string())
@@ -18,10 +18,10 @@ pub fn support_log_path(opts: Option<&Options>) -> String {
 }
 
 pub fn audit_dir(opts: Option<&Options>) -> String {
-    if let Some(opts) = opts {
-        if !opts.audit_dir.is_empty() {
-            return opts.audit_dir.clone();
-        }
+    if let Some(opts) = opts
+        && !opts.audit_dir.is_empty()
+    {
+        return opts.audit_dir.clone();
     }
     audit::default_dir().display().to_string()
 }

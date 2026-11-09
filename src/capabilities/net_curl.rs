@@ -2,14 +2,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use base64::Engine;
-use reqwest::header::{HeaderMap, LOCATION, REFERER, USER_AGENT};
 use reqwest::Method;
-use serde_json::{json, Map, Value};
+use reqwest::header::{HeaderMap, LOCATION, REFERER, USER_AGENT};
+use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use url::{Host, Url};
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 use crate::util::go_quote;
 
 use super::net::arg_string;
@@ -170,7 +170,10 @@ fn header_map(headers: &HeaderMap) -> Map<String, Value> {
 
 fn parse_go_url(raw: &str) -> Result<Url, String> {
     let bad = |msg: &str| format!("net.curl: bad url: parse {}: {msg}", go_quote(raw));
-    if raw.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f) {
+    if raw
+        .chars()
+        .any(|c| u32::from(c) < 0x20 || u32::from(c) == 0x7f)
+    {
         return Err(bad("net/url: invalid control character in URL"));
     }
     let mut scheme = String::new();
@@ -283,7 +286,9 @@ fn build_client(host: &str, addrs: &[IpAddr], port: u16) -> Result<reqwest::Clie
         let socks: Vec<SocketAddr> = addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
         builder = builder.resolve_to_addrs(host, &socks);
     }
-    builder.build().map_err(|e| e.to_string())
+    builder
+        .build()
+        .map_err(|e| format!("build the HTTP client: {e}"))
 }
 
 fn is_redirect(code: u16) -> bool {
@@ -312,12 +317,12 @@ pub async fn run_curl(
             return Err(HandlerError::plain(format!(
                 "net.curl: resolve {}: {e}",
                 go_quote(&host)
-            )))
+            )));
         }
         Err(GuardError::Private(ip)) => {
             return Err(HandlerError::plain(format!(
                 "net.curl: refusing private/loopback destination {ip}"
-            )))
+            )));
         }
     };
 
@@ -369,7 +374,7 @@ pub async fn run_curl(
                 return Err(fail(format!(
                     "failed to parse Location header {}: {e}",
                     go_quote(&loc)
-                )))
+                )));
             }
         };
         if hops >= MAX_VIA {
@@ -380,7 +385,7 @@ pub async fn run_curl(
             Ok(a) => addrs = a,
             Err(GuardError::Lookup(e)) => return Err(fail(e)),
             Err(GuardError::Private(ip)) => {
-                return Err(fail(format!("redirect to private dest {ip}")))
+                return Err(fail(format!("redirect to private dest {ip}")));
             }
         }
         if next.scheme() != "http" && next.scheme() != "https" {
@@ -472,13 +477,13 @@ async fn net_curl(ctx: Ctx, args: Args) -> CapResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn ip(s: &str) -> IpAddr {
@@ -489,7 +494,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let hits = Arc::new(AtomicUsize::new(0));
-        let counter = hits.clone();
+        let counter = Arc::clone(&hits);
         tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
@@ -534,7 +539,7 @@ mod tests {
                                 BODY_CAP + 5000
                             )
                             .into_bytes();
-                            v.extend(std::iter::repeat(b'a').take(BODY_CAP + 5000));
+                            v.extend(std::iter::repeat_n(b'a', BODY_CAP + 5000));
                             v
                         }
                         "/exact" => {
@@ -542,7 +547,7 @@ mod tests {
                                 "HTTP/1.1 200 OK\r\nContent-Length: {BODY_CAP}\r\nConnection: close\r\n\r\n"
                             )
                             .into_bytes();
-                            v.extend(std::iter::repeat(b'b').take(BODY_CAP));
+                            v.extend(std::iter::repeat_n(b'b', BODY_CAP));
                             v
                         }
                         "/loop" => b"HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
@@ -850,7 +855,9 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(
             err.message,
-            format!("Get \"http://127.0.0.1:{port}/stall-headers\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
+            format!(
+                "Get \"http://127.0.0.1:{port}/stall-headers\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+            )
         );
     }
 

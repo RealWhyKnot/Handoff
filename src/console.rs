@@ -1,10 +1,60 @@
-use std::io::IsTerminal;
+use num_traits::ToPrimitive;
+use std::fmt;
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::util;
 
 static COLOR: AtomicBool = AtomicBool::new(false);
+
+#[macro_export]
+macro_rules! outln {
+    () => {
+        $crate::console::write_out(::std::format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::console::write_out(::std::format_args!("{}\n", ::std::format_args!($($arg)*)))
+    };
+}
+
+#[macro_export]
+macro_rules! out {
+    ($($arg:tt)*) => {
+        $crate::console::write_out(::std::format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! errln {
+    () => {
+        $crate::console::write_err(::std::format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::console::write_err(::std::format_args!("{}\n", ::std::format_args!($($arg)*)))
+    };
+}
+
+#[macro_export]
+macro_rules! err {
+    ($($arg:tt)*) => {
+        $crate::console::write_err(::std::format_args!($($arg)*))
+    };
+}
+
+pub fn write_out(args: fmt::Arguments<'_>) {
+    log_failed_write("stdout", io::stdout().lock().write_fmt(args));
+}
+
+pub fn write_err(args: fmt::Arguments<'_>) {
+    log_failed_write("stderr", io::stderr().lock().write_fmt(args));
+}
+
+fn log_failed_write(stream: &str, result: io::Result<()>) {
+    if let Err(error) = result {
+        tracing::info!("write to {stream} failed: {error}");
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -17,8 +67,7 @@ pub enum Tone {
 }
 
 pub fn init() -> bool {
-    let on =
-        color_wanted(&util::env_var("NO_COLOR"), std::io::stdout().is_terminal()) && enable_vt();
+    let on = color_wanted(&util::env_var("NO_COLOR"), io::stdout().is_terminal()) && enable_vt();
     COLOR.store(on, Ordering::SeqCst);
     on
 }
@@ -39,9 +88,10 @@ pub fn set_color(on: bool) {
 #[cfg(windows)]
 fn enable_vt() -> bool {
     use windows::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE,
-        ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
+        CONSOLE_MODE, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle,
+        STD_OUTPUT_HANDLE, SetConsoleMode,
     };
+    // SAFETY: handle is this process's stdout and mode is a live local the calls fill in.
     unsafe {
         let Ok(handle) = GetStdHandle(STD_OUTPUT_HANDLE) else {
             return false;
@@ -101,10 +151,11 @@ fn local_hms() -> (u16, u16, u16) {
         millis: u16,
     }
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetLocalTime(time: *mut SystemTime);
     }
     let mut t = SystemTime::default();
+    // SAFETY: t is a live SystemTime with the layout GetLocalTime writes.
     unsafe { GetLocalTime(&mut t) };
     (t.hour, t.minute, t.second)
 }
@@ -112,11 +163,8 @@ fn local_hms() -> (u16, u16, u16) {
 #[cfg(not(windows))]
 fn local_hms() -> (u16, u16, u16) {
     let secs = util::now_ms().div_euclid(1000).rem_euclid(86_400);
-    (
-        (secs / 3600) as u16,
-        ((secs % 3600) / 60) as u16,
-        (secs % 60) as u16,
-    )
+    let part = |value: i64| u16::try_from(value).unwrap_or(0);
+    (part(secs / 3600), part((secs % 3600) / 60), part(secs % 60))
 }
 
 pub fn stamp(text: &str) -> String {
@@ -124,11 +172,11 @@ pub fn stamp(text: &str) -> String {
 }
 
 pub fn line(text: &str) {
-    println!("{}", stamp(text));
+    crate::outln!("{}", stamp(text));
 }
 
 pub fn eline(text: &str) {
-    eprintln!("{}", stamp(text));
+    crate::errln!("{}", stamp(text));
 }
 
 pub fn human_duration(d: Duration) -> String {
@@ -161,7 +209,7 @@ pub fn human_duration(d: Duration) -> String {
 }
 
 pub fn human_ms(ms: i64) -> String {
-    human_duration(Duration::from_millis(ms.max(0) as u64))
+    human_duration(Duration::from_millis(u64::try_from(ms).unwrap_or(0)))
 }
 
 pub fn human_bytes(n: u64) -> String {
@@ -173,7 +221,7 @@ pub fn human_bytes(n: u64) -> String {
             format!("{n} bytes")
         };
     }
-    let mut value = n as f64 / 1024.0;
+    let mut value = n.to_f64().unwrap_or(f64::MAX) / 1024.0;
     let mut unit = 0;
     while value >= 1024.0 && unit < UNITS.len() - 1 {
         value /= 1024.0;
@@ -271,15 +319,11 @@ pub fn display_width(s: &str) -> usize {
 }
 
 pub fn char_width(c: char) -> usize {
-    let cp = c as u32;
+    let cp = u32::from(c);
     if c.is_control() || zero_width(cp) {
         return 0;
     }
-    if wide(cp) {
-        2
-    } else {
-        1
-    }
+    if wide(cp) { 2 } else { 1 }
 }
 
 fn zero_width(cp: u32) -> bool {
@@ -354,11 +398,12 @@ pub fn body_width_for(columns: usize) -> usize {
 #[cfg(windows)]
 fn terminal_columns() -> Option<usize> {
     use windows::Win32::System::Console::{
-        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
     };
-    if !std::io::stdout().is_terminal() {
+    if !io::stdout().is_terminal() {
         return None;
     }
+    // SAFETY: handle is this process's stdout and info is a live local the call fills in.
     unsafe {
         let handle = GetStdHandle(STD_OUTPUT_HANDLE).ok()?;
         let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
@@ -370,7 +415,7 @@ fn terminal_columns() -> Option<usize> {
 
 #[cfg(not(windows))]
 fn terminal_columns() -> Option<usize> {
-    if !std::io::stdout().is_terminal() {
+    if !io::stdout().is_terminal() {
         return None;
     }
     util::env_var("COLUMNS").trim().parse().ok()
@@ -392,7 +437,7 @@ pub fn stamp_lines(lines: &[String]) -> String {
 }
 
 pub fn lines(lines: &[String]) {
-    println!("{}", stamp_lines(lines));
+    crate::outln!("{}", stamp_lines(lines));
 }
 
 pub fn pad(s: &str, width: usize) -> String {

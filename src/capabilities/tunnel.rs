@@ -1,32 +1,30 @@
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
-use base64::Engine;
 use futures_util::future::BoxFuture;
-use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use serde_json::{Value, json};
 
 use super::consent::require_risk_consent;
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router};
+pub use super::tunnel_host::HOST_LOOKUP_TIME;
+pub use super::tunnel_host::Lookup;
+pub use super::tunnel_host::check_tunnel_host_text;
+pub use super::tunnel_host::is_allowed_tunnel_target_ip;
+pub use super::tunnel_host::is_reasonable_tunnel_hostname;
+pub use super::tunnel_host::join_host_port;
+pub use super::tunnel_host::split_host_port_ok;
+pub use super::tunnel_host::tunnel_target_description;
+pub use super::tunnel_host::validate_tunnel_target_host;
+pub use super::tunnel_host::validate_tunnel_target_host_with;
+pub use super::tunnel_mgr::TunnelMgr;
+pub use super::tunnel_state::DIAL_TIMEOUT;
+pub use super::tunnel_state::MAX_FRAME_PAYLOAD;
+pub use super::tunnel_state::READ_CHUNK;
+pub use super::tunnel_state::STREAM_QUEUE_DEPTH;
+pub use super::tunnel_state::TunnelState;
+pub use super::tunnel_state::WRITE_DEADLINE;
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 use crate::relay::Bridge;
-use crate::slog;
-use crate::util::go_quote;
 
 pub const FRAME_KINDS: [&str; 3] = ["tunnel.stream_open", "tunnel.data", "tunnel.stream_close"];
-
-pub const READ_CHUNK: usize = 16 * 1024;
-pub const MAX_FRAME_PAYLOAD: usize = 1024 * 1024;
-const _: () = assert!(MAX_FRAME_PAYLOAD >= 64 * 1024);
-pub const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
-pub const HOST_LOOKUP_TIME: Duration = Duration::from_secs(3);
-pub const STREAM_QUEUE_DEPTH: usize = 1024;
-pub const WRITE_DEADLINE: Duration = Duration::from_secs(60);
 
 pub trait TunnelBridge: Send + Sync {
     fn send_tunnel_data<'a>(
@@ -108,8 +106,6 @@ impl TunnelBridge for NoBridge {
     }
 }
 
-pub type Lookup = fn(String) -> BoxFuture<'static, Result<Vec<IpAddr>, String>>;
-
 static MANAGER: Mutex<Option<Arc<TunnelMgr>>> = Mutex::new(None);
 
 fn manager_slot() -> MutexGuard<'static, Option<Arc<TunnelMgr>>> {
@@ -170,697 +166,6 @@ pub fn raw_string(args: &Args, key: &str) -> String {
     }
 }
 
-pub struct TunnelMgr {
-    bridge: Arc<dyn TunnelBridge>,
-    tunnels: Mutex<HashMap<String, Arc<TunnelState>>>,
-}
-
-pub struct TunnelState {
-    pub id: String,
-    pub local_port: i64,
-    pub local_host: String,
-    pub dial_host: String,
-    bridge: Arc<dyn TunnelBridge>,
-    done: CancellationToken,
-    inner: Mutex<StateInner>,
-}
-
-#[derive(Default)]
-struct StateInner {
-    streams: HashMap<String, Arc<TunnelStream>>,
-    queues: HashMap<String, mpsc::Sender<Frame>>,
-    closed: bool,
-}
-
-struct TunnelStream {
-    id: String,
-    tunnel_id: String,
-    cancel: CancellationToken,
-    writer: Arc<tokio::sync::Mutex<Option<OwnedWriteHalf>>>,
-}
-
-enum Frame {
-    StreamOpen,
-    Data(Vec<u8>),
-    StreamClose(String),
-}
-
-impl TunnelMgr {
-    pub fn new(bridge: Arc<dyn TunnelBridge>) -> Arc<TunnelMgr> {
-        Arc::new(TunnelMgr {
-            bridge,
-            tunnels: Mutex::new(HashMap::new()),
-        })
-    }
-
-    fn tunnels(&self) -> MutexGuard<'_, HashMap<String, Arc<TunnelState>>> {
-        self.tunnels.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub fn shutdown(&self) {
-        let states: Vec<Arc<TunnelState>> = self.tunnels().drain().map(|(_, t)| t).collect();
-        for t in states {
-            t.close_all("host shutdown");
-        }
-    }
-
-    pub async fn open(
-        &self,
-        tunnel_id: &str,
-        port: i64,
-        host: &str,
-    ) -> Result<Arc<TunnelState>, String> {
-        self.open_with(tunnel_id, port, host, system_lookup).await
-    }
-
-    pub async fn open_with(
-        &self,
-        tunnel_id: &str,
-        port: i64,
-        host: &str,
-        lookup: Lookup,
-    ) -> Result<Arc<TunnelState>, String> {
-        if tunnel_id.is_empty() {
-            return Err("tunnel.open: tunnel_id is required".to_string());
-        }
-        if port <= 0 || port > 65535 {
-            return Err(format!(
-                "tunnel.open: local_port must be 1..65535 (got {port})"
-            ));
-        }
-        let mut host = host.trim();
-        if host.is_empty() {
-            host = "127.0.0.1";
-        }
-        let (display, dial_ip) = validate_tunnel_target_host_with(host, lookup).await?;
-
-        let mut tunnels = self.tunnels();
-        if let Some(existing) = tunnels.get(tunnel_id) {
-            if existing.local_port != port || existing.local_host != display {
-                return Err(format!(
-                    "tunnel.open: tunnel_id {tunnel_id} already open on a different port"
-                ));
-            }
-            return Ok(existing.clone());
-        }
-        let t = Arc::new(TunnelState {
-            id: tunnel_id.to_string(),
-            local_port: port,
-            local_host: display,
-            dial_host: dial_ip,
-            bridge: self.bridge.clone(),
-            done: CancellationToken::new(),
-            inner: Mutex::new(StateInner::default()),
-        });
-        tunnels.insert(tunnel_id.to_string(), t.clone());
-        Ok(t)
-    }
-
-    pub fn get(&self, tunnel_id: &str) -> Option<Arc<TunnelState>> {
-        self.tunnels().get(tunnel_id).cloned()
-    }
-
-    pub fn close_tunnel(&self, tunnel_id: &str, reason: &str) -> bool {
-        let removed = self.tunnels().remove(tunnel_id);
-        match removed {
-            Some(t) => {
-                t.close_all(reason);
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub fn enqueue_frame(
-        &self,
-        kind: &str,
-        tunnel_id: &str,
-        stream_id: &str,
-        data_b64: &str,
-        reason: &str,
-    ) {
-        let Some(t) = self.get(tunnel_id) else {
-            return;
-        };
-        if stream_id.is_empty() {
-            return;
-        }
-        match kind {
-            "tunnel.stream_open" => t.enqueue(stream_id, Frame::StreamOpen),
-            "tunnel.data" => {
-                let payload = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
-                    Ok(p) => p,
-                    Err(err) => {
-                        slog!(
-                            "tunnel data bad base64 tunnel={tunnel_id} stream={stream_id}: {err}"
-                        );
-                        return;
-                    }
-                };
-                if payload.len() > MAX_FRAME_PAYLOAD {
-                    slog!(
-                        "tunnel data oversize tunnel={tunnel_id} stream={stream_id} bytes={}",
-                        payload.len()
-                    );
-                    let bridge = self.bridge.clone();
-                    let (tid, sid) = (tunnel_id.to_string(), stream_id.to_string());
-                    tokio::spawn(async move {
-                        let _ = bridge
-                            .send_tunnel_stream_close(&tid, &sid, "frame too large")
-                            .await;
-                    });
-                    t.enqueue(stream_id, Frame::StreamClose("frame too large".to_string()));
-                    return;
-                }
-                t.enqueue(stream_id, Frame::Data(payload));
-            }
-            "tunnel.stream_close" => {
-                let reason = if reason.is_empty() {
-                    "operator close"
-                } else {
-                    reason
-                };
-                t.enqueue(stream_id, Frame::StreamClose(reason.to_string()));
-            }
-            _ => {}
-        }
-    }
-}
-
-struct QueueGuard {
-    state: Arc<TunnelState>,
-    stream_id: String,
-}
-
-impl Drop for QueueGuard {
-    fn drop(&mut self) {
-        self.state.lock().queues.remove(&self.stream_id);
-    }
-}
-
-impl TunnelState {
-    fn lock(&self) -> MutexGuard<'_, StateInner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub fn stream_count(&self) -> usize {
-        self.lock().streams.len()
-    }
-
-    pub fn dial_target(&self) -> String {
-        join_host_port(&self.dial_host, self.local_port)
-    }
-
-    fn enqueue(self: &Arc<Self>, stream_id: &str, f: Frame) {
-        let tx = {
-            let mut inner = self.lock();
-            if inner.closed {
-                return;
-            }
-            match inner.queues.get(stream_id) {
-                Some(tx) => tx.clone(),
-                None => {
-                    let (tx, rx) = mpsc::channel(STREAM_QUEUE_DEPTH);
-                    inner.queues.insert(stream_id.to_string(), tx.clone());
-                    tokio::spawn(self.clone().consume(stream_id.to_string(), rx));
-                    tx
-                }
-            }
-        };
-        match tx.try_send(f) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
-            Err(mpsc::error::TrySendError::Full(f)) => self.send_blocking(stream_id, tx, f),
-        }
-    }
-
-    fn send_blocking(&self, stream_id: &str, tx: mpsc::Sender<Frame>, f: Frame) {
-        let multi = tokio::runtime::Handle::try_current()
-            .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-            .unwrap_or(false);
-        if !multi {
-            slog!(
-                "tunnel queue full tunnel={} stream={stream_id}; frame dropped",
-                self.id
-            );
-            return;
-        }
-        let done = self.done.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                tokio::select! {
-                    _ = tx.send(f) => {}
-                    _ = done.cancelled() => {}
-                }
-            })
-        });
-    }
-
-    async fn consume(self: Arc<Self>, stream_id: String, mut rx: mpsc::Receiver<Frame>) {
-        let _guard = QueueGuard {
-            state: self.clone(),
-            stream_id: stream_id.clone(),
-        };
-        let mut s: Option<Arc<TunnelStream>> = None;
-        loop {
-            let f = tokio::select! {
-                _ = self.done.cancelled() => {
-                    if let Some(s) = &s {
-                        s.close("tunnel closed");
-                    }
-                    return;
-                }
-                f = rx.recv() => f,
-            };
-            let Some(f) = f else {
-                return;
-            };
-            match f {
-                Frame::StreamOpen => {
-                    if s.is_some() {
-                        continue;
-                    }
-                    match self.dial_stream(&stream_id).await {
-                        Ok(st) => s = Some(st),
-                        Err(err) => {
-                            slog!(
-                                "tunnel dial failed tunnel={} stream={stream_id}: {err}",
-                                self.id
-                            );
-                            let _ = self
-                                .bridge
-                                .send_tunnel_stream_close(
-                                    &self.id,
-                                    &stream_id,
-                                    &format!("dial error: {err}"),
-                                )
-                                .await;
-                        }
-                    }
-                }
-                Frame::Data(payload) => {
-                    let Some(st) = &s else {
-                        continue;
-                    };
-                    if let Err(err) = st.write(&payload).await {
-                        slog!(
-                            "tunnel write failed tunnel={} stream={stream_id}: {err}",
-                            self.id
-                        );
-                        let _ = self
-                            .bridge
-                            .send_tunnel_stream_close(
-                                &self.id,
-                                &stream_id,
-                                &format!("write error: {err}"),
-                            )
-                            .await;
-                        st.close("write error");
-                        s = None;
-                    }
-                }
-                Frame::StreamClose(reason) => {
-                    if let Some(st) = &s {
-                        st.close(&reason);
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
-    async fn dial_stream(self: &Arc<Self>, stream_id: &str) -> Result<Arc<TunnelStream>, String> {
-        let target = {
-            let inner = self.lock();
-            if inner.closed {
-                return Err(format!("tunnel {} is closed", self.id));
-            }
-            if inner.streams.contains_key(stream_id) {
-                return Err(format!("stream_id {stream_id} already open"));
-            }
-            self.dial_target()
-        };
-
-        let conn = match tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(target.as_str()))
-            .await
-        {
-            Ok(Ok(c)) => c,
-            Ok(Err(err)) => return Err(format!("dial {target}: {}", go_dial_error(&target, &err))),
-            Err(_) => return Err(format!("dial {target}: dial tcp {target}: i/o timeout")),
-        };
-        let (rd, wr) = conn.into_split();
-        let stream = Arc::new(TunnelStream {
-            id: stream_id.to_string(),
-            tunnel_id: self.id.clone(),
-            cancel: CancellationToken::new(),
-            writer: Arc::new(tokio::sync::Mutex::new(Some(wr))),
-        });
-
-        {
-            let mut inner = self.lock();
-            if inner.closed {
-                drop(inner);
-                stream.cancel.cancel();
-                return Err(format!("tunnel {} closed during dial", self.id));
-            }
-            inner.streams.insert(stream_id.to_string(), stream.clone());
-        }
-
-        tokio::spawn(self.clone().read_pump(rd, stream.clone()));
-        slog!(
-            "tunnel stream open tunnel={} stream={stream_id} local={target}",
-            self.id
-        );
-        Ok(stream)
-    }
-
-    async fn read_pump(self: Arc<Self>, mut rd: OwnedReadHalf, s: Arc<TunnelStream>) {
-        let mut buf = vec![0u8; READ_CHUNK];
-        loop {
-            let res = tokio::select! {
-                _ = s.cancel.cancelled() => break,
-                r = rd.read(&mut buf) => r,
-            };
-            let reason = match res {
-                Ok(0) => "eof".to_string(),
-                Ok(n) => {
-                    if s.cancel.is_cancelled() {
-                        break;
-                    }
-                    if let Err(err) = self
-                        .bridge
-                        .send_tunnel_data(&self.id, &s.id, &buf[..n])
-                        .await
-                    {
-                        slog!(
-                            "tunnel send data failed tunnel={} stream={}: {err}",
-                            self.id,
-                            s.id
-                        );
-                        break;
-                    }
-                    continue;
-                }
-                Err(err) => format!("read error: {}", go_io_error(&err)),
-            };
-            if !s.cancel.is_cancelled() {
-                let _ = self
-                    .bridge
-                    .send_tunnel_stream_close(&self.id, &s.id, &reason)
-                    .await;
-            }
-            slog!(
-                "tunnel stream end tunnel={} stream={} reason={reason}",
-                self.id,
-                s.id
-            );
-            break;
-        }
-        {
-            let mut inner = self.lock();
-            if inner
-                .streams
-                .get(&s.id)
-                .is_some_and(|existing| Arc::ptr_eq(existing, &s))
-            {
-                inner.streams.remove(&s.id);
-            }
-        }
-        drop(rd);
-        s.writer.lock().await.take();
-    }
-
-    pub fn close_all(&self, reason: &str) {
-        let streams: Vec<Arc<TunnelStream>> = {
-            let mut inner = self.lock();
-            inner.closed = true;
-            inner.streams.drain().map(|(_, s)| s).collect()
-        };
-        self.done.cancel();
-        for s in streams {
-            s.close(reason);
-        }
-        slog!("tunnel close tunnel={} reason={reason}", self.id);
-    }
-}
-
-impl TunnelStream {
-    async fn write(&self, payload: &[u8]) -> Result<(), String> {
-        let write = async {
-            let mut guard = self.writer.lock().await;
-            match guard.as_mut() {
-                Some(w) => w.write_all(payload).await.map_err(|e| go_io_error(&e)),
-                None => Err("use of closed network connection".to_string()),
-            }
-        };
-        match tokio::time::timeout(WRITE_DEADLINE, write).await {
-            Ok(r) => r,
-            Err(_) => Err("i/o timeout".to_string()),
-        }
-    }
-
-    fn close(&self, reason: &str) {
-        self.cancel.cancel();
-        match self.writer.try_lock() {
-            Ok(mut guard) => {
-                guard.take();
-            }
-            Err(_) => {
-                let writer = self.writer.clone();
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
-                        writer.lock().await.take();
-                    });
-                }
-            }
-        }
-        slog!(
-            "tunnel stream close tunnel={} stream={} reason={reason}",
-            self.tunnel_id,
-            self.id
-        );
-    }
-}
-
-fn strip_os_error(text: &str) -> String {
-    match text.rfind(" (os error ") {
-        Some(i) if text.ends_with(')') => text[..i].to_string(),
-        _ => text.to_string(),
-    }
-}
-
-fn go_io_error(err: &std::io::Error) -> String {
-    strip_os_error(&err.to_string())
-}
-
-fn go_dial_error(target: &str, err: &std::io::Error) -> String {
-    format!("dial tcp {target}: connectex: {}", go_io_error(err))
-}
-
-pub fn join_host_port(host: &str, port: i64) -> String {
-    if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
-}
-
-fn system_lookup(host: String) -> BoxFuture<'static, Result<Vec<IpAddr>, String>> {
-    Box::pin(async move {
-        match tokio::net::lookup_host((host.as_str(), 0)).await {
-            Ok(addrs) => {
-                let mut out: Vec<IpAddr> = Vec::new();
-                for a in addrs {
-                    if !out.contains(&a.ip()) {
-                        out.push(a.ip());
-                    }
-                }
-                Ok(out)
-            }
-            Err(err) => {
-                let text = match err.raw_os_error() {
-                    Some(11001) | Some(11004) => "no such host".to_string(),
-                    _ => go_io_error(&err),
-                };
-                Err(format!("lookup {host}: {text}"))
-            }
-        }
-    })
-}
-
-pub fn split_host_port_ok(hostport: &str) -> bool {
-    let Some(i) = hostport.rfind(':') else {
-        return false;
-    };
-    let (j, k);
-    if hostport.starts_with('[') {
-        let Some(end) = hostport.find(']') else {
-            return false;
-        };
-        if end + 1 == hostport.len() || end + 1 != i {
-            return false;
-        }
-        j = 1;
-        k = end + 1;
-    } else {
-        if hostport[..i].contains(':') {
-            return false;
-        }
-        j = 0;
-        k = 0;
-    }
-    if hostport[j..].contains('[') {
-        return false;
-    }
-    if hostport[k..].contains(']') {
-        return false;
-    }
-    true
-}
-
-pub fn check_tunnel_host_text(host: &str) -> Result<(), String> {
-    let host = host.trim();
-    if host.is_empty() {
-        return Ok(());
-    }
-    if host.contains("://") || host.contains(['/', '\\', '?', '#', '@']) {
-        return Err(format!(
-            "tunnel.open: host must be a hostname or IP address (got {})",
-            go_quote(host)
-        ));
-    }
-    if split_host_port_ok(host) {
-        return Err(format!(
-            "tunnel.open: host must not include a port (got {})",
-            go_quote(host)
-        ));
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if !is_allowed_tunnel_target_ip(ip) {
-            return Err(format!(
-                "tunnel.open: host {} is not a local network address",
-                go_quote(host)
-            ));
-        }
-        return Ok(());
-    }
-    if !is_reasonable_tunnel_hostname(host) {
-        return Err(format!("tunnel.open: invalid host {}", go_quote(host)));
-    }
-    Ok(())
-}
-
-pub async fn validate_tunnel_target_host(host: &str) -> Result<(String, String), String> {
-    validate_tunnel_target_host_with(host, system_lookup).await
-}
-
-pub async fn validate_tunnel_target_host_with(
-    host: &str,
-    lookup: Lookup,
-) -> Result<(String, String), String> {
-    let host = host.trim();
-    check_tunnel_host_text(host)?;
-    if host.is_empty() {
-        return Ok(("127.0.0.1".to_string(), "127.0.0.1".to_string()));
-    }
-    if host.parse::<IpAddr>().is_ok() {
-        return Ok((host.to_string(), host.to_string()));
-    }
-
-    let addrs = match tokio::time::timeout(HOST_LOOKUP_TIME, lookup(host.to_string())).await {
-        Ok(Ok(a)) => a,
-        Ok(Err(err)) => {
-            return Err(format!(
-                "tunnel.open: resolve host {}: {err}",
-                go_quote(host)
-            ));
-        }
-        Err(_) => {
-            return Err(format!(
-                "tunnel.open: resolve host {}: lookup {host}: i/o timeout",
-                go_quote(host)
-            ));
-        }
-    };
-    if addrs.is_empty() {
-        return Err(format!(
-            "tunnel.open: resolve host {}: no addresses",
-            go_quote(host)
-        ));
-    }
-    for ip in &addrs {
-        if !is_allowed_tunnel_target_ip(*ip) {
-            return Err(format!(
-                "tunnel.open: host {} resolves outside the local network ({})",
-                go_quote(host),
-                canonical_ip(*ip)
-            ));
-        }
-    }
-    Ok((host.to_string(), canonical_ip(addrs[0]).to_string()))
-}
-
-pub fn is_reasonable_tunnel_hostname(host: &str) -> bool {
-    if host.len() > 253 {
-        return false;
-    }
-    host.chars()
-        .all(|r| r == '.' || r == '-' || r == '_' || r.is_ascii_alphanumeric())
-}
-
-fn canonical_ip(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => ip,
-        },
-        v4 => v4,
-    }
-}
-
-fn v4_allowed(ip: Ipv4Addr) -> bool {
-    if ip.is_unspecified() || ip.is_multicast() {
-        return false;
-    }
-    if ip.is_loopback() || ip.is_private() || ip.is_link_local() {
-        return true;
-    }
-    let o = ip.octets();
-    o[0] == 100 && o[1] & 0xc0 == 64
-}
-
-fn v6_allowed(ip: Ipv6Addr) -> bool {
-    if ip.is_unspecified() || ip.is_multicast() {
-        return false;
-    }
-    let seg = ip.segments();
-    ip.is_loopback() || seg[0] & 0xfe00 == 0xfc00 || seg[0] & 0xffc0 == 0xfe80
-}
-
-pub fn is_allowed_tunnel_target_ip(ip: IpAddr) -> bool {
-    match canonical_ip(ip) {
-        IpAddr::V4(v4) => v4_allowed(v4),
-        IpAddr::V6(v6) => v6_allowed(v6),
-    }
-}
-
-fn is_loopback_ip_text(host: &str) -> bool {
-    host.parse::<IpAddr>()
-        .map(|ip| canonical_ip(ip).is_loopback())
-        .unwrap_or(false)
-}
-
-pub fn tunnel_target_description(host_arg: &str, port: i64) -> String {
-    let mut host = host_arg.trim();
-    if host.is_empty() {
-        host = "127.0.0.1";
-    }
-    if host.eq_ignore_ascii_case("localhost") || is_loopback_ip_text(host) {
-        return format!("a service running on this computer ({host}:{port})");
-    }
-    format!("a device on this computer's local network, {host}:{port} (for example a router or printer)")
-}
-
 async fn open_handler(ctx: Ctx, args: Args) -> CapResult {
     let tunnel_id = raw_string(&args, "tunnel_id");
     let port = args.get("local_port").and_then(Value::as_i64).unwrap_or(0);
@@ -882,7 +187,7 @@ async fn open_handler(ctx: Ctx, args: Args) -> CapResult {
         .open(&tunnel_id, port, &host_arg)
         .await
         .map_err(HandlerError::plain)?;
-    slog!(
+    tracing::info!(
         "tunnel open tunnel={} local={}:{}",
         t.id,
         t.local_host,
@@ -911,8 +216,13 @@ async fn close_handler(_ctx: Ctx, args: Args) -> CapResult {
 mod tests {
     use super::super::consent::testing::SessionGuard;
     use super::*;
+    use crate::capabilities::Duration;
     use crate::consent::Prompt;
+    use base64::Engine;
+    use std::net::IpAddr;
     use std::time::Instant;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     #[derive(Default)]
@@ -980,7 +290,7 @@ mod tests {
 
     fn fake() -> (Arc<FakeBridge>, Arc<TunnelMgr>) {
         let bridge = Arc::new(FakeBridge::default());
-        let mgr = TunnelMgr::new(bridge.clone());
+        let mgr = TunnelMgr::new(Arc::<FakeBridge>::clone(&bridge));
         (bridge, mgr)
     }
 
@@ -1012,7 +322,7 @@ mod tests {
 
     async fn start_echo_server() -> (i64, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port() as i64;
+        let port = i64::from(listener.local_addr().unwrap().port());
         let handle = tokio::spawn(async move {
             while let Ok((mut c, _)) = listener.accept().await {
                 tokio::spawn(async move {
@@ -1026,7 +336,7 @@ mod tests {
 
     async fn start_http_server() -> (i64, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port() as i64;
+        let port = i64::from(listener.local_addr().unwrap().port());
         let handle = tokio::spawn(async move {
             while let Ok((mut c, _)) = listener.accept().await {
                 tokio::spawn(async move {
@@ -1062,7 +372,7 @@ mod tests {
     }
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn prompt(answer: bool) -> Prompt {
@@ -1386,7 +696,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dial_failure_reports_stream_close() {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap().port() as i64;
+        let port = i64::from(probe.local_addr().unwrap().port());
         drop(probe);
         let (bridge, mgr) = fake();
         mgr.open("tn1", port, "127.0.0.1").await.unwrap();
@@ -1395,7 +705,9 @@ mod tests {
         loop {
             let closes = bridge.close_reasons();
             if let Some(c) = closes.first() {
-                let want = format!("tn1:s1:dial error: dial 127.0.0.1:{port}: dial tcp 127.0.0.1:{port}: connectex: ");
+                let want = format!(
+                    "tn1:s1:dial error: dial 127.0.0.1:{port}: dial tcp 127.0.0.1:{port}: connectex: "
+                );
                 assert!(c.starts_with(&want), "{c}");
                 assert!(!c.contains("os error"), "{c}");
                 break;
@@ -1426,7 +738,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_handler_refuses_a_bad_host_before_asking() {
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let seen = asked.clone();
+        let seen = Arc::clone(&asked);
         let _guard = SessionGuard::with_prompt(Arc::new(move |_, _| {
             seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async { Ok(crate::consent::Answer::ForGrant) })
@@ -1457,7 +769,7 @@ mod tests {
         let _guard = SessionGuard::with_prompt(prompt(true));
         let (port, server) = start_echo_server().await;
         let bridge = Arc::new(FakeBridge::default());
-        let old = set_manager(Some(TunnelMgr::new(bridge.clone())));
+        let old = set_manager(Some(TunnelMgr::new(Arc::<FakeBridge>::clone(&bridge))));
 
         let res = open_handler(
             Ctx::default(),

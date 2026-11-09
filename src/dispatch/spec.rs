@@ -218,15 +218,15 @@ fn bind_one(kind: &str, p: &Param, raw: Value) -> Result<(Value, Option<Clamp>),
                 return Err(format!("{kind}: '{}' must be a number", p.name));
             };
             let mut n = original;
-            if let Some(min) = p.min {
-                if n < min {
-                    n = min;
-                }
+            if let Some(min) = p.min
+                && n < min
+            {
+                n = min;
             }
-            if let Some(max) = p.max {
-                if n > max {
-                    n = max;
-                }
+            if let Some(max) = p.max
+                && n > max
+            {
+                n = max;
             }
             let clamp = (n != original).then(|| Clamp {
                 param: p.name.clone(),
@@ -284,7 +284,7 @@ mod tests {
     use serde_json::json;
 
     fn args(v: Value) -> Map<String, Value> {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     fn list_spec() -> Spec {
@@ -342,7 +342,7 @@ mod tests {
         let bound = list_spec().bind(&args(json!({"max_results": 50}))).unwrap();
         assert_eq!(bound.args["limit"], json!(50));
         assert!(!bound.args.contains_key("max_results"));
-        assert!(bound.ignored.is_empty());
+        assert_eq!(bound.ignored, Vec::<String>::new());
     }
 
     #[test]
@@ -399,9 +399,11 @@ mod tests {
     fn bind_enforces_max_bytes() {
         let spec = Spec {
             kind: "ps.exec".into(),
-            params: vec![Param::new("script", ParamType::String)
-                .required()
-                .max_bytes(8)],
+            params: vec![
+                Param::new("script", ParamType::String)
+                    .required()
+                    .max_bytes(8),
+            ],
             ..Spec::default()
         };
         let err = spec
@@ -430,18 +432,21 @@ mod tests {
             params: vec![Param::new("content", ParamType::String).max_bytes(1 << 20)],
             ..Spec::default()
         };
-        assert!(roomy
-            .bind(&args(json!({"content": "x".repeat(100_000)})))
-            .is_ok());
+        assert!(
+            roomy
+                .bind(&args(json!({"content": "x".repeat(100_000)})))
+                .is_ok()
+        );
 
         let blob = Spec {
             kind: "fs.upload".into(),
             params: vec![Param::new("data", ParamType::BytesBase64)],
             ..Spec::default()
         };
-        assert!(blob
-            .bind(&args(json!({"data": "x".repeat(100_000)})))
-            .is_ok());
+        assert!(
+            blob.bind(&args(json!({"data": "x".repeat(100_000)})))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -458,12 +463,14 @@ mod tests {
             description: "D".into(),
             risky: true,
             default_timeout_ms: 5,
-            params: vec![Param::new("a", ParamType::Int)
-                .required()
-                .default_value(json!(1))
-                .range(0, 9)
-                .aliases(&["b"])
-                .describe("d")],
+            params: vec![
+                Param::new("a", ParamType::Int)
+                    .required()
+                    .default_value(json!(1))
+                    .range(0, 9)
+                    .aliases(&["b"])
+                    .describe("d"),
+            ],
         };
         assert_eq!(
             serde_json::to_string(&spec).unwrap(),

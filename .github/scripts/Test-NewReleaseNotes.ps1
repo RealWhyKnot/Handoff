@@ -3,73 +3,148 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-$script = Join-Path $PSScriptRoot 'New-ReleaseNotes.ps1'
-$templates = Join-Path $PSScriptRoot '..\release-template'
-$repo = Join-Path ([System.IO.Path]::GetTempPath()) ("release-notes-test-" + [System.Guid]::NewGuid().ToString('N'))
+function Invoke-Git {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory)]
+        [string[]] $Arguments
+    )
 
-function Invoke-Git([string[]] $Arguments) {
-    & git @Arguments | Out-Null
+    $null = git @Arguments
     if ($LASTEXITCODE -ne 0) { throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE" }
 }
 
-function Assert-Contains([string] $Body, [string] $Expected) {
-    if (-not $Body.Contains($Expected)) { throw "Expected release body to contain: $Expected`n---`n$Body" }
+function Assert-True {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory)]
+        [bool] $Condition,
+        [Parameter(Mandatory)]
+        [string] $Message
+    )
+
+    if (-not $Condition) {
+        $script:failures++
+        Write-Host "FAIL: $Message"
+    }
 }
 
-function New-Changelog([string] $Text) {
-    $path = Join-Path $repo ("changelog-" + [System.Guid]::NewGuid().ToString('N') + ".md")
-    [System.IO.File]::WriteAllText($path, $Text, (New-Object System.Text.UTF8Encoding($false)))
-    return $path
+function Assert-Contain {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Body,
+        [Parameter(Mandatory)]
+        [string] $Expected
+    )
+
+    Assert-True -Condition $Body.Contains($Expected) -Message "Expected release body to contain: $Expected`n---`n$Body"
 }
 
+function New-Changelog {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepoRoot,
+        [Parameter(Mandatory)]
+        [string] $Text
+    )
+
+    $path = Join-Path $RepoRoot ('changelog-' + [guid]::NewGuid().ToString('N') + '.md')
+    [IO.File]::WriteAllText($path, $Text)
+    $path
+}
+
+function Test-NotesFailure {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Script,
+        [Parameter(Mandatory)]
+        [hashtable] $Common,
+        [Parameter(Mandatory)]
+        [string] $Changelog
+    )
+
+    try {
+        $null = & $Script @Common -ChangelogPath $Changelog
+    } catch [System.Management.Automation.RuntimeException] {
+        return $true
+    }
+    $LASTEXITCODE -ne 0
+}
+
+$script:failures = 0
+$notes = Join-Path $PSScriptRoot 'New-ReleaseNotes.ps1'
+$common = @{
+    Tag         = 'v2026.1.2.0'
+    Repo        = 'RealWhyKnot/Handoff'
+    TemplateDir = Join-Path $PSScriptRoot '..\release-template'
+}
+$repo = Join-Path ([IO.Path]::GetTempPath()) ('release-notes-test-' + [guid]::NewGuid().ToString('N'))
+$null = [IO.Directory]::CreateDirectory($repo)
+Push-Location -LiteralPath $repo
 try {
-    New-Item -ItemType Directory -Path $repo -Force | Out-Null
-    Push-Location $repo
-    Invoke-Git @('init', '-q')
-    Invoke-Git @('config', 'user.email', 'release-test@example.com')
-    Invoke-Git @('config', 'user.name', 'WhyKnot')
-    Invoke-Git @('config', 'commit.gpgsign', 'false')
-    Add-Content -LiteralPath (Join-Path $repo 'sample.txt') -Value 'sample' -Encoding UTF8
-    Invoke-Git @('add', 'sample.txt')
-    Invoke-Git @('commit', '-q', '-m', 'feat: a thing')
-    Invoke-Git @('tag', 'v2026.1.2.0')
+    Invoke-Git -Arguments @('init', '-q')
+    Invoke-Git -Arguments @('config', 'user.email', 'release-test@example.com')
+    Invoke-Git -Arguments @('config', 'user.name', 'WhyKnot')
+    Invoke-Git -Arguments @('config', 'commit.gpgsign', 'false')
+    [IO.File]::WriteAllText((Join-Path $repo 'sample.txt'), "sample`n")
+    Invoke-Git -Arguments @('add', 'sample.txt')
+    Invoke-Git -Arguments @('commit', '-q', '-m', 'feat: a thing')
+    Invoke-Git -Arguments @('tag', 'v2026.1.2.0')
 
-    $sha = (git rev-parse 'v2026.1.2.0^{}').Trim().Substring(0, 12)
-    $changelog = New-Changelog "# Handoff v2026.1.2.0`n`n## What's Changed`n`n### Features`n- feat: a thing by @RealWhyKnot in abc1234`n"
+    $sha = git rev-parse 'v2026.1.2.0^{}'
+    if ($LASTEXITCODE -ne 0) { throw "git rev-parse failed with exit code $LASTEXITCODE" }
+    $sha = ([string]$sha).Trim().Substring(0, 12)
+    $entry = '- feat: a thing by @RealWhyKnot in abc1234'
+    $text = "# Handoff v2026.1.2.0`n`n## What's Changed`n`n### Features`n$entry`n"
+    $changelog = New-Changelog -RepoRoot $repo -Text $text
 
-    $body = (& $script -Tag 'v2026.1.2.0' -Repo 'RealWhyKnot/Handoff' -ChangelogPath $changelog -ExeSha256 'ABC123' -PrevTag 'v2026.1.1.0' -TemplateDir $templates) -join "`n"
+    $body = (& $notes @common -ChangelogPath $changelog -ExeSha256 'ABC123' -PrevTag 'v2026.1.1.0') -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "New-ReleaseNotes.ps1 failed with exit code $LASTEXITCODE" }
 
-    Assert-Contains $body '# Handoff v2026.1.2.0'
-    Assert-Contains $body '- feat: a thing by @RealWhyKnot in abc1234'
-    Assert-Contains $body 'SHA256 of `handoff.exe`: `abc123`'
-    Assert-Contains $body "Built from commit ``$sha`` on ``main``"
-    Assert-Contains $body '## Install (fresh)'
-    Assert-Contains $body '## Uninstall'
-    Assert-Contains $body '## What you need to do'
-    if ($body.IndexOf('# Handoff v2026.1.2.0') -ne 0) { throw 'The changelog must lead the body' }
+    Assert-Contain -Body $body -Expected '# Handoff v2026.1.2.0'
+    Assert-Contain -Body $body -Expected $entry
+    Assert-Contain -Body $body -Expected 'SHA256 of `handoff.exe`: `abc123`'
+    Assert-Contain -Body $body -Expected "Built from commit ``$sha`` on ``main``"
+    Assert-Contain -Body $body -Expected '## Install (fresh)'
+    Assert-Contain -Body $body -Expected '## Uninstall'
+    Assert-Contain -Body $body -Expected '## What you need to do'
+    Assert-True -Condition ($body.IndexOf('# Handoff v2026.1.2.0') -eq 0) -Message 'The changelog must lead the body'
 
-    $noHash = (& $script -Tag 'v2026.1.2.0' -Repo 'RealWhyKnot/Handoff' -ChangelogPath $changelog -PrevTag '' -TemplateDir $templates) -join "`n"
-    if ($noHash -match 'File integrity') { throw 'File integrity section must be omitted without a hash' }
+    $noHash = (& $notes @common -ChangelogPath $changelog -PrevTag '') -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "New-ReleaseNotes.ps1 failed with exit code $LASTEXITCODE" }
+    $message = 'File integrity section must be omitted without a hash'
+    Assert-True -Condition ($noHash -notmatch 'File integrity') -Message $message
 
     $missing = Join-Path $repo 'does-not-exist.md'
-    $threw = $false
-    try { & $script -Tag 'v2026.1.2.0' -Repo 'RealWhyKnot/Handoff' -ChangelogPath $missing -TemplateDir $templates | Out-Null } catch { $threw = $true }
-    if (-not $threw) { throw 'A missing changelog must throw' }
+    $threw = Test-NotesFailure -Script $notes -Common $common -Changelog $missing
+    Assert-True -Condition $threw -Message 'A missing changelog must throw'
 
-    $empty = New-Changelog "   `n"
-    $threw = $false
-    try { & $script -Tag 'v2026.1.2.0' -Repo 'RealWhyKnot/Handoff' -ChangelogPath $empty -TemplateDir $templates | Out-Null } catch { $threw = $true }
-    if (-not $threw) { throw 'An empty changelog must throw' }
+    $empty = New-Changelog -RepoRoot $repo -Text "   `n"
+    $threw = Test-NotesFailure -Script $notes -Common $common -Changelog $empty
+    Assert-True -Condition $threw -Message 'An empty changelog must throw'
 
-    $unicode = New-Changelog ("## What's Changed`n`n- feat: caf" + [char]0x00E9 + " support by @RealWhyKnot in abc1234`n")
-    $threw = $false
-    try { & $script -Tag 'v2026.1.2.0' -Repo 'RealWhyKnot/Handoff' -ChangelogPath $unicode -TemplateDir $templates | Out-Null } catch { $threw = $true }
-    if (-not $threw) { throw 'Non-ASCII in the changelog must throw' }
-
-    Write-Host 'New-ReleaseNotes.ps1 tests passed.'
-}
-finally {
+    $accented = "## What's Changed`n`n- feat: caf" + [char]0x00E9 + " support by @RealWhyKnot in abc1234`n"
+    $unicode = New-Changelog -RepoRoot $repo -Text $accented
+    $threw = Test-NotesFailure -Script $notes -Common $common -Changelog $unicode
+    Assert-True -Condition $threw -Message 'Non-ASCII in the changelog must throw'
+} finally {
     Pop-Location
     if (Test-Path -LiteralPath $repo) { Remove-Item -LiteralPath $repo -Recurse -Force }
 }
+
+if ($script:failures -gt 0) {
+    Write-Host "$script:failures New-ReleaseNotes.ps1 checks failed."
+    exit 1
+}
+Write-Host 'New-ReleaseNotes.ps1 tests passed.'
+exit 0

@@ -5,7 +5,7 @@ use serde_json::json;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::{handler, Args, CapResult, Ctx, HandlerError, Router, Spec};
+use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, Spec, handler};
 
 use super::net::arg_string;
 use super::net_probes::valid_target;
@@ -20,7 +20,7 @@ pub fn register(r: &mut Router) {
 pub fn go_ip(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
-        other => other,
+        other @ IpAddr::V4(_) => other,
     }
 }
 
@@ -97,7 +97,7 @@ mod dns {
     }
 
     #[link(name = "dnsapi")]
-    extern "system" {
+    unsafe extern "system" {
         fn DnsQuery_W(
             name: *const u16,
             wtype: u16,
@@ -113,14 +113,17 @@ mod dns {
     const DNS_INFO_NO_RECORDS: i32 = 9501;
 
     unsafe fn wide_to_string(p: *const u16) -> String {
-        if p.is_null() {
-            return String::new();
+        // SAFETY: the caller passes null or a NUL-terminated string that outlives the call.
+        unsafe {
+            if p.is_null() {
+                return String::new();
+            }
+            let mut len = 0usize;
+            while *p.add(len) != 0 {
+                len += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
         }
-        let mut len = 0usize;
-        while *p.add(len) != 0 {
-            len += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
     }
 
     fn same_name(a: &str, b: &str) -> bool {
@@ -128,9 +131,10 @@ mod dns {
             .eq_ignore_ascii_case(b.trim_end_matches('.'))
     }
 
-    pub fn lookup_cname(name: &str) -> String {
+    pub(super) fn lookup_cname(name: &str) -> String {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let mut rec: *mut DnsRecord = std::ptr::null_mut();
+        // SAFETY: wide is NUL-terminated and rec is a live pointer the call sets.
         let status = unsafe {
             DnsQuery_W(
                 wide.as_ptr(),
@@ -148,6 +152,7 @@ mod dns {
             return String::new();
         }
         let mut current = name.to_string();
+        // SAFETY: a zero status means rec heads a valid record list, freed once below.
         unsafe {
             for _ in 0..10 {
                 let mut next_name: Option<String> = None;
@@ -217,7 +222,7 @@ async fn net_resolve(ctx: Ctx, args: Args) -> CapResult {
     let started = std::time::Instant::now();
     let deadline = Instant::now() + Duration::from_secs(10);
     let looked_up = lookup_ip_addrs(&ctx.cancel, &name, Some(deadline)).await;
-    let elapsed = started.elapsed().as_millis() as i64;
+    let elapsed = crate::util::millis_i64(started.elapsed());
     let addrs = match looked_up {
         Ok(a) => a,
         Err(e) => {
@@ -261,7 +266,7 @@ mod tests {
     use serde_json::Value;
 
     fn args(v: Value) -> Args {
-        v.as_object().cloned().unwrap_or_default()
+        serde_json::from_value(v).unwrap_or_default()
     }
 
     async fn run(a: Value) -> crate::dispatch::Outcome {
@@ -284,7 +289,7 @@ mod tests {
         let out = run(json!({"name": "localhost"})).await;
         assert!(out.ok, "{}", out.error);
         assert_eq!(out.result["resolved"], json!(true), "{}", out.result);
-        assert!(!out.result["addresses"].as_array().unwrap().is_empty());
+        assert_ne!(out.result["addresses"].as_array().unwrap().len(), 0);
         assert_eq!(out.result["type"], json!("any"));
     }
 
@@ -304,10 +309,12 @@ mod tests {
         let out = run(json!({"name": "this-name-should-not-exist.invalid"})).await;
         assert!(out.ok, "{}", out.error);
         assert_eq!(out.result["resolved"], json!(false), "{}", out.result);
-        assert!(out.result["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("lookup this-name-should-not-exist.invalid: "));
+        assert!(
+            out.result["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("lookup this-name-should-not-exist.invalid: ")
+        );
         assert_eq!(out.result["addresses"], json!([]));
         assert!(out.result.get("cname").is_none());
     }
