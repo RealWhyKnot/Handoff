@@ -75,24 +75,36 @@ jobs:
           Copy-Item target/release/handoff.exe handoff.exe
           ./handoff.exe version
 
+      - name: Checksum executable
+        id: exe-checksum
+        uses: RealWhyKnot/workflows/checksums@v1
+        with:
+          archives: handoff.exe
+          manifest: "false"
+          sidecar: "true"
+
       - name: Write release manifest
-        id: manifest
         shell: pwsh
         env:
           HANDOFF_VERSION: ${{ steps.ver.outputs.version }}
           HANDOFF_TAG: ${{ steps.ver.outputs.tag }}
+          EXE_SHA256: ${{ steps.exe-checksum.outputs.sha256 }}
         run: |
-          $sha = (Get-FileHash -Algorithm SHA256 handoff.exe).Hash.ToLower()
-          [System.IO.File]::WriteAllText("handoff.exe.sha256", "$sha  handoff.exe`n", (New-Object System.Text.UTF8Encoding($false)))
           $manifest = [ordered]@{
             version = $env:HANDOFF_VERSION
-            sha256  = $sha
+            sha256  = $env:EXE_SHA256
             url     = "https://github.com/${{ github.repository }}/releases/download/$env:HANDOFF_TAG/handoff.exe"
             notes   = "Release $env:HANDOFF_TAG"
           }
           $manifest | ConvertTo-Json -Compress | Out-File -FilePath handoff-version.json -Encoding ASCII
           Get-Content handoff-version.json
-          "sha256=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Checksum release manifest
+        uses: RealWhyKnot/workflows/checksums@v1
+        with:
+          archives: handoff-version.json
+          manifest: "false"
+          sidecar: "true"
 
       - name: Build the changelog
         id: changelog
@@ -105,7 +117,7 @@ jobs:
         id: body
         env:
           TAG_NAME: ${{ steps.ver.outputs.tag }}
-          EXE_SHA256: ${{ steps.manifest.outputs.sha256 }}
+          EXE_SHA256: ${{ steps.exe-checksum.outputs.sha256 }}
           CHANGELOG_PATH: ${{ steps.changelog.outputs.file }}
         shell: pwsh
         run: |
@@ -123,8 +135,9 @@ jobs:
           prerelease: ${{ steps.ver.outputs.prerelease }}
           draft-first: 'true'
           verify-asset: handoff.exe
-          verify-sha256: ${{ steps.manifest.outputs.sha256 }}
+          verify-sha256: ${{ steps.exe-checksum.outputs.sha256 }}
           assets: |
             handoff.exe
             handoff.exe.sha256
             handoff-version.json
+            handoff-version.json.sha256
