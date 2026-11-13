@@ -50,15 +50,11 @@ pub fn is_public_unicast(ip: IpAddr) -> bool {
         }
         IpAddr::V6(a) => {
             let o = a.octets();
-            if a.is_loopback()
+            !(a.is_loopback()
                 || a.is_unspecified()
                 || (a.segments()[0] & 0xffc0) == 0xfe80
                 || o[0] == 0xff
-                || (o[0] & 0xfe) == 0xfc
-            {
-                return false;
-            }
-            true
+                || (o[0] & 0xfe) == 0xfc)
         }
     }
 }
