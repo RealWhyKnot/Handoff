@@ -5,6 +5,7 @@ shopt -s inherit_errexit
 root=$(git rev-parse --show-toplevel)
 cd "${root}"
 python -B .github/lint/style_check.py
+bash .github/lint/repo_checks.sh
 cargo fmt --check
 timeout 1200 cargo clippy --workspace --all-targets --locked -- -D warnings
 timeout 1200 cargo test --workspace --all-targets --locked

@@ -35,21 +35,15 @@ def is_type_checking(node: ast.If) -> bool:
     )
 
 
-def module_names(path: str, packages: frozenset[str]) -> tuple[tuple[str, ...], str]:
+def read_module(path: str, packages: frozenset[str]) -> Module:
     pure = PurePosixPath(path)
     folders = pure.parent.parts
-    depth = 0
-    while depth < len(folders) and "/".join(folders[: len(folders) - depth]) in packages:
-        depth += 1
-    package = folders[len(folders) - depth :]
+    start = next((index for index in range(len(folders)) if "/".join(folders[: index + 1]) in packages), 0)
+    package = folders[start:]
     stem = () if pure.stem == "__init__" else (pure.stem,)
     names = dict.fromkeys(".".join((*parts, *stem)) for parts in (package, folders))
-    usable = tuple(
-        name
-        for name in names
-        if name and name not in STANDARD_MODULES and all(part.isidentifier() for part in name.split("."))
-    )
-    return usable, ".".join(package)
+    usable = tuple(name for name in names if name and name not in STANDARD_MODULES)
+    return Module(path, usable, ".".join(package))
 
 
 def resolve(module: Module, node: ast.ImportFrom) -> str:
@@ -65,6 +59,59 @@ def prefixes(name: str) -> list[str]:
     return [".".join(parts[:end]) for end in range(1, len(parts) + 1)]
 
 
+def finishing_order(edges: dict[str, set[str]]) -> list[str]:
+    seen: set[str] = set()
+    order: list[str] = []
+    for name in edges:
+        pending = [(name, False)]
+        while pending:
+            current, finished = pending.pop()
+            if finished:
+                order.append(current)
+            elif current not in seen:
+                seen.add(current)
+                pending.append((current, True))
+                pending.extend((target, False) for target in edges[current] if target not in seen)
+    return order
+
+
+def components(edges: dict[str, set[str]]) -> dict[str, int]:
+    reverse: dict[str, set[str]] = {name: set() for name in edges}
+    for name, targets in edges.items():
+        for target in targets:
+            reverse[target].add(name)
+    groups: dict[str, int] = {}
+    for name in reversed(finishing_order(edges)):
+        if name in groups:
+            continue
+        group = len(groups)
+        queue = [name]
+        groups[name] = group
+        while queue:
+            for target in reverse[queue.pop()]:
+                if target not in groups:
+                    groups[target] = group
+                    queue.append(target)
+    return groups
+
+
+def reachability(edges: dict[str, set[str]], groups: dict[str, int]) -> dict[int, int]:
+    representatives = {group: name for name, group in groups.items()}
+    condensed: dict[str, set[str]] = {name: set() for name in representatives.values()}
+    for name, targets in edges.items():
+        condensed[representatives[groups[name]]].update(
+            representatives[groups[target]] for target in targets if groups[target] != groups[name]
+        )
+    reachable: dict[int, int] = {}
+    for name in finishing_order(condensed):
+        group = groups[name]
+        mask = 1 << group
+        for target in condensed[name]:
+            mask |= reachable[groups[target]]
+        reachable[group] = mask
+    return reachable
+
+
 class Index:
     def __init__(self, modules: list[Module]) -> None:
         self.by_name: dict[str, list[Module]] = {}
@@ -76,13 +123,23 @@ class Index:
         self.known = frozenset(known - STANDARD_MODULES)
         self.importers: dict[str, set[str]] = {}
         self.heavy: frozenset[str] = frozenset()
-        self.ancestors: dict[str, frozenset[str]] = {}
+        self.dependencies: dict[str, set[str]] = {name: set() for name in self.known}
+        self.groups: dict[str, int] = {}
+        self.reachable: dict[int, int] = {}
 
     def targets(self, module: Module, node: ast.Import | ast.ImportFrom) -> tuple[str, ...]:
         if isinstance(node, ast.Import):
-            return tuple(alias.name for alias in node.names)
+            return tuple(self.local_name(module, alias.name) for alias in node.names)
         base = resolve(module, node)
+        if not node.level:
+            base = self.local_name(module, base)
         return tuple(f"{base}.{alias.name}" if f"{base}.{alias.name}" in self.known else base for alias in node.names)
+
+    def local_name(self, module: Module, name: str) -> str:
+        sibling = f"{module.package}.{name}"
+        if name.split(".", maxsplit=1)[0] not in STANDARD_MODULES and name not in self.known and sibling in self.known:
+            return sibling
+        return name
 
     def own_prefixes(self, name: str) -> list[str]:
         return [prefix for prefix in prefixes(name) if prefix in self.known]
@@ -96,7 +153,11 @@ class Index:
                     direct.add(name)
                 for prefix in own:
                     self.importers.setdefault(prefix, set()).add(name)
+                if target in self.known and target not in prefixes(name)[:-1]:
+                    self.dependencies[name].add(target)
         self.heavy = self.spread(direct)
+        self.groups = components(self.dependencies)
+        self.reachable = reachability(self.dependencies, self.groups)
 
     def spread(self, start: set[str]) -> frozenset[str]:
         found = set(start)
@@ -115,9 +176,10 @@ class Index:
         return any(prefix in self.heavy for prefix in own)
 
     def reaches(self, name: str, module: Module) -> bool:
-        if module.path not in self.ancestors:
-            self.ancestors[module.path] = self.spread(set(module.names))
-        return any(prefix in self.ancestors[module.path] for prefix in self.own_prefixes(name))
+        if name not in self.known:
+            return False
+        mask = self.reachable[self.groups[name]]
+        return any(mask & (1 << self.groups[target]) for target in module.names)
 
 
 def collect(module: Module, index: Index, node: ast.AST, *, lazy: bool) -> None:
@@ -149,8 +211,7 @@ def check_imports(sources: dict[str, str]) -> list[Finding]:
             trees[path] = ast.parse(text, filename=path)
         except SyntaxError:
             continue
-        names, package = module_names(path, packages)
-        modules.append(Module(path, names, package))
+        modules.append(read_module(path, packages))
     index = Index(modules)
     for module in modules:
         collect(module, index, trees[module.path], lazy=False)

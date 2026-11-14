@@ -20,9 +20,13 @@ if TYPE_CHECKING:
 
 VENDORED_FILE = "vendored-paths.txt"
 LOCAL_FILE = "vendored-paths.local.txt"
+APPROVED_FILE = "approved-suppressions.local.txt"
+SUPPRESSION = "lint suppression (GEN-4)"
+ATTRIBUTE_SPAN = 6
 SEGMENT = r"(?!\.+/)[A-Za-z0-9_.@+-]+/"
 LEAF = r"(?!\.+$)[A-Za-z0-9_.@+-]+"
 ENTRY = re.compile(rf"/(?:{SEGMENT})+|/(?:{SEGMENT})*{LEAF}|{SEGMENT}")
+APPROVED_ENTRY = re.compile(rf"(/(?:{SEGMENT})*{LEAF})[ \t]+([A-Za-z][A-Za-z0-9_]*)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +39,59 @@ class VendoredPaths:
         if path in self.files or path.startswith(self.prefixes):
             return True
         return any(part in self.names for part in path.split("/")[:-1])
+
+
+@dataclass(frozen=True, slots=True)
+class Approval:
+    number: int
+    path: str
+    rule: str
+
+
+def read_approvals(path: Path) -> list[Approval]:
+    approvals: list[Approval] = []
+    for number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+        entry = raw.strip()
+        if not entry:
+            continue
+        match = APPROVED_ENTRY.fullmatch(entry)
+        if match is None:
+            message = f"{path.name}:{number}: {entry!r} isn't a /path/file from the repo root and a rule id"
+            raise ValueError(message)
+        approvals.append(Approval(number, match.group(1).lstrip("/"), match.group(2)))
+    return approvals
+
+
+def attribute_text(root: Path, finding: Finding) -> str:
+    try:
+        lines = (root / finding.path).read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[max(finding.line - 1, 0) : finding.line - 1 + ATTRIBUTE_SPAN])
+
+
+def apply_approvals(root: Path, findings: list[Finding], approvals: list[Approval]) -> list[Finding]:
+    kept = list(findings)
+    for approval in approvals:
+        rule = re.compile(
+            rf'^[^\n]*?\bSuppressMessage(?:Attribute)?\s*\(\s*"[^"\n]*"\s*,\s*"{re.escape(approval.rule)}\b',
+        )
+        approved = next(
+            (
+                finding
+                for finding in kept
+                if finding.path == approval.path
+                and finding.message == SUPPRESSION
+                and rule.search(attribute_text(root, finding))
+            ),
+            None,
+        )
+        if approved is None:
+            message = f"{approval.path} has no {approval.rule} suppression left; remove this line (GEN-4)"
+            kept.append(Finding(f"{LINT_DIR}/{APPROVED_FILE}", approval.number, message))
+        else:
+            kept.remove(approved)
+    return sorted(kept)
 
 
 def read_entries(path: Path) -> list[str]:
@@ -137,17 +194,20 @@ def main() -> int:
         return 2
     lint = root / LINT_DIR
     local_path = lint / LOCAL_FILE
+    approved_path = lint / APPROVED_FILE
     try:
         shared = read_entries(list_path)
         local = read_entries(local_path) if local_path.is_file() else []
+        approvals = read_approvals(approved_path) if approved_path.is_file() else []
     except (OSError, ValueError) as error:
-        sys.stderr.write(f"can't read the vendored paths: {error}\n")
+        sys.stderr.write(f"can't read the lists in {LINT_DIR}: {error}\n")
         return 2
     try:
         findings = check_repo(root, vendored_paths(shared + local))
     except (subprocess.CalledProcessError, OSError) as error:
         sys.stderr.write(f"can't list the files in {root} with git: {error}\n")
         return 2
+    findings = apply_approvals(root, findings, approvals)
     findings += unslashed(root, local_path, local)
     if list_path.parent == lint:
         findings = sorted(findings + unfolded(shared, local))
