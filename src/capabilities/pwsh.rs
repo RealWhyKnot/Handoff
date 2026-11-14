@@ -39,7 +39,7 @@ pub async fn process_slot(cancel: &CancellationToken) -> Result<SemaphorePermit<
         permit = PROCESSES.acquire() => {
             permit.map_err(|_closed| Failure::new("could not start a process: the process limit is closed"))
         }
-        _ = cancel.cancelled() => Err(Failure::new("cancelled while waiting for a free process slot")),
+        () = cancel.cancelled() => Err(Failure::new("cancelled while waiting for a free process slot")),
     }
 }
 
@@ -112,9 +112,9 @@ pub async fn run_pwsh_echo(
             child.wait()
         )
     };
-    let (fed, out, err, status) = tokio::select! {
+    let (stdin_write, out, err, status) = tokio::select! {
         r = run => r,
-        _ = cancel.cancelled() => {
+        () = cancel.cancelled() => {
             return Err(failure_for(
                 PwshResult { exit_code: -1, ..PwshResult::default() },
                 "cancelled",
@@ -127,11 +127,11 @@ pub async fn run_pwsh_echo(
     let res = PwshResult {
         stdout,
         stderr,
-        exit_code: status.code().map(i64::from).unwrap_or(-1),
+        exit_code: status.code().map_or(-1, i64::from),
         stdout_truncated,
         stderr_truncated,
     };
-    if let Err(e) = fed
+    if let Err(e) = stdin_write
         && res.stderr.is_empty()
     {
         let msg = format!("could not send the script to powershell: {e}");
@@ -206,6 +206,7 @@ fn failure_for(res: PwshResult, fallback: &str) -> Box<(PwshResult, Failure)> {
     Box::new((res, failure))
 }
 
+#[must_use]
 pub fn truncation_note(res: &PwshResult) -> Option<String> {
     let out = format!("output was cut off at {} MiB", STDOUT_CAP >> 20);
     let err = format!("error output was cut off at {} KiB", STDERR_CAP >> 10);
@@ -286,10 +287,12 @@ pub fn normalize_numbers(v: Value) -> Value {
     }
 }
 
+#[must_use]
 pub fn is_ps_single_quote(c: char) -> bool {
     matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}')
 }
 
+#[must_use]
 pub fn ps_single_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
@@ -303,6 +306,7 @@ pub fn ps_single_quote(s: &str) -> String {
     out
 }
 
+#[must_use]
 pub fn json_script_handler(script: &'static str) -> Handler {
     handler(move |ctx, _args| async move {
         let result: CapResult = run_pwsh_json(&ctx.cancel, script)

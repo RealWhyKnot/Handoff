@@ -151,7 +151,7 @@ pub(super) fn fs_du(args: &Args, cancel: &tokio_util::sync::CancellationToken) -
     }
 
     let prefix_len = path.trim_end_matches(['/', '\\']).len() + 1;
-    let mut children: std::collections::HashMap<String, DuChild> = Default::default();
+    let mut children: std::collections::HashMap<String, DuChild> = std::collections::HashMap::new();
     let (mut bytes, mut files, mut dirs, mut seen) = (0u64, 0u64, 0u64, 0i64);
     let mut stopped = false;
     walk_dir(&path, &mut |node| {

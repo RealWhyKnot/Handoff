@@ -25,7 +25,9 @@ impl TunnelMgr {
     }
 
     fn tunnels(&self) -> MutexGuard<'_, HashMap<String, Arc<TunnelState>>> {
-        self.tunnels.lock().unwrap_or_else(|e| e.into_inner())
+        self.tunnels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn shutdown(&self) {

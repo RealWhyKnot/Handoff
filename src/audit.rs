@@ -26,6 +26,7 @@ pub struct Entry {
     pub detail: String,
 }
 
+#[must_use]
 pub fn trim_args(args: &Map<String, Value>) -> Option<Map<String, Value>> {
     if args.is_empty() {
         return None;
@@ -45,6 +46,7 @@ pub fn trim_args(args: &Map<String, Value>) -> Option<Map<String, Value>> {
     Some(out)
 }
 
+#[must_use]
 pub fn default_dir() -> PathBuf {
     let root = util::env_var("PROGRAMDATA");
     let root = if root.is_empty() {

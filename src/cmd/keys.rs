@@ -73,6 +73,7 @@ fn copy_link(board: &Board) {
     }
 }
 
+#[must_use]
 pub fn revoke_text(n: usize) -> String {
     if n == 0 {
         return "You hadn't allowed anything, so there was nothing to take back.".to_string();
@@ -103,10 +104,12 @@ fn print_running(board: &Board) {
     }
 }
 
+#[must_use]
 pub fn round_to_minute(secs: f64) -> std::time::Duration {
     std::time::Duration::from_secs((secs / 60.0).round().to_u64().unwrap_or(0) * 60)
 }
 
+#[must_use]
 pub fn expiry_text(remaining_secs: Option<f64>) -> String {
     match remaining_secs {
         None => "until this session ends".to_string(),
@@ -143,6 +146,7 @@ fn print_grants() {
     }
 }
 
+#[must_use]
 pub fn key_help() -> String {
     [
         "Type a letter and press Enter:",

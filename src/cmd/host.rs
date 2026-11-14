@@ -63,10 +63,11 @@ pub struct Board {
 }
 
 fn guard<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Board {
+    #[must_use]
     pub fn new(link: &str, read_only: bool) -> Board {
         Board {
             started: Instant::now(),
@@ -196,10 +197,12 @@ impl Board {
     }
 }
 
+#[must_use]
 pub fn tag(num: usize) -> String {
     console::paint(Tone::Bold, &format!("#{num}"))
 }
 
+#[must_use]
 pub fn presence_line(before: usize, now: usize) -> Option<String> {
     if before == now {
         return None;
@@ -216,6 +219,7 @@ pub fn presence_line(before: usize, now: usize) -> Option<String> {
     })
 }
 
+#[must_use]
 pub fn consent_line(event: &Event) -> String {
     match &event.step {
         Step::Asking => console::paint(
@@ -238,6 +242,7 @@ pub fn consent_line(event: &Event) -> String {
     }
 }
 
+#[must_use]
 pub fn ending_for(out: &Outcome, stopped: bool) -> Ending {
     if out.ok {
         return Ending::Done;
@@ -251,6 +256,7 @@ pub fn ending_for(out: &Outcome, stopped: bool) -> Ending {
     Ending::Failed
 }
 
+#[must_use]
 pub fn is_refusal(error: &str) -> bool {
     [
         ConsentError::Denied.to_string(),
@@ -299,6 +305,7 @@ fn shown_detail(ending: Ending, detail: &str) -> String {
     }
 }
 
+#[must_use]
 pub fn result_line(out: &Outcome, ending: Ending, read_only: bool, detail: &str) -> String {
     let (head, tone, detail_tone) = result_parts(out, ending, read_only);
     let detail = shown_detail(ending, detail);
@@ -309,6 +316,7 @@ pub fn result_line(out: &Outcome, ending: Ending, read_only: bool, detail: &str)
     format!("{head} {}", paint_maybe(detail_tone, &detail))
 }
 
+#[must_use]
 pub fn result_lines(
     num: usize,
     out: &Outcome,
@@ -333,6 +341,7 @@ pub fn result_lines(
     flow(&lead(num), &pieces, " ", width, RESULT_ROWS)
 }
 
+#[must_use]
 pub fn exit_summary(stats: Stats, length: Duration) -> String {
     let took = human_duration(length);
     if stats.run == 0 {
@@ -445,6 +454,7 @@ fn flow(lead: &Piece, pieces: &[Piece], sep: &str, width: usize, max_rows: usize
     rows
 }
 
+#[must_use]
 pub fn command_lines(
     num: usize,
     label: Option<&str>,
@@ -529,6 +539,7 @@ fn short_key(key: &str, width: usize) -> String {
     out
 }
 
+#[must_use]
 pub fn copy_to_clipboard(text: &str) -> bool {
     #[cfg(windows)]
     {
@@ -552,9 +563,8 @@ pub fn copy_to_clipboard(text: &str) -> bool {
         let wrote = child
             .stdin
             .take()
-            .map(|mut stdin| stdin.write_all(bytes).is_ok())
-            .unwrap_or(false);
-        let waited = child.wait().map(|s| s.success()).unwrap_or(false);
+            .is_some_and(|mut stdin| stdin.write_all(bytes).is_ok());
+        let waited = child.wait().is_ok_and(|s| s.success());
         wrote && waited
     }
     #[cfg(not(windows))]
@@ -568,6 +578,7 @@ pub fn copy_to_clipboard(text: &str) -> bool {
 mod tests {
     use super::*;
     use crate::consent::{Category, Request, Term};
+    use std::fmt::Write as _;
 
     fn event(kind: &str, category: Option<Category>, step: Step) -> Event {
         Event {
@@ -812,7 +823,10 @@ mod tests {
     #[test]
     fn long_scripts_show_twelve_rows_and_a_count() {
         console::set_color(false);
-        let script: String = (1..=30).map(|i| format!("Write-Output {i}\n")).collect();
+        let script: String = (1..=30).fold(String::new(), |mut out, i| {
+            writeln!(out, "Write-Output {i}").expect("writing to a String cannot fail");
+            out
+        });
         let rows = command_lines(
             1,
             Some("Run script"),
@@ -886,9 +900,10 @@ mod tests {
     #[test]
     fn no_input_makes_a_line_wider_than_the_console() {
         console::set_color(false);
-        let huge: String = (1..=2000)
-            .map(|i| format!("Write-Output {i}\r\n"))
-            .collect();
+        let huge: String = (1..=2000).fold(String::new(), |mut out, i| {
+            write!(out, "Write-Output {i}\r\n").expect("writing to a String cannot fail");
+            out
+        });
         let samples = [
             serde_json::json!({ "script": huge }),
             serde_json::json!({ "script": "x".repeat(10_000) }),

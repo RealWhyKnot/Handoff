@@ -44,55 +44,62 @@ pub(crate) fn head(args: &Args, cancel: &CancellationToken) -> CapResult {
 }
 
 fn forward(
-    mut o: Opened,
+    mut opened: Opened,
     mode: &str,
     start: u64,
     end: u64,
     span_cut: bool,
     cancel: &CancellationToken,
 ) -> CapResult {
-    let enc = o.enc;
-    o.seek(enc.bom_len())?;
+    let enc = opened.enc;
+    opened.seek(enc.bom_len())?;
     let keep = LINE_SHOW * enc.unit() + 4;
-    let mut rd = LineReader::new(&o.file, enc, cancel);
+    let mut reader = LineReader::new(&opened.file, enc, cancel);
     let mut raw = Vec::new();
     let mut lines: Vec<String> = Vec::new();
-    let mut n = 0u64;
+    let mut line_no = 0u64;
     let mut bytes = 0usize;
     let mut cut = 0u64;
     let mut full = false;
     let mut eof = false;
     loop {
-        let k = if n + 1 < start { 0 } else { keep };
-        let Some(c) = rd.next_line(&mut raw, k).map_err(o.io("read"))? else {
-            eof = !rd.cancelled;
+        let take = if line_no + 1 < start { 0 } else { keep };
+        let Some(over) = reader
+            .next_line(&mut raw, take)
+            .map_err(opened.io("read"))?
+        else {
+            eof = !reader.cancelled;
             break;
         };
-        n += 1;
-        if n < start {
+        line_no += 1;
+        if line_no < start {
             continue;
         }
-        let (s, was_cut) = show(&enc.decode(&raw), 0, c);
-        let size = json_len(&s);
+        let (shown, was_cut) = show(&enc.decode(&raw), 0, over);
+        let size = json_len(&shown);
         if !lines.is_empty() && bytes + size > REPLY_CAP {
             full = true;
             break;
         }
         bytes += size;
         cut += u64::from(was_cut);
-        lines.push(s);
-        if n >= end {
+        lines.push(shown);
+        if line_no >= end {
             break;
         }
     }
-    if !eof && !full && !rd.cancelled {
-        eof = rd.next_line(&mut raw, 0).map_err(o.io("read"))?.is_none() && !rd.cancelled;
+    if !eof && !full && !reader.cancelled {
+        eof = reader
+            .next_line(&mut raw, 0)
+            .map_err(opened.io("read"))?
+            .is_none()
+            && !reader.cancelled;
     }
 
     let count = crate::util::count_u64(lines.len());
     let mut notes: Vec<String> = Vec::new();
     let mut truncated = false;
-    if rd.cancelled {
+    if reader.cancelled {
         truncated = true;
         notes.push(CANCELLED.to_string());
     }
@@ -114,29 +121,29 @@ fn forward(
         truncated = true;
         notes.push(cut_note(cut));
     }
-    if eof && n == 0 {
+    if eof && line_no == 0 {
         notes.push("the file is empty".to_string());
-    } else if eof && n < start {
-        notes.push(format!("the file has only {}", plural(n, "line")));
+    } else if eof && line_no < start {
+        notes.push(format!("the file has only {}", plural(line_no, "line")));
     }
 
-    let mut m = o.base(mode);
+    let mut reply = opened.base(mode);
     let (first, last) = if count > 0 {
         (json!(start), json!(start + count - 1))
     } else {
         (Value::Null, Value::Null)
     };
-    m.insert("first_line".into(), first);
-    m.insert("last_line".into(), last);
-    m.insert("line_count".into(), json!(count));
-    m.insert("lines".into(), json!(lines));
-    m.insert("eof".into(), json!(eof));
+    reply.insert("first_line".into(), first);
+    reply.insert("last_line".into(), last);
+    reply.insert("line_count".into(), json!(count));
+    reply.insert("lines".into(), json!(lines));
+    reply.insert("eof".into(), json!(eof));
     if eof {
-        m.insert("total_lines".into(), json!(n));
+        reply.insert("total_lines".into(), json!(line_no));
     }
-    m.insert("truncated".into(), json!(truncated));
+    reply.insert("truncated".into(), json!(truncated));
     if !notes.is_empty() {
-        m.insert("note".into(), json!(notes.join("; ")));
+        reply.insert("note".into(), json!(notes.join("; ")));
     }
-    Ok(Value::Object(m))
+    Ok(Value::Object(reply))
 }

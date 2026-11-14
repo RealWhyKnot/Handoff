@@ -16,6 +16,7 @@ impl Failure {
         }
     }
 
+    #[must_use]
     pub fn detail(&self) -> Value {
         let mut detail = Map::new();
         if let Some(code) = self.exit_code {

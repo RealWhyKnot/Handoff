@@ -28,6 +28,7 @@ pub struct Def {
 }
 
 impl Def {
+    #[must_use]
     pub const fn string(name: &'static str, usage: &'static str, default: &'static str) -> Def {
         Def {
             name,
@@ -38,6 +39,7 @@ impl Def {
         }
     }
 
+    #[must_use]
     pub const fn boolean(name: &'static str, usage: &'static str) -> Def {
         Def {
             name,
@@ -48,6 +50,7 @@ impl Def {
         }
     }
 
+    #[must_use]
     pub const fn duration(name: &'static str, usage: &'static str, default: &'static str) -> Def {
         Def {
             name,
@@ -58,6 +61,7 @@ impl Def {
         }
     }
 
+    #[must_use]
     pub const fn list(name: &'static str, usage: &'static str) -> Def {
         Def {
             name,
@@ -68,6 +72,7 @@ impl Def {
         }
     }
 
+    #[must_use]
     pub const fn alias_of(mut self, key: &'static str) -> Def {
         self.key = key;
         self
@@ -77,9 +82,7 @@ impl Def {
         match self.kind {
             Kind::Str | Kind::List => self.default.is_empty(),
             Kind::Bool => self.default == "false",
-            Kind::Duration => util::parse_go_duration(self.default)
-                .map(|d| d.is_zero())
-                .unwrap_or(true),
+            Kind::Duration => util::parse_go_duration(self.default).is_none_or(|d| d.is_zero()),
         }
     }
 }
@@ -120,6 +123,7 @@ pub struct Parsed {
 }
 
 impl Parsed {
+    #[must_use]
     pub fn string(&self, key: &str) -> String {
         self.values
             .get(key)
@@ -127,28 +131,32 @@ impl Parsed {
             .unwrap_or_else(|| self.defaults.get(key).copied().unwrap_or("").to_string())
     }
 
+    #[must_use]
     pub fn boolean(&self, key: &str) -> bool {
         self.values
             .get(key)
             .and_then(|v| v.last())
-            .map(|v| parse_go_bool(v).unwrap_or(false))
-            .unwrap_or(false)
+            .is_some_and(|v| parse_go_bool(v).unwrap_or(false))
     }
 
+    #[must_use]
     pub fn duration(&self, key: &str) -> Duration {
         let raw = self.string(key);
         util::parse_go_duration(&raw).unwrap_or_default()
     }
 
+    #[must_use]
     pub fn list(&self, key: &str) -> Vec<String> {
         self.values.get(key).cloned().unwrap_or_default()
     }
 
+    #[must_use]
     pub fn was_set(&self, name: &str) -> bool {
         self.seen.contains(name)
     }
 }
 
+#[must_use]
 pub fn parse_go_bool(s: &str) -> Option<bool> {
     match s {
         "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
@@ -164,6 +172,7 @@ pub struct FlagSet {
 }
 
 impl FlagSet {
+    #[must_use]
     pub fn new(name: &str, extra: &[Def]) -> FlagSet {
         let mut defs: Vec<Def> = SHARED.to_vec();
         defs.extend_from_slice(extra);
@@ -173,6 +182,7 @@ impl FlagSet {
         }
     }
 
+    #[must_use]
     pub fn defs(&self) -> &[Def] {
         &self.defs
     }
@@ -181,6 +191,7 @@ impl FlagSet {
         self.defs.iter().find(|d| d.name == name)
     }
 
+    #[must_use]
     pub fn usage_text(&self) -> String {
         let mut out = format!("Usage of {}:\n", self.name);
         let mut sorted: Vec<&Def> = self.defs.iter().collect();
@@ -222,12 +233,9 @@ impl FlagSet {
         FlagError::Message(message)
     }
 
+    #[must_use]
     pub fn reorder_flags_first(&self, args: &[String]) -> Vec<String> {
-        let takes_value = |name: &str| {
-            self.lookup(name)
-                .map(|d| d.kind != Kind::Bool)
-                .unwrap_or(false)
-        };
+        let takes_value = |name: &str| self.lookup(name).is_some_and(|d| d.kind != Kind::Bool);
 
         let mut flags: Vec<String> = Vec::new();
         let mut positional: Vec<String> = Vec::new();
@@ -339,17 +347,23 @@ impl FlagSet {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Verbosity {
+    #[default]
+    Normal,
+    Quiet,
+    Verbose,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     pub relay: String,
     pub json: bool,
-    pub quiet: bool,
-    pub verbose: bool,
+    pub verbosity: Verbosity,
     pub log_dir: String,
     pub audit_dir: String,
     pub config: String,
     pub keep_awake: bool,
-    pub relay_set: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -387,12 +401,10 @@ impl Options {
         self.keep_awake = cfg.keep_awake.unwrap_or(true);
 
         self.relay = self.relay.trim().trim_end_matches('/').to_string();
-        let valid = url::Url::parse(&self.relay)
-            .map(|u| {
-                u.host_str().map(|h| !h.is_empty()).unwrap_or(false)
-                    && (u.scheme() == "http" || u.scheme() == "https")
-            })
-            .unwrap_or(false);
+        let valid = url::Url::parse(&self.relay).is_ok_and(|u| {
+            u.host_str().is_some_and(|h| !h.is_empty())
+                && (u.scheme() == "http" || u.scheme() == "https")
+        });
         if !valid {
             return Err(format!(
                 "relay must be an http or https URL, got {}",
@@ -456,19 +468,24 @@ pub fn parse_options_with(
     let set = FlagSet::new(name, extra);
     let parsed = set.parse(&set.reorder_flags_first(args))?;
 
+    let verbosity = if parsed.boolean("verbose") {
+        Verbosity::Verbose
+    } else if parsed.boolean("quiet") {
+        Verbosity::Quiet
+    } else {
+        Verbosity::Normal
+    };
     let mut opts = Options {
         relay: parsed.string("relay"),
         json: parsed.boolean("json"),
-        quiet: parsed.boolean("quiet"),
-        verbose: parsed.boolean("verbose"),
+        verbosity,
         log_dir: parsed.string("log-dir"),
         audit_dir: parsed.string("audit-dir"),
         config: parsed.string("config"),
         keep_awake: true,
-        relay_set: parsed.was_set("relay"),
     };
 
-    if opts.relay_set && opts.relay.trim().is_empty() {
+    if parsed.was_set("relay") && opts.relay.trim().is_empty() {
         return Err(FlagError::Message(
             "--relay was given but empty".to_string(),
         ));
@@ -492,7 +509,7 @@ mod tests {
     }
 
     fn strs(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
+        items.iter().map(std::string::ToString::to_string).collect()
     }
 
     fn config_file(dir: &tempfile::TempDir, name: &str, body: &str) -> String {
@@ -713,7 +730,8 @@ mod tests {
             &env,
         )
         .unwrap();
-        assert!(opts.json && opts.quiet);
+        assert!(opts.json);
+        assert_eq!(opts.verbosity, Verbosity::Quiet);
         assert_eq!(opts.relay, "https://a.example");
     }
 
@@ -739,7 +757,7 @@ mod tests {
             .map(|l| l.split(['\t', ' ']).nth(2).unwrap_or(""))
             .collect();
         let mut sorted = names.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(names, sorted);
     }
 

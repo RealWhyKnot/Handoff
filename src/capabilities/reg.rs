@@ -4,7 +4,7 @@ use super::proc::{bool_arg, fill, int_arg, string_arg};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::run_pwsh_json;
 
-const TEMPLATE: &str = r##"
+const TEMPLATE: &str = r#"
 $hive = @@HIVE@@
 $key  = @@KEY@@
 $value = @@VALUE@@
@@ -98,7 +98,7 @@ while ($stack.Count -gt 0 -and $visited.Count -lt $max) {
     max      = $max
     entries  = @($visited)
 } | ConvertTo-Json -Compress -Depth 6
-"##;
+"#;
 
 const HIVES: [&str; 5] = ["HKLM", "HKCU", "HKCR", "HKU", "HKCC"];
 
@@ -254,14 +254,14 @@ mod tests {
         let script = query_script(&args(json!({
             "hive": " hkcu ",
             "key": "\\Software\\Microsoft (x86)\\Co",
-            "value": " Val'ue ",
+            "value": " Don't ",
             "recursive": true,
             "max_results": 99999
         })))
         .unwrap();
         assert!(script.contains("$hive = 'HKCU'"));
         assert!(script.contains("$key  = 'Software\\Microsoft (x86)\\Co'"));
-        assert!(script.contains("$value = 'Val''ue'"));
+        assert!(script.contains("$value = 'Don''t'"));
         assert!(script.contains("$recursive = $true"));
         assert!(script.contains("$max = 2000"));
         assert!(script.contains("$root = \"$hive`:\\$key\""));

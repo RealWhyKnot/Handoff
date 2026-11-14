@@ -3,31 +3,35 @@ use std::io::{self};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) fn fmt_time(t: SystemTime) -> String {
-    let secs = match t.duration_since(UNIX_EPOCH) {
-        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
-        Err(e) => {
-            let d = e.duration();
-            -(i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-                - if d.subsec_nanos() > 0 { 1 } else { 0 }
+pub(crate) fn fmt_time(time: SystemTime) -> String {
+    let secs = match time.duration_since(UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+        Err(before) => {
+            let gap = before.duration();
+            -(i64::try_from(gap.as_secs()).unwrap_or(i64::MAX)) - i64::from(gap.subsec_nanos() > 0)
         }
     };
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let mut y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    if m <= 2 {
-        y += 1;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let march_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * march_month + 2) / 5 + 1;
+    let month = if march_month < 10 {
+        march_month + 3
+    } else {
+        march_month - 9
+    };
+    if month <= 2 {
+        year += 1;
     }
     format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         rem / 3600,
         rem % 3600 / 60,
         rem % 60
@@ -40,11 +44,11 @@ const ATTR_DIRECTORY: u32 = 0x10;
 
 const ATTR_REPARSE: u32 = 0x400;
 
-const TAG_SYMLINK: u32 = 0xA000000C;
+const TAG_SYMLINK: u32 = 0xA000_000C;
 
-const TAG_MOUNT_POINT: u32 = 0xA0000003;
+const TAG_MOUNT_POINT: u32 = 0xA000_0003;
 
-const TAG_DEDUP: u32 = 0x80000013;
+const TAG_DEDUP: u32 = 0x8000_0013;
 
 #[cfg(windows)]
 fn attrs_of(md: &fs::Metadata) -> u32 {
@@ -90,7 +94,7 @@ fn reparse_tag(path: &Path) -> u32 {
         alt_name: [0; 14],
     };
     // SAFETY: wide is NUL-terminated and data is a live FindData the call fills in.
-    let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
+    let handle = unsafe { FindFirstFileW(wide.as_ptr(), &raw mut data) };
     if handle == -1 {
         return 0;
     }

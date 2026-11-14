@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -31,10 +32,12 @@ pub struct VersionManifest {
     pub url: String,
 }
 
+#[must_use]
 pub fn get_current_version() -> String {
     crate::VERSION.to_string()
 }
 
+#[must_use]
 pub fn should_update(current: &str, latest: &str, force: bool) -> bool {
     let cur = parse_version(current);
     let Some(next) = parse_version(latest) else {
@@ -165,9 +168,13 @@ pub async fn download_verified(url: &str, sha256_hex: &str, dst: &Path) -> Resul
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut out, b| {
+        write!(out, "{b:02x}").expect("writing to a String cannot fail");
+        out
+    })
 }
 
+#[must_use]
 pub fn update(args: &[String]) -> i32 {
     let (opts, parsed) = match parse_options("update", args, &UPDATE_FLAGS) {
         Ok(v) => v,

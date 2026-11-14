@@ -8,7 +8,7 @@ use handoff::relay::{Bridge, mint};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
+#[ignore = "needs a live relay; set TUNNEL_LIVE_RELAY"]
 async fn live_tunnel_host() {
     let relay = std::env::var("TUNNEL_LIVE_RELAY").expect("TUNNEL_LIVE_RELAY");
     let out = std::env::var("TUNNEL_LIVE_OUT").expect("TUNNEL_LIVE_OUT");

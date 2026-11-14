@@ -12,11 +12,15 @@ static LAST_DECISION: LazyLock<Mutex<BTreeMap<String, Decision>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 fn session() -> std::sync::MutexGuard<'static, Arc<Ledger>> {
-    SESSION_LEDGER.lock().unwrap_or_else(|e| e.into_inner())
+    SESSION_LEDGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn decisions() -> std::sync::MutexGuard<'static, BTreeMap<String, Decision>> {
-    LAST_DECISION.lock().unwrap_or_else(|e| e.into_inner())
+    LAST_DECISION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn set_session_ledger(ledger: Arc<Ledger>) -> Arc<Ledger> {
@@ -32,6 +36,7 @@ pub fn reset_risk_consent() {
     decisions().clear();
 }
 
+#[must_use]
 pub fn ledger() -> Arc<Ledger> {
     session().clone()
 }
@@ -41,6 +46,7 @@ pub fn deny_all_risky() {
     ledger().deny_everything();
 }
 
+#[must_use]
 pub fn last_consent_decision(kind: &str) -> Decision {
     decisions()
         .get(kind)
@@ -87,7 +93,9 @@ pub(crate) mod testing {
 
     impl SessionGuard {
         pub(crate) fn new() -> SessionGuard {
-            let lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             DENY_ALL_RISKY.store(false, Ordering::SeqCst);
             reset_risk_consent();
             SessionGuard { _lock: lock }

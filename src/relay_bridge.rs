@@ -81,7 +81,7 @@ impl Bridge {
         self.inner
             .conn
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .ok_or(RecvError::BridgeClosed)
     }
@@ -101,7 +101,11 @@ impl Bridge {
             capabilities: caps,
             specs: specs.to_vec(),
         };
-        *self.inner.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some(hello.clone());
+        *self
+            .inner
+            .hello
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hello.clone());
         self.send_hello_payload(Some(hello)).await
     }
 
@@ -142,12 +146,9 @@ impl Bridge {
         out: &Outcome,
     ) -> Result<Delivery, String> {
         let text = frame_text("command_result", result_payload(id, out)?)?;
-        let conn = match self.current_conn() {
-            Ok(conn) => conn,
-            Err(_) => {
-                self.queue_result(text).await;
-                return Ok(Delivery::Queued);
-            }
+        let Ok(conn) = self.current_conn() else {
+            self.queue_result(text).await;
+            return Ok(Delivery::Queued);
         };
         let sent = conn.sink.lock().await.send_text(text.clone()).await;
         if sent.is_ok() {
@@ -156,8 +157,7 @@ impl Bridge {
         self.queue_result(text).await;
         let moved = self
             .current_conn()
-            .map(|now| !Arc::ptr_eq(&now, &conn))
-            .unwrap_or(false);
+            .is_ok_and(|now| !Arc::ptr_eq(&now, &conn));
         if moved {
             self.flush_pending().await;
             if self.inner.pending.lock().await.is_empty() {
@@ -262,7 +262,7 @@ impl Bridge {
             let conn = self.current_conn()?;
             let mut rx = conn.rx.lock().await;
             let incoming = tokio::select! {
-                _ = cancel.cancelled() => return Err(RecvError::Cancelled),
+                () = cancel.cancelled() => return Err(RecvError::Cancelled),
                 item = rx.recv() => item,
             };
             drop(rx);
@@ -277,21 +277,17 @@ impl Bridge {
                     Some(cmd) if cmd.kind.is_empty() && !cmd.id.is_empty() => {
                         tracing::info!("command without a kind id={}", cmd.id);
                         self.reply_unreadable(&cmd.id, UNREADABLE_NO_KIND).await;
-                        continue;
                     }
                     Some(cmd) => return Ok(cmd),
-                    None => {
-                        match salvage_id(&text) {
-                            Some(id) => {
-                                tracing::info!("unreadable command id={id} len={}", text.len());
-                                self.reply_unreadable(&id, UNREADABLE_FRAME).await;
-                            }
-                            None => {
-                                tracing::info!("dropped unreadable frame len={}", text.len())
-                            }
+                    None => match salvage_id(&text) {
+                        Some(id) => {
+                            tracing::info!("unreadable command id={id} len={}", text.len());
+                            self.reply_unreadable(&id, UNREADABLE_FRAME).await;
                         }
-                        continue;
-                    }
+                        None => {
+                            tracing::info!("dropped unreadable frame len={}", text.len());
+                        }
+                    },
                 },
                 Some(Incoming::Closed(frame)) => {
                     if conn.stale.load(Ordering::SeqCst) {
@@ -325,7 +321,7 @@ impl Bridge {
             .inner
             .conn
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(conn);
         if let Some(old) = old {
             old.stop_keepalive();
@@ -336,7 +332,7 @@ impl Bridge {
             .inner
             .hello
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         self.send_hello_payload(hello)
             .await
@@ -353,7 +349,7 @@ impl Bridge {
             .inner
             .conn
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(conn) = conn {
             conn.stop_keepalive();
@@ -370,7 +366,7 @@ impl Bridge {
             );
             loop {
                 tokio::select! {
-                    _ = cancel.cancelled() => return,
+                    () = cancel.cancelled() => return,
                     _ = ticker.tick() => {
                         let _ = bridge.send("ping", Value::Null).await;
                     }

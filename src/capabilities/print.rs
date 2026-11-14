@@ -4,16 +4,16 @@ use super::proc::{fill, int_arg, string_arg};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::{json_script_handler, run_pwsh_json};
 
-const SPOOLER_CHECK: &str = r##"
+const SPOOLER_CHECK: &str = r"
 $spooler = Get-Service -Name Spooler -ErrorAction SilentlyContinue
 $out = [ordered]@{
     spooler = if ($spooler) { [string]$spooler.Status } else { 'NotInstalled' }
     spooler_start_type = if ($spooler) { [string]$spooler.StartType } else { $null }
     error = $null
 }
-"##;
+";
 
-const PRINTERS: &str = r##"
+const PRINTERS: &str = r"
 @@SPOOLER@@
 $out.printers = @()
 if ($spooler -and $spooler.Status -eq 'Running') {
@@ -44,9 +44,9 @@ if ($spooler -and $spooler.Status -eq 'Running') {
     $out.error = 'The Print Spooler service is not running, so Windows cannot list printers.'
 }
 $out | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const JOBS_TEMPLATE: &str = r##"
+const JOBS_TEMPLATE: &str = r#"
 @@SPOOLER@@
 $printer = @@PRINTER@@
 $max = @@MAX@@
@@ -80,7 +80,7 @@ if ($spooler -and $spooler.Status -eq 'Running') {
 }
 $out.count = @($out.jobs).Count
 $out | ConvertTo-Json -Compress -Depth 4
-"##;
+"#;
 
 pub fn register(r: &mut Router) {
     super::register_specs(

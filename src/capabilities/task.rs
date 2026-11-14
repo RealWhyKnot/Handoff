@@ -4,7 +4,7 @@ use super::proc::{fill, int_arg, load_specs, string_arg};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::run_pwsh_json;
 
-const TEMPLATE: &str = r##"
+const TEMPLATE: &str = r#"
 $prefix = @@PREFIX@@
 $state  = @@STATE@@
 $max    = @@MAX@@
@@ -61,7 +61,7 @@ $results = $tasks |
     max     = $max
     entries = @($results)
 } | ConvertTo-Json -Compress -Depth 6
-"##;
+"#;
 
 pub fn register(r: &mut Router) {
     for spec in load_specs(include_str!("specs/task.json")) {
@@ -69,6 +69,7 @@ pub fn register(r: &mut Router) {
     }
 }
 
+#[must_use]
 pub fn is_valid_state(state: &str) -> bool {
     matches!(
         state,

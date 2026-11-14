@@ -2,7 +2,7 @@ use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::pwsh_out::run_pwsh_json;
 
-const UPDATE_HISTORY: &str = r##"
+const UPDATE_HISTORY: &str = r#"
 $operations = @{ 1 = 'Installation'; 2 = 'Uninstallation'; 3 = 'Other' }
 $results = @{ 0 = 'NotStarted'; 1 = 'InProgress'; 2 = 'Succeeded'; 3 = 'SucceededWithErrors'; 4 = 'Failed'; 5 = 'Aborted' }
 $entries = @()
@@ -39,9 +39,9 @@ try {
     count   = $entries.Count
     entries = @($entries)
 } | ConvertTo-Json -Compress -Depth 5
-"##;
+"#;
 
-const DEFENDER_STATUS: &str = r##"
+const DEFENDER_STATUS: &str = r#"
 $stateFlags = [ordered]@{ 1 = 'PendingFullScan'; 2 = 'PendingReboot'; 4 = 'PendingManualSteps'; 8 = 'PendingOfflineScan'; 16 = 'PendingCriticalFailure' }
 $blockLevels = @{ 0 = 'Default'; 1 = 'Moderate'; 2 = 'High'; 4 = 'HighPlus'; 6 = 'ZeroTolerance' }
 function State-Name($v) {
@@ -80,9 +80,9 @@ try {
         error = $_.Exception.Message
     } | ConvertTo-Json -Compress
 }
-"##;
+"#;
 
-const LOCAL_ADMINS: &str = r##"
+const LOCAL_ADMINS: &str = r"
 if (-not (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue)) {
     [ordered]@{
         available = $false
@@ -118,7 +118,7 @@ try {
         members = @()
     } | ConvertTo-Json -Compress
 }
-"##;
+";
 
 pub fn register(r: &mut Router) {
     super::register_specs(

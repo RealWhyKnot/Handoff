@@ -12,6 +12,7 @@ pub struct ParsedVersion {
     pub suffix: String,
 }
 
+#[must_use]
 pub fn parse_version(input: &str) -> Option<ParsedVersion> {
     let s = input.trim();
     let s = s.strip_prefix('v').unwrap_or(s);
@@ -37,6 +38,7 @@ pub fn parse_version(input: &str) -> Option<ParsedVersion> {
     Some(ParsedVersion { parts, suffix })
 }
 
+#[must_use]
 pub fn compare_versions(a: &ParsedVersion, b: &ParsedVersion) -> i32 {
     match a.parts.cmp(&b.parts) {
         Ordering::Less => return -1,
@@ -54,10 +56,10 @@ pub fn compare_versions(a: &ParsedVersion, b: &ParsedVersion) -> i32 {
     }
 }
 
+#[must_use]
 pub fn print_version(args: &[String], version: &str) -> i32 {
-    let (opts, _) = match parse_options("version", args, &[]) {
-        Ok(v) => v,
-        Err(_) => return 2,
+    let Ok((opts, _)) = parse_options("version", args, &[]) else {
+        return 2;
     };
 
     let info = json!({
@@ -80,6 +82,7 @@ pub fn print_version(args: &[String], version: &str) -> i32 {
     0
 }
 
+#[must_use]
 pub fn version_info(version: &str, relay: &str, log_path: &str, audit_dir: &str) -> Value {
     json!({
         "version": version,

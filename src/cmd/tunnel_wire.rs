@@ -50,7 +50,7 @@ pub(super) struct WireFrame {
     #[serde(
         default,
         deserialize_with = "null_default",
-        skip_serializing_if = "is_zero"
+        skip_serializing_if = "is_default"
     )]
     pub(super) host_port: i64,
 }
@@ -63,8 +63,8 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
-fn is_zero(n: &i64) -> bool {
-    *n == 0
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 impl WireFrame {

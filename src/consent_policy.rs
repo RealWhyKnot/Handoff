@@ -28,6 +28,7 @@ impl Category {
         Category::Power,
     ];
 
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Category::Files => "files",
@@ -41,6 +42,7 @@ impl Category {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Category::Files => "read, add, change, and delete your files",
@@ -69,6 +71,7 @@ pub enum Decision {
 }
 
 impl Decision {
+    #[must_use]
     pub fn as_str(self) -> Cow<'static, str> {
         match self {
             Decision::NotRequired => "not_required".into(),
@@ -116,6 +119,7 @@ pub enum Term {
 }
 
 impl Term {
+    #[must_use]
     pub fn length(self) -> Option<Duration> {
         match self {
             Term::Minutes(m) => Some(Duration::from_secs(u64::from(m) * 60)),
@@ -123,6 +127,7 @@ impl Term {
         }
     }
 
+    #[must_use]
     pub fn text(self) -> String {
         match self {
             Term::Once => "just this once".to_string(),
@@ -131,6 +136,7 @@ impl Term {
         }
     }
 
+    #[must_use]
     pub fn button(self) -> Option<String> {
         match self {
             Term::Once => None,
@@ -151,6 +157,7 @@ fn minutes_text(m: u32, after_next: bool) -> String {
     }
 }
 
+#[must_use]
 pub fn term_for(category: Category, ask: Ask) -> Term {
     if category == Category::Power {
         return Term::Once;
@@ -187,6 +194,7 @@ pub const GATED_KINDS: [(&str, Category); 18] = [
     ("sys.shutdown", Category::Power),
 ];
 
+#[must_use]
 pub fn category_for(kind: &str) -> Option<Category> {
     GATED_KINDS
         .iter()
@@ -194,6 +202,7 @@ pub fn category_for(kind: &str) -> Option<Category> {
         .map(|(_, c)| *c)
 }
 
+#[must_use]
 pub fn grant_ttl(category: Category) -> Option<Duration> {
     match category {
         Category::Exec => Some(EXEC_GRANT_TTL),

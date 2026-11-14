@@ -59,6 +59,7 @@ pub struct ArgView {
     pub blocks: Vec<(String, String)>,
 }
 
+#[must_use]
 pub fn describe_args(args: &Map<String, Value>) -> ArgView {
     let mut view = ArgView::default();
     if args.is_empty() {
@@ -174,8 +175,7 @@ pub fn summarize_result(out: &Outcome) -> String {
                 let printed = res
                     .get("stdout")
                     .and_then(Value::as_str)
-                    .map(str::len)
-                    .unwrap_or(0);
+                    .map_or(0, str::len);
                 return format!(
                     "Exit code {}, {} of output",
                     util::go_value_string(code),

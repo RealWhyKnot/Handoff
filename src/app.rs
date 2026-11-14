@@ -17,10 +17,11 @@ impl Default for Commands {
 }
 
 pub fn wants_support_log(args: &[String]) -> bool {
-    let sub = args.first().map(String::as_str).unwrap_or("");
+    let sub = args.first().map_or("", String::as_str);
     matches!(sub, "" | "new" | "tunnel" | "menu")
 }
 
+#[must_use]
 pub fn usage_text() -> String {
     [
         "handoff: remote help for Windows PCs",
@@ -51,6 +52,7 @@ pub fn usage_text() -> String {
     .join("\n")
 }
 
+#[must_use]
 pub fn run(args: &[String], commands: &Commands) -> i32 {
     let Some(first) = args.first() else {
         return (commands.menu)(&[]);
@@ -135,7 +137,7 @@ mod tests {
         };
         let args: Vec<String> = ["new", "--consent", "deny"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(run(&args, &commands), 7);
         assert_eq!(*seen.borrow(), vec!["--consent", "deny"]);
@@ -143,8 +145,13 @@ mod tests {
 
     #[test]
     fn support_log_is_only_for_long_running_subcommands() {
-        let w =
-            |s: &[&str]| wants_support_log(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        let w = |s: &[&str]| {
+            wants_support_log(
+                &s.iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        };
         assert!(w(&[]));
         assert!(w(&["new"]));
         assert!(w(&["tunnel"]));

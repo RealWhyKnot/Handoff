@@ -16,6 +16,7 @@ pub struct Command {
 }
 
 impl Command {
+    #[must_use]
     pub fn parse(data: &str) -> Option<Command> {
         let Ok(Value::Object(mut raw)) = serde_json::from_str::<Value>(data) else {
             return None;
@@ -55,6 +56,7 @@ pub enum RecvError {
 }
 
 impl RecvError {
+    #[must_use]
     pub fn is_eof(&self) -> bool {
         matches!(self, RecvError::Eof | RecvError::Closed { .. })
     }

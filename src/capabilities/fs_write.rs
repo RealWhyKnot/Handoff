@@ -535,11 +535,7 @@ mod tests {
         ] {
             for kind in ["fs.upload", "fs.mkdir", "fs.write"] {
                 let out = guard_write_path(kind, path);
-                let msg = out
-                    .as_ref()
-                    .err()
-                    .map(|e| e.message.clone())
-                    .unwrap_or_default();
+                let msg = out.as_ref().err().map_or_default(|e| e.message.clone());
                 assert!(
                     msg.starts_with(&format!("{kind}: ")) && msg.contains(why),
                     "{kind} {path}: {out:?}"

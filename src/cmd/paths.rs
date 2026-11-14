@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use super::flags::Options;
 use crate::{audit, supportlog};
 
+#[must_use]
 pub fn support_log_path(opts: Option<&Options>) -> String {
     if let Some(opts) = opts
         && !opts.log_dir.is_empty()
@@ -12,11 +13,10 @@ pub fn support_log_path(opts: Option<&Options>) -> String {
             .display()
             .to_string();
     }
-    supportlog::path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
+    supportlog::path().map_or_default(|p| p.display().to_string())
 }
 
+#[must_use]
 pub fn audit_dir(opts: Option<&Options>) -> String {
     if let Some(opts) = opts
         && !opts.audit_dir.is_empty()

@@ -4,7 +4,7 @@ use super::proc::{fill, int_arg, load_specs, string_arg};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::run_pwsh_json;
 
-const TEMPLATE: &str = r##"
+const TEMPLATE: &str = r"
 $prefix = @@PREFIX@@
 $max = @@MAX@@
 
@@ -57,7 +57,7 @@ $all = $all | Sort-Object @{Expression='kind'},@{Expression='name'} | Select-Obj
     max     = $max
     entries = @($all)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
 pub fn register(r: &mut Router) {
     for spec in load_specs(include_str!("specs/app.json")) {

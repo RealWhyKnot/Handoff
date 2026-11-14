@@ -59,7 +59,7 @@ impl Conn {
         if let Some(h) = self
             .keepalive
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
             h.abort();
@@ -103,7 +103,7 @@ pub(super) async fn dial_conn(
 
     let connect = tokio_tungstenite::connect_async_with_config(request, Some(config), false);
     let (stream, response) = tokio::select! {
-        _ = cancel.cancelled() => return Err("ws dial: stopped".to_string()),
+        () = cancel.cancelled() => return Err("ws dial: stopped".to_string()),
         res = connect => res.map_err(|e| format!("ws dial: {e}"))?,
     };
     let zipped = zwire::offers_zstd(
@@ -133,7 +133,10 @@ pub(super) async fn dial_conn(
         keepalive: Mutex::new(None),
     });
     let handle = tokio::spawn(keepalive(Arc::clone(&conn), pong_rx, timing));
-    *conn.keepalive.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    *conn
+        .keepalive
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
     Ok(conn)
 }
 
@@ -209,7 +212,7 @@ async fn keepalive(conn: Arc<Conn>, mut pongs: watch::Receiver<u64>, timing: Kee
                 .map_err(|_closed| false)
         };
         match tokio::time::timeout(timing.timeout, probe).await {
-            Ok(Ok(())) => continue,
+            Ok(Ok(())) => {}
             Ok(Err(_)) => return,
             Err(_) => {
                 conn.stale.store(true, Ordering::SeqCst);

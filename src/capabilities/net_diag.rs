@@ -4,7 +4,7 @@ use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 
 use super::pwsh_out::{json_script_handler, run_pwsh_json};
 
-const WIFI: &str = r##"
+const WIFI: &str = r"
 $lines = @(netsh wlan show interfaces 2>&1 | ForEach-Object { [string]$_ })
 $code = $LASTEXITCODE
 $svc = Get-Service -Name WlanSvc -ErrorAction SilentlyContinue
@@ -13,9 +13,9 @@ $svc = Get-Service -Name WlanSvc -ErrorAction SilentlyContinue
     service = if ($svc) { [string]$svc.Status } else { 'NotInstalled' }
     lines = $lines
 } | ConvertTo-Json -Compress -Depth 3
-"##;
+";
 
-const PROXY: &str = r##"
+const PROXY: &str = r#"
 $is = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 $p = Get-ItemProperty -LiteralPath $is -ErrorAction SilentlyContinue
 $flags = $null
@@ -40,9 +40,9 @@ $whCode = $LASTEXITCODE
         NO_PROXY = $env:NO_PROXY
     }
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+"#;
 
-const PROFILE: &str = r##"
+const PROFILE: &str = r"
 $rows = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Sort-Object InterfaceIndex | ForEach-Object {
     [ordered]@{
         name = [string]$_.Name
@@ -55,7 +55,7 @@ $rows = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Sort-Object I
     }
 })
 ConvertTo-Json -InputObject $rows -Compress -Depth 3
-"##;
+";
 
 pub fn register(r: &mut Router) {
     super::register_specs(
@@ -116,6 +116,7 @@ fn wifi_field(key: &str) -> Option<&'static str> {
     })
 }
 
+#[must_use]
 pub fn parse_wifi_interfaces(lines: &[String]) -> Vec<Value> {
     let mut out = Vec::new();
     let mut current: Option<Map<String, Value>> = None;
@@ -167,15 +168,12 @@ pub fn parse_wifi_interfaces(lines: &[String]) -> Vec<Value> {
 }
 
 fn lines_of(v: &Value, key: &str) -> Vec<String> {
-    v.get(key)
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    v.get(key).and_then(Value::as_array).map_or_default(|a| {
+        a.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
 }
 
 fn joined_text(lines: &[String]) -> String {
@@ -218,6 +216,7 @@ async fn net_wifi(ctx: Ctx, _args: Args) -> CapResult {
     Ok(shape_wifi(&raw))
 }
 
+#[must_use]
 pub fn parse_winhttp(lines: &[String]) -> Value {
     let direct = lines
         .iter()
@@ -259,13 +258,12 @@ pub fn shape_proxy(raw: &Value) -> Value {
     let env: Map<String, Value> = raw
         .get("environment")
         .and_then(Value::as_object)
-        .map(|m| {
+        .map_or_default(|m| {
             m.iter()
                 .filter(|(_, v)| v.as_str().is_some_and(|s| !s.is_empty()))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     json!({
         "user": raw.get("user").cloned().unwrap_or(Value::Null),
         "winhttp": winhttp,

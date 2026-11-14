@@ -2,30 +2,37 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[must_use]
 pub fn millis_i64(d: std::time::Duration) -> i64 {
     i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
 }
 
+#[must_use]
 pub fn count_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
+#[must_use]
 pub fn count_i64(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
+#[must_use]
 pub fn size_usize(n: u64) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
 }
 
+#[must_use]
 pub fn positive_u64(n: i64) -> u64 {
     u64::try_from(n).unwrap_or(0)
 }
 
+#[must_use]
 pub fn to_usize(n: u32) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
 }
 
+#[must_use]
 pub fn now_ms() -> i64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => millis_i64(d),
@@ -48,6 +55,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+#[must_use]
 pub fn format_utc_ms(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let millis = ms.rem_euclid(1000);
@@ -61,19 +69,23 @@ pub fn format_utc_ms(ms: i64) -> String {
     )
 }
 
+#[must_use]
 pub fn format_utc_day(ms: i64) -> String {
     let (y, mo, d) = civil_from_days(ms.div_euclid(1000).div_euclid(86_400));
     format!("{y:04}-{mo:02}-{d:02}")
 }
 
+#[must_use]
 pub fn utc_timestamp() -> String {
     format_utc_ms(now_ms())
 }
 
+#[must_use]
 pub fn utc_day() -> String {
     format_utc_day(now_ms())
 }
 
+#[must_use]
 pub fn first_non_empty(values: &[&str]) -> String {
     values
         .iter()
@@ -83,10 +95,12 @@ pub fn first_non_empty(values: &[&str]) -> String {
         .to_string()
 }
 
+#[must_use]
 pub fn env_var(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
 }
 
+#[must_use]
 pub fn user_config_dir() -> Option<PathBuf> {
     user_config_dir_from(&env_var)
 }
@@ -104,6 +118,7 @@ pub fn user_config_dir_from(env: &dyn Fn(&str) -> String) -> Option<PathBuf> {
     (!home.is_empty()).then(|| PathBuf::from(home).join(".config"))
 }
 
+#[must_use]
 pub fn user_cache_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         let dir = env_var("LOCALAPPDATA");
@@ -124,6 +139,7 @@ pub fn install_crypto_provider() {
     });
 }
 
+#[must_use]
 pub fn look_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let exts: Vec<String> = if cfg!(windows) && std::path::Path::new(name).extension().is_none() {
@@ -136,7 +152,7 @@ pub fn look_path(name: &str) -> Option<PathBuf> {
         pathext
             .split(';')
             .filter(|e| !e.is_empty())
-            .map(|e| e.to_string())
+            .map(std::string::ToString::to_string)
             .collect()
     } else {
         vec![String::new()]
@@ -153,6 +169,7 @@ pub fn look_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+#[must_use]
 pub fn hostname() -> String {
     use windows::Win32::System::WindowsProgramming::GetComputerNameW;
     use windows::core::PWSTR;
@@ -160,7 +177,7 @@ pub fn hostname() -> String {
     let mut buf = [0u16; 64];
     let mut len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     // SAFETY: buf is a live array and len holds its length in UTF-16 units.
-    let ok = unsafe { GetComputerNameW(Some(PWSTR(buf.as_mut_ptr())), &mut len) };
+    let ok = unsafe { GetComputerNameW(Some(PWSTR(buf.as_mut_ptr())), &raw mut len) };
     match ok {
         Ok(()) => String::from_utf16_lossy(&buf[..to_usize(len)]),
         Err(_) => env_var("COMPUTERNAME"),
@@ -177,6 +194,7 @@ pub fn hostname() -> String {
     }
 }
 
+#[must_use]
 pub fn go_float_string(f: f64) -> String {
     if f == 0.0 {
         return "0".to_string();
@@ -200,6 +218,7 @@ pub fn go_float_string(f: f64) -> String {
     format!("{mantissa}e{sign}{:02}", exp.abs())
 }
 
+#[must_use]
 pub fn go_value_string(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Null => "<nil>".to_string(),
@@ -211,6 +230,7 @@ pub fn go_value_string(v: &serde_json::Value) -> String {
     }
 }
 
+#[must_use]
 pub fn go_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -235,6 +255,7 @@ pub fn go_quote(s: &str) -> String {
     out
 }
 
+#[must_use]
 pub fn go_json_escape_html(s: &str) -> String {
     s.replace('<', "\\u003c")
         .replace('>', "\\u003e")
@@ -243,6 +264,7 @@ pub fn go_json_escape_html(s: &str) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
+#[must_use]
 pub fn go_pretty_json(v: &serde_json::Value) -> String {
     go_json_escape_html(&serde_json::to_string_pretty(v).unwrap_or_default())
 }
@@ -288,8 +310,7 @@ pub fn parse_go_duration(input: &str) -> Option<std::time::Duration> {
         let unit_len = rest
             .char_indices()
             .find(|(_, c)| c.is_ascii_digit() || *c == '.')
-            .map(|(i, _)| i)
-            .unwrap_or(rest.len());
+            .map_or(rest.len(), |(i, _)| i);
         let unit: u128 = match &rest[..unit_len] {
             "ns" => 1,
             "us" | "\u{b5}s" | "\u{3bc}s" => 1_000,
@@ -325,6 +346,7 @@ fn fmt_frac(v: u128, prec: u32) -> String {
     format!("{int}.{}", frac.trim_end_matches('0'))
 }
 
+#[must_use]
 pub fn go_duration_string(d: std::time::Duration) -> String {
     let nanos = d.as_nanos();
     if nanos == 0 {

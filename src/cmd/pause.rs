@@ -1,10 +1,12 @@
 use std::io::{BufRead, IsTerminal, Write};
 
+#[must_use]
 pub fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
 #[cfg(windows)]
+#[must_use]
 pub fn owns_console() -> bool {
     use windows::Win32::System::Console::GetConsoleProcessList;
 

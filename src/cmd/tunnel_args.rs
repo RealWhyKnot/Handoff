@@ -125,6 +125,7 @@ pub fn bind_local_listener(port: u16, explicit: bool) -> std::io::Result<TcpList
     Err(last_err.unwrap_or_else(|| std::io::Error::other("no port available")))
 }
 
+#[must_use]
 pub fn is_tunnel_url(token: &str) -> bool {
     ["http://", "https://", "ws://", "wss://"]
         .iter()

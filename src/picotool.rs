@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,6 +13,7 @@ static DATA: &[u8] = include_bytes!("../assets/picotool/picotool.exe");
 #[cfg(not(feature = "embed_picotool"))]
 static DATA: &[u8] = &[];
 
+#[must_use]
 pub fn embedded() -> bool {
     !DATA.is_empty()
 }
@@ -41,7 +43,9 @@ static EXTRACTED: Mutex<Extracted> = Mutex::new(Extracted {
 });
 
 fn extract_once() -> Result<PathBuf, String> {
-    let mut state = EXTRACTED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = EXTRACTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(p) = &state.path {
         return Ok(p.clone());
     }
@@ -86,7 +90,10 @@ fn extract(data: &[u8], dir: &std::path::Path) -> Result<PathBuf, String> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut out, b| {
+        write!(out, "{b:02x}").expect("writing to a String cannot fail");
+        out
+    })
 }
 
 #[cfg(test)]
@@ -104,7 +111,10 @@ mod tests {
         assert_eq!(fs::read(&first).unwrap(), b"binary-one");
         let name = first.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            name.starts_with("picotool-") && name.ends_with(".exe"),
+            name.starts_with("picotool-")
+                && std::path::Path::new(&name)
+                    .extension()
+                    .is_some_and(|ext| ext == "exe"),
             "{name}"
         );
         assert_eq!(name.len(), "picotool-".len() + 12 + ".exe".len());

@@ -266,28 +266,32 @@ pub(super) unsafe extern "system" fn proc_(
             }
         }
         WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            // SAFETY: ps is a live local, and EndPaint closes the paint BeginPaint opened on hwnd.
-            unsafe {
-                let dc = BeginPaint(hwnd, &mut ps);
-                FillRect(dc, &rect(0, 0, st.width, st.band_top), st.white);
-                FillRect(
-                    dc,
-                    &rect(0, st.band_top, st.width, st.height - st.band_top),
-                    st.band,
-                );
-                FillRect(dc, &rect(0, st.band_top, st.width, 1), st.line);
-                FillRect(dc, &rect(0, st.footer_top, st.width, 1), st.line);
-                if let Ok(icon) = LoadIconW(None, IDI_WARNING) {
-                    let (x, y, s) = st.icon_at;
-                    let _ = DrawIconEx(dc, x, y, icon, s, s, 0, None, DI_NORMAL);
-                }
-                let _ = EndPaint(hwnd, &ps);
-            }
+            paint(hwnd, st);
             LRESULT(0)
         }
         // SAFETY: the arguments are the ones Windows passed in for this window.
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    }
+}
+
+fn paint(hwnd: HWND, st: &State) {
+    let mut ps = PAINTSTRUCT::default();
+    // SAFETY: ps is a live local, and EndPaint closes the paint BeginPaint opened on hwnd.
+    unsafe {
+        let dc = BeginPaint(hwnd, &raw mut ps);
+        FillRect(dc, &rect(0, 0, st.width, st.band_top), st.white);
+        FillRect(
+            dc,
+            &rect(0, st.band_top, st.width, st.height - st.band_top),
+            st.band,
+        );
+        FillRect(dc, &rect(0, st.band_top, st.width, 1), st.line);
+        FillRect(dc, &rect(0, st.footer_top, st.width, 1), st.line);
+        if let Ok(icon) = LoadIconW(None, IDI_WARNING) {
+            let (x, y, s) = st.icon_at;
+            let _ = DrawIconEx(dc, x, y, icon, s, s, 0, None, DI_NORMAL);
+        }
+        let _ = EndPaint(hwnd, &raw const ps);
     }
 }
 

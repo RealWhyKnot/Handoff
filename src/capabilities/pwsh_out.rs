@@ -46,6 +46,7 @@ pub async fn run_pwsh_json(cancel: &CancellationToken, script: &str) -> Result<V
     pwsh::run_pwsh_json(cancel, script).await.map(normalize)
 }
 
+#[must_use]
 pub fn json_script_handler(script: &'static str) -> Handler {
     handler(move |ctx, _args| async move {
         let result: CapResult = run_pwsh_json(&ctx.cancel, script)

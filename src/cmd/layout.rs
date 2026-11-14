@@ -11,6 +11,7 @@ pub enum More {
 }
 
 impl More {
+    #[must_use]
     pub fn note(&self) -> String {
         match self {
             More::Lines(n) => format!("... {}", plural(*n, "more line", "more lines")),
@@ -25,6 +26,7 @@ pub struct Folded {
     pub more: Option<More>,
 }
 
+#[must_use]
 pub fn clean_lines(text: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -68,7 +70,7 @@ pub fn clean_lines(text: &str) -> Vec<String> {
         }
         out.push(line);
     }
-    while out.last().is_some_and(|l| l.is_empty()) {
+    while out.last().is_some_and(std::string::String::is_empty) {
         out.pop();
     }
     out
@@ -84,7 +86,7 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
                 }
             }
         }
-        Some(']') | Some('P') | Some('_') | Some('^') => {
+        Some(']' | 'P' | '_' | '^') => {
             chars.next();
             while let Some(c) = chars.next() {
                 if c == '\x07' || c == '\n' {
@@ -105,10 +107,12 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
+#[must_use]
 pub fn clean_inline(text: &str) -> String {
     clean_lines(text).join(" ")
 }
 
+#[must_use]
 pub fn wrap(line: &str, first: usize, rest: usize) -> Vec<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut rows = Vec::new();
@@ -151,6 +155,7 @@ pub fn wrap(line: &str, first: usize, rest: usize) -> Vec<String> {
     rows
 }
 
+#[must_use]
 pub fn fold(lines: &[String], width: usize, max_rows: usize, hang: usize) -> Folded {
     let width = width.max(4);
     let budget = max_rows.max(1);
@@ -195,6 +200,7 @@ fn row_text(index: usize, indent: usize, piece: &str) -> String {
     }
 }
 
+#[must_use]
 pub fn fits(rows: &[String], width: usize) -> bool {
     rows.iter().all(|r| display_width(r) <= width)
 }
@@ -204,7 +210,7 @@ mod tests {
     use super::*;
 
     fn owned(lines: &[&str]) -> Vec<String> {
-        lines.iter().map(|l| l.to_string()).collect()
+        lines.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

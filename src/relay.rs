@@ -111,9 +111,8 @@ mod tests {
 
     async fn next_text(ws: &mut WsStream2) -> Value {
         loop {
-            match ws.next().await.unwrap().unwrap() {
-                Message::Text(t) => return serde_json::from_str(&t).unwrap(),
-                _ => continue,
+            if let Message::Text(t) = ws.next().await.unwrap().unwrap() {
+                return serde_json::from_str(&t).unwrap();
             }
         }
     }
@@ -439,7 +438,7 @@ mod tests {
             let mut sent = false;
             loop {
                 tokio::select! {
-                    _ = &mut sender, if !sent => {
+                    () = &mut sender, if !sent => {
                         sent = true;
                         ws.send(Message::text(r#"{"id":"c1","kind":"noop"}"#)).await.unwrap();
                     }

@@ -19,22 +19,24 @@ pub fn register(r: &mut Router) {
 
 pub fn go_ip(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         other @ IpAddr::V4(_) => other,
     }
 }
 
+#[must_use]
 pub fn ip_string(ip: IpAddr) -> String {
     go_ip(ip).to_string()
 }
 
+#[must_use]
 pub fn is_v4(ip: IpAddr) -> bool {
     go_ip(ip).is_ipv4()
 }
 
 fn lookup_error_text(err: &std::io::Error) -> String {
     match err.raw_os_error() {
-        Some(11001) | Some(11004) | Some(9003) => "no such host".to_string(),
+        Some(11001 | 11004 | 9003) | None => "no such host".to_string(),
         Some(_) => {
             let text = err.to_string();
             let text = match text.rfind(" (os error ") {
@@ -43,7 +45,6 @@ fn lookup_error_text(err: &std::io::Error) -> String {
             };
             format!("getaddrinfow: {text}")
         }
-        None => "no such host".to_string(),
     }
 }
 
@@ -71,7 +72,7 @@ pub async fn lookup_ip_addrs(
         }
     };
     tokio::select! {
-        _ = cancel.cancelled() => Err(format!("lookup {host}: operation was canceled")),
+        () = cancel.cancelled() => Err(format!("lookup {host}: operation was canceled")),
         r = timed => match r {
             None => Err(format!("lookup {host}: i/o timeout")),
             Some(Ok(addrs)) => Ok(addrs),
@@ -141,7 +142,7 @@ mod dns {
                 DNS_TYPE_CNAME,
                 0,
                 std::ptr::null_mut(),
-                &mut rec,
+                &raw mut rec,
                 std::ptr::null_mut(),
             )
         };
@@ -190,7 +191,7 @@ pub async fn lookup_cname(cancel: &CancellationToken, name: &str, deadline: Inst
     let n = name.to_string();
     let work = tokio::task::spawn_blocking(move || dns::lookup_cname(&n));
     tokio::select! {
-        _ = cancel.cancelled() => String::new(),
+        () = cancel.cancelled() => String::new(),
         r = tokio::time::timeout_at(deadline, work) => match r {
             Ok(Ok(s)) => s,
             _ => String::new(),
@@ -321,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn net_resolve_validates_name() {
-        for bad in ["".to_string(), "a".repeat(300), "bad host;name".to_string()] {
+        for bad in [String::new(), "a".repeat(300), "bad host;name".to_string()] {
             let out = run(json!({"name": bad})).await;
             assert!(!out.ok, "name {bad:?} was accepted");
         }

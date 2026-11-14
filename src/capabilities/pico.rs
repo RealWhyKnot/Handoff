@@ -55,7 +55,7 @@ impl Run {
     }
 }
 
-fn exit_text(status: &std::process::ExitStatus) -> String {
+fn exit_text(status: std::process::ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exit status {}", code.cast_unsigned()),
         None => "signal: killed".to_string(),
@@ -84,7 +84,7 @@ async fn run_picotool(cancel: &CancellationToken, args: &[String]) -> Run {
     };
     let output = tokio::select! {
         out = child.wait_with_output() => out,
-        _ = cancel.cancelled() => return Run::failed("signal: killed".to_string()),
+        () = cancel.cancelled() => return Run::failed("signal: killed".to_string()),
     };
     match output {
         Ok(o) => Run {
@@ -93,7 +93,7 @@ async fn run_picotool(cancel: &CancellationToken, args: &[String]) -> Run {
             error: if o.status.success() {
                 None
             } else {
-                Some(exit_text(&o.status))
+                Some(exit_text(o.status))
             },
         },
         Err(e) => Run::failed(e.to_string()),
@@ -116,7 +116,7 @@ fn with_serial(mut args: Vec<String>, serial: &str) -> Vec<String> {
 }
 
 fn strings(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|s| s.to_string()).collect()
+    parts.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn reboot_options(

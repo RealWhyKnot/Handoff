@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::future::Future;
 
 use base64::Engine;
@@ -84,7 +85,10 @@ where
         let encoded = base64::engine::general_purpose::STANDARD.encode(&shot.data);
         if encoded.len() <= SCREENSHOT_BUDGET {
             let sum = Sha256::digest(&shot.data);
-            let hex: String = sum.iter().map(|b| format!("{b:02x}")).collect();
+            let hex: String = sum.iter().fold(String::new(), |mut out, b| {
+                write!(out, "{b:02x}").expect("writing to a String cannot fail");
+                out
+            });
             return Ok(json!({
                 "width": shot.width,
                 "height": shot.height,
@@ -152,6 +156,7 @@ pub fn png_to_jpeg(png_data: &[u8], quality: i64) -> Result<Vec<u8>, HandlerErro
     Ok(out)
 }
 
+#[must_use]
 pub fn parse_shot_dimensions(line: &str) -> Option<(i64, i64, bool)> {
     let fields: Vec<&str> = line.split('x').collect();
     if fields.len() != 3 {
@@ -191,8 +196,7 @@ pub async fn capture_screen(
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("handoff-shot-{}-{nanos}", std::process::id()));
     std::fs::create_dir(&dir).map_err(|e| HandlerError::plain(e.to_string()))?;
     let dir = TempDir(dir);
@@ -209,7 +213,7 @@ pub async fn capture_screen(
         data,
         ..Screenshot::default()
     };
-    for line in String::from_utf8_lossy(&stdout).trim().split('\n') {
+    for line in String::from_utf8_lossy(&stdout).trim().lines() {
         if let Some((w, h, scaled)) = parse_shot_dimensions(line.trim()) {
             shot.width = w;
             shot.height = h;
@@ -232,7 +236,7 @@ fn read_captured_file(path: &std::path::Path) -> Result<Vec<u8>, HandlerError> {
 }
 
 #[cfg(windows)]
-const SCRIPT: &str = r##"
+const SCRIPT: &str = r#"
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -270,9 +274,10 @@ $bmp.Save(@@OUT@@, [System.Drawing.Imaging.ImageFormat]::Png)
 
 Write-Output ("" + $bmp.Width + "x" + $bmp.Height + "x" + $scaled)
 $bmp.Dispose()
-"##;
+"#;
 
 #[cfg(windows)]
+#[must_use]
 pub fn screenshot_script(out_path: &str, opts: &ScreenshotOptions) -> String {
     SCRIPT
         .replace("@@DISPLAY@@", &opts.display.to_string())

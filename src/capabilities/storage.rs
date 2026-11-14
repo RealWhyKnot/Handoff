@@ -4,7 +4,7 @@ use super::proc::{fill, load_specs, string_arg};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::run_pwsh_json;
 
-const TEMPLATE: &str = r##"
+const TEMPLATE: &str = r"
 $driveLetter = @@DRIVE@@
 if ($driveLetter) {
     $volumes = @(Get-Volume -DriveLetter $driveLetter -ErrorAction SilentlyContinue)
@@ -46,7 +46,7 @@ $entries = $volumes |
     count = @($entries).Count
     entries = @($entries)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
 pub fn register(r: &mut Router) {
     for spec in load_specs(include_str!("specs/storage.json")) {

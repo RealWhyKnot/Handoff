@@ -71,7 +71,7 @@ fn rows_of(list: &[Value]) -> Option<(Vec<String>, Vec<Vec<String>>)> {
         .map(|item| match item {
             Value::Object(map) => headers
                 .iter()
-                .map(|h| map.get(h).map(cell).unwrap_or_default())
+                .map(|h| map.get(h).map_or_default(cell))
                 .collect(),
             other => {
                 let mut row = vec![cell(other)];
@@ -83,6 +83,7 @@ fn rows_of(list: &[Value]) -> Option<(Vec<String>, Vec<Vec<String>>)> {
     Some((headers, rows))
 }
 
+#[must_use]
 pub fn render_table(result: &Value) -> Option<String> {
     match result {
         Value::Array(list) => {
@@ -109,7 +110,7 @@ pub fn render_table(result: &Value) -> Option<String> {
             }
             let (headers, rows) = rows_of(list)?;
             let mut out = Vec::new();
-            let width = map.keys().map(|k| k.len()).max().unwrap_or(0);
+            let width = map.keys().map(std::string::String::len).max().unwrap_or(0);
             for (k, v) in map {
                 if k != name {
                     out.push(format!("{}  {}", console::pad(k, width), cell(v)));

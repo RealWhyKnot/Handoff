@@ -109,13 +109,17 @@ impl TunnelBridge for NoBridge {
 static MANAGER: Mutex<Option<Arc<TunnelMgr>>> = Mutex::new(None);
 
 fn manager_slot() -> MutexGuard<'static, Option<Arc<TunnelMgr>>> {
-    MANAGER.lock().unwrap_or_else(|e| e.into_inner())
+    MANAGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[must_use]
 pub fn active_manager() -> Option<Arc<TunnelMgr>> {
     manager_slot().clone()
 }
 
+#[must_use]
 pub fn set_manager(mgr: Option<Arc<TunnelMgr>>) -> Option<Arc<TunnelMgr>> {
     std::mem::replace(&mut *manager_slot(), mgr)
 }
@@ -142,6 +146,7 @@ pub fn register(r: &mut Router, bridge: Option<Bridge>) {
     );
 }
 
+#[must_use]
 pub fn is_tunnel_frame_kind(kind: &str) -> bool {
     FRAME_KINDS.contains(&kind)
 }
@@ -159,6 +164,7 @@ pub fn enqueue_tunnel_frame(kind: &str, extras: &Args) {
     );
 }
 
+#[must_use]
 pub fn raw_string(args: &Args, key: &str) -> String {
     match args.get(key) {
         Some(Value::String(s)) => s.clone(),
@@ -301,12 +307,11 @@ mod tests {
             if got.len() >= want {
                 return got;
             }
-            if Instant::now() > deadline {
-                panic!(
-                    "only {} of {want} bytes echoed back for {tunnel_id}/{stream_id}",
-                    got.len()
-                );
-            }
+            assert!(
+                Instant::now() <= deadline,
+                "only {} of {want} bytes echoed back for {tunnel_id}/{stream_id}",
+                got.len()
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -364,9 +369,10 @@ mod tests {
             if n == want {
                 return;
             }
-            if Instant::now() > deadline {
-                panic!("stream count = {n}, want {want}");
-            }
+            assert!(
+                Instant::now() <= deadline,
+                "stream count = {n}, want {want}"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -473,12 +479,11 @@ mod tests {
             if got.windows(8).any(|w| w == b"fritz ok") {
                 break;
             }
-            if Instant::now() > deadline {
-                panic!(
-                    "HTTP response did not arrive; got {:?}",
-                    String::from_utf8_lossy(&got)
-                );
-            }
+            assert!(
+                Instant::now() <= deadline,
+                "HTTP response did not arrive; got {:?}",
+                String::from_utf8_lossy(&got)
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let deadline = Instant::now() + Duration::from_secs(3);

@@ -58,13 +58,13 @@ pub fn build_exec_payload(
             }
         };
         let typed = serde_json::from_str::<Value>(value)
-            .map(normalize_numbers)
-            .unwrap_or_else(|_| Value::String(value.to_string()));
+            .map_or_else(|_| Value::String(value.to_string()), normalize_numbers);
         payload.insert(key.to_string(), typed);
     }
     Ok(payload)
 }
 
+#[must_use]
 pub fn view_token_from(input: &str) -> String {
     let s = input.trim();
     if let Some(i) = s.rfind("/v/") {
@@ -186,7 +186,7 @@ async fn queue_and_await(
                 return Ok((raw, 200));
             }
             410 => return Ok((raw, 410)),
-            404 => continue,
+            404 => {}
             other => return Ok((raw, other)),
         }
     }

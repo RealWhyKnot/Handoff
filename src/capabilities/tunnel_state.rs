@@ -64,7 +64,9 @@ impl Drop for QueueGuard {
 
 impl TunnelState {
     fn lock(&self) -> MutexGuard<'_, StateInner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn stream_count(&self) -> usize {
@@ -81,28 +83,25 @@ impl TunnelState {
             if inner.closed {
                 return;
             }
-            match inner.queues.get(stream_id) {
-                Some(tx) => tx.clone(),
-                None => {
-                    let (tx, rx) = mpsc::channel(STREAM_QUEUE_DEPTH);
-                    inner.queues.insert(stream_id.to_string(), tx.clone());
-                    drop(inner);
-                    tokio::spawn(Arc::clone(self).consume(stream_id.to_string(), rx));
-                    tx
-                }
+            if let Some(tx) = inner.queues.get(stream_id) {
+                tx.clone()
+            } else {
+                let (tx, rx) = mpsc::channel(STREAM_QUEUE_DEPTH);
+                inner.queues.insert(stream_id.to_string(), tx.clone());
+                drop(inner);
+                tokio::spawn(Arc::clone(self).consume(stream_id.to_string(), rx));
+                tx
             }
         };
         match tx.try_send(f) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
             Err(mpsc::error::TrySendError::Full(f)) => self.send_blocking(stream_id, tx, f),
         }
     }
 
     fn send_blocking(&self, stream_id: &str, tx: mpsc::Sender<Frame>, f: Frame) {
         let multi = tokio::runtime::Handle::try_current()
-            .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-            .unwrap_or(false);
+            .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
         if !multi {
             tracing::info!(
                 "tunnel queue full tunnel={} stream={stream_id}; frame dropped",
@@ -115,9 +114,9 @@ impl TunnelState {
             tokio::runtime::Handle::current().block_on(async move {
                 tokio::select! {
                     _ = tx.send(f) => {}
-                    _ = done.cancelled() => {}
+                    () = done.cancelled() => {}
                 }
-            })
+            });
         });
     }
 
@@ -129,7 +128,7 @@ impl TunnelState {
         let mut s: Option<Arc<TunnelStream>> = None;
         loop {
             let f = tokio::select! {
-                _ = self.done.cancelled() => {
+                () = self.done.cancelled() => {
                     if let Some(s) = &s {
                         s.close("tunnel closed");
                     }
@@ -246,7 +245,7 @@ impl TunnelState {
         let mut buf = vec![0u8; READ_CHUNK];
         loop {
             let res = tokio::select! {
-                _ = s.cancel.cancelled() => break,
+                () = s.cancel.cancelled() => break,
                 r = rd.read(&mut buf) => r,
             };
             let reason = match res {
@@ -329,17 +328,14 @@ impl TunnelStream {
 
     fn close(&self, reason: &str) {
         self.cancel.cancel();
-        match self.writer.try_lock() {
-            Ok(mut guard) => {
-                guard.take();
-            }
-            Err(_) => {
-                let writer = Arc::clone(&self.writer);
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
-                        writer.lock().await.take();
-                    });
-                }
+        if let Ok(mut guard) = self.writer.try_lock() {
+            guard.take();
+        } else {
+            let writer = Arc::clone(&self.writer);
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    writer.lock().await.take();
+                });
             }
         }
         tracing::info!(

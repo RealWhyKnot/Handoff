@@ -4,7 +4,7 @@ use super::proc::{fill, go_quote, int_arg, string_arg};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::run_pwsh_json;
 
-const SNAPSHOT_TEMPLATE: &str = r##"
+const SNAPSHOT_TEMPLATE: &str = r#"
 $start = (Get-Date).AddMinutes(-@@SINCE@@)
 $channel = @@CHANNEL@@
 $provider = @@PROVIDER@@
@@ -29,9 +29,9 @@ try {
 }
 $events = @($raw | Select-Object @{n='time';e={$_.TimeCreated.ToUniversalTime().ToString("o")}},LevelDisplayName,Id,ProviderName,Message)
 ConvertTo-Json -InputObject $events -Compress -Depth 4
-"##;
+"#;
 
-const CRASHES_TEMPLATE: &str = r##"
+const CRASHES_TEMPLATE: &str = r#"
 $since = (Get-Date).AddDays(-@@DAYS@@)
 $max = @@MAX@@
 function First-Line($m) {
@@ -122,9 +122,9 @@ $all = @($rows)
     minidumps = $dumps
     full_memory_dump = $fullDump
 } | ConvertTo-Json -Compress -Depth 5
-"##;
+"#;
 
-const PROVIDERS_TEMPLATE: &str = r##"
+const PROVIDERS_TEMPLATE: &str = r"
 $prefix = @@PREFIX@@
 $max = @@MAX@@
 $logs = Get-WinEvent -ListLog * -ErrorAction SilentlyContinue
@@ -142,7 +142,7 @@ $logs |
                   @{n='file_size';e={[int64]$_.FileSize}},
                   @{n='owning_provider';e={[string]$_.OwningProviderName}} |
     ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
 pub fn register(r: &mut Router) {
     super::register_specs(
@@ -156,6 +156,7 @@ pub fn register(r: &mut Router) {
     );
 }
 
+#[must_use]
 pub fn valid_log_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 256
@@ -256,6 +257,7 @@ async fn evt_snapshot(ctx: Ctx, args: Args) -> CapResult {
         .map_err(HandlerError::from)
 }
 
+#[must_use]
 pub fn crashes_script(args: &Args) -> String {
     let days = int_arg(args, "since_days", 30).clamp(1, 365);
     let max = int_arg(args, "max_events", 50).clamp(1, 500);

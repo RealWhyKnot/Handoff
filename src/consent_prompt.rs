@@ -74,8 +74,7 @@ pub fn prompt_parts(req: &Request) -> PromptParts {
     let term = req.term();
     let granted = req
         .category
-        .map(Category::label)
-        .unwrap_or("run this kind of command");
+        .map_or("run this kind of command", Category::label);
     let scope = match term {
         Term::Once => "If you allow it, only this request goes ahead. They have to ask again for anything else."
             .to_string(),
@@ -96,6 +95,7 @@ pub fn prompt_parts(req: &Request) -> PromptParts {
 }
 
 impl PromptParts {
+    #[must_use]
     pub fn scope_line(&self) -> String {
         let mut out = self.scope.clone();
         if self.grant_button.is_some() {
@@ -105,6 +105,7 @@ impl PromptParts {
     }
 }
 
+#[must_use]
 pub fn countdown_text(left: Duration) -> String {
     let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
     format!(
@@ -114,6 +115,7 @@ pub fn countdown_text(left: Duration) -> String {
     )
 }
 
+#[must_use]
 pub fn prompt_text(req: &Request) -> String {
     let parts = prompt_parts(req);
     let mut out = format!("{}.\n\n", parts.instruction);
@@ -137,6 +139,7 @@ pub fn prompt_text(req: &Request) -> String {
     out
 }
 
+#[must_use]
 pub fn system_prompt() -> Prompt {
     Arc::new(|cancel, req| Box::pin(system_prompt_impl(cancel, req)))
 }
@@ -168,7 +171,7 @@ async fn system_prompt_impl(
         joined = &mut task => {
             joined.map_err(|e| ConsentError::Other(format!("consent prompt failed: {e}")))?
         }
-        _ = cancel.cancelled() => {
+        () = cancel.cancelled() => {
             let deadline = Instant::now() + PROMPT_CLOSE_WAIT;
             let mut closed = false;
             loop {
@@ -216,6 +219,7 @@ async fn system_prompt_impl(
     }
 }
 
+#[must_use]
 pub fn typed_question(term: Term) -> String {
     match term {
         Term::Once => {
@@ -228,6 +232,7 @@ pub fn typed_question(term: Term) -> String {
     }
 }
 
+#[must_use]
 pub fn typed_answer(line: &str, term: Term) -> Answer {
     match line.trim().to_lowercase().as_str() {
         "y" | "yes" if term == Term::Once => Answer::Once,

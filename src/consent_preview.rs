@@ -5,6 +5,7 @@ use super::preview_inspect::gui_info;
 use super::preview_inspect::inspect;
 use super::preview_inspect::keyboard_run;
 use super::preview_inspect::press;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -147,7 +148,10 @@ fn oversized_cases() -> Vec<(&'static str, super::Request)> {
     let path = format!("C:\\{}Old project backups", "Folder\\".repeat(700));
     let host = format!("{}.lan", "printer-".repeat(31));
     let long_name = format!("Invoke-{} -Path C:\\Temp", "VeryLongCommandName".repeat(60));
-    let lines: String = (1..=2000).map(|i| format!("Write-Output {i}\n")).collect();
+    let lines: String = (1..=2000).fold(String::new(), |mut out, i| {
+        writeln!(out, "Write-Output {i}").expect("writing to a String cannot fail");
+        out
+    });
     vec![
         (
             "one-line",

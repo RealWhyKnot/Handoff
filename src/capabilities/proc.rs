@@ -7,7 +7,7 @@ use super::consent::require_risk_consent;
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::run_pwsh_json;
 
-const LIST_TEMPLATE: &str = r##"
+const LIST_TEMPLATE: &str = r"
 $name = @@NAME@@
 $procs = Get-CimInstance Win32_Process
 if ($name) {
@@ -22,9 +22,9 @@ $procs = switch (@@SORT@@) {
     default { $procs | Sort-Object Name, ProcessId }
 }
 ConvertTo-Json -InputObject @($procs | Select-Object -First @@LIMIT@@) -Compress -Depth 4
-"##;
+";
 
-const SVC_LIST_TEMPLATE: &str = r##"
+const SVC_LIST_TEMPLATE: &str = r"
 $name = @@NAME@@
 $state = @@STATE@@
 $startType = @@START_TYPE@@
@@ -40,9 +40,9 @@ if ($startType -ne 'all') {
     $svc = $svc | Where-Object { [string]$_.StartType -eq $startType }
 }
 ConvertTo-Json -InputObject @($svc | Select-Object Name,DisplayName,@{n='Status';e={[string]$_.Status}},@{n='StartType';e={[string]$_.StartType}}) -Compress
-"##;
+";
 
-const KILL_TEMPLATE: &str = r##"
+const KILL_TEMPLATE: &str = r"
 $targetPid = @@PID@@
 $proc = Get-Process -Id $targetPid -ErrorAction Stop
 $name = $proc.ProcessName
@@ -54,18 +54,18 @@ Stop-Process -Id $targetPid -Force -ErrorAction Stop
     path = $path
     killed = $true
 } | ConvertTo-Json -Compress
-"##;
+";
 
-const FIND_TEMPLATE: &str = r##"
+const FIND_TEMPLATE: &str = r"
 $q = [regex]::Escape([string]@@QUERY@@)
 Get-CimInstance Win32_Process | Where-Object {
     $_.Name -match $q -or $_.ExecutablePath -match $q -or $_.CommandLine -match $q
 } | Select-Object ProcessId,Name,ExecutablePath,CommandLine,ParentProcessId,SessionId,@{n='WorkingSetMB';e={[math]::Round($_.WorkingSetSize/1MB,1)}} |
     Select-Object -First @@MAX@@ |
     ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const CONTROL_TEMPLATE: &str = r##"
+const CONTROL_TEMPLATE: &str = r"
 $name = @@NAME@@
 $action = @@ACTION@@
 $before = Get-Service -Name $name -ErrorAction Stop
@@ -82,9 +82,9 @@ $after = Get-Service -Name $name -ErrorAction Stop
     before = $before.Status.ToString()
     after = $after.Status.ToString()
 } | ConvertTo-Json -Compress
-"##;
+";
 
-const STATUS_TEMPLATE: &str = r##"
+const STATUS_TEMPLATE: &str = r#"
 $names = @(@@NAMES@@)
 $single = $names.Count -eq 1
 $rows = @(foreach ($name in $names) {
@@ -112,7 +112,7 @@ $rows = @(foreach ($name in $names) {
     }
 })
 if ($single) { $rows[0] | ConvertTo-Json -Compress } else { ConvertTo-Json -InputObject $rows -Compress }
-"##;
+"#;
 
 pub(super) fn load_specs(json: &str) -> Vec<Spec> {
     serde_json::from_str(json).expect("embedded capability specs are valid JSON")

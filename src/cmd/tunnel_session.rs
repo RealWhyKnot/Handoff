@@ -120,7 +120,7 @@ async fn serve_session(
         .insert(zwire::HEADER, HeaderValue::from_static(zwire::ZSTD));
     let connect = tokio_tungstenite::connect_async_with_config(request, Some(config), false);
     let (stream, zipped) = tokio::select! {
-        _ = cancel.cancelled() => return (false, Some("context canceled".to_string())),
+        () = cancel.cancelled() => return (false, Some("context canceled".to_string())),
         res = tokio::time::timeout(SESSION_DIAL_TIMEOUT, connect) => match res {
             Ok(Ok((s, resp))) => (s, zwire::offers_zstd(resp.headers().get(zwire::HEADER).and_then(|v| v.to_str().ok()))),
             Ok(Err(err)) => return (false, Some(err.to_string())),
@@ -235,7 +235,7 @@ async fn await_tunnel_ready(
         }
     };
     tokio::select! {
-        _ = cancel.cancelled() => Err("context canceled".to_string()),
+        () = cancel.cancelled() => Err("context canceled".to_string()),
         res = tokio::time::timeout(READY_TIMEOUT, wait) => match res {
             Ok(r) => r,
             Err(_) => Err("context deadline exceeded".to_string()),

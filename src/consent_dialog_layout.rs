@@ -35,6 +35,7 @@ pub struct Area {
     pub height: i32,
 }
 
+#[must_use]
 pub fn work_area() -> Area {
     let mut r = RECT::default();
     // SAFETY: r is a live RECT, the type SPI_GETWORKAREA fills in.
@@ -103,9 +104,9 @@ impl Fonts {
         // SAFETY: each LOGFONTW is a live local for the length of its call.
         unsafe {
             Fonts {
-                body: CreateFontIndirectW(&body_lf),
-                big: CreateFontIndirectW(&big_lf),
-                mono: CreateFontIndirectW(&mono_lf),
+                body: CreateFontIndirectW(&raw const body_lf),
+                big: CreateFontIndirectW(&raw const big_lf),
+                mono: CreateFontIndirectW(&raw const mono_lf),
                 dpi,
             }
         }
@@ -127,6 +128,7 @@ impl Drop for Fonts {
     }
 }
 
+#[must_use]
 pub fn measure(font: HFONT, text: &str, width: i32, single: bool) -> (i32, i32) {
     let mut buf: Vec<u16> = text.encode_utf16().collect();
     if buf.is_empty() {
@@ -147,13 +149,14 @@ pub fn measure(font: HFONT, text: &str, width: i32, single: bool) -> (i32, i32) 
     unsafe {
         let dc = GetDC(None);
         let old = SelectObject(dc, HGDIOBJ(font.0));
-        DrawTextW(dc, &mut buf, &mut r, flags);
+        DrawTextW(dc, &mut buf, &raw mut r, flags);
         SelectObject(dc, old);
         ReleaseDC(None, dc);
     }
     (r.right - r.left, r.bottom - r.top)
 }
 
+#[must_use]
 pub fn crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
@@ -172,19 +175,19 @@ pub(super) const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_POPUP.0 | WS_CAPTION.0 | 
 fn chrome() -> (i32, i32) {
     let mut r = rect(0, 0, 100, 100);
     // SAFETY: r is a live RECT the call adjusts in place.
-    let _ = unsafe { AdjustWindowRectEx(&mut r, STYLE, false, WS_EX_DLGMODALFRAME) };
+    let _ = unsafe { AdjustWindowRectEx(&raw mut r, STYLE, false, WS_EX_DLGMODALFRAME) };
     ((r.right - r.left) - 100, (r.bottom - r.top) - 100)
 }
 
-fn button_row(f: &Fonts, labels: &[(i32, String)], right: i32, y: i32) -> Vec<Child> {
-    let h = f.px(26);
-    let gap = f.px(8);
+fn button_row(fonts: &Fonts, labels: &[(i32, String)], right: i32, y: i32) -> Vec<Child> {
+    let height = fonts.px(26);
+    let gap = fonts.px(8);
     let mut x = right;
     let mut out = Vec::new();
     for (id, text) in labels.iter().rev() {
-        let (tw, _) = measure(f.body, text, 10_000, true);
-        let w = (tw + f.px(32)).max(f.px(96));
-        x -= w;
+        let (text_width, _) = measure(fonts.body, text, 10_000, true);
+        let width = (text_width + fonts.px(32)).max(fonts.px(96));
+        x -= width;
         let mut style = WS_TABSTOP.0;
         if *id == ID_NO {
             style |= BS_DEFPUSHBUTTON;
@@ -195,8 +198,8 @@ fn button_row(f: &Fonts, labels: &[(i32, String)], right: i32, y: i32) -> Vec<Ch
             style,
             ex: 0,
             id: *id,
-            rect: rect(x, y, w, h),
-            font: f.body,
+            rect: rect(x, y, width, height),
+            font: fonts.body,
             role: Role::Plain,
         });
         x -= gap;
@@ -211,6 +214,43 @@ pub(super) struct Layout {
     pub(super) height: i32,
     pub(super) band_top: i32,
     pub(super) footer_top: i32,
+}
+
+fn button_labels(grant: Option<&str>) -> Vec<(i32, String)> {
+    let mut labels = Vec::new();
+    if let Some(g) = grant {
+        labels.push((ID_GRANT, g.to_string()));
+    }
+    labels.push((ID_ONCE, "Just this once".to_string()));
+    labels.push((ID_NO, "Don't allow".to_string()));
+    labels
+}
+
+fn footer_child(
+    f: &Fonts,
+    timeout: Duration,
+    text_width: i32,
+    width: i32,
+    footer_top: i32,
+    footer_h: i32,
+) -> Child {
+    let footer = countdown_text(timeout);
+    let (_, fh) = measure(f.body, &footer, text_width, true);
+    Child {
+        class: w!("STATIC"),
+        text: footer,
+        style: SS_NOPREFIX,
+        ex: 0,
+        id: 0,
+        rect: rect(
+            f.px(16),
+            footer_top + (footer_h - fh) / 2,
+            width - f.px(32),
+            fh,
+        ),
+        font: f.body,
+        role: Role::Footer,
+    }
 }
 
 pub(super) fn layout(f: &Fonts, req: &Request, area: Area, timeout: Duration) -> Layout {
@@ -298,36 +338,14 @@ pub(super) fn layout(f: &Fonts, req: &Request, area: Area, timeout: Duration) ->
     y += ch + f.px(16);
 
     let band_top = y;
-    let mut labels = Vec::new();
-    if let Some(g) = &parts.grant_button {
-        labels.push((ID_GRANT, g.clone()));
-    }
-    labels.push((ID_ONCE, "Just this once".to_string()));
-    labels.push((ID_NO, "Don't allow".to_string()));
     kids.extend(button_row(
         f,
-        &labels,
+        &button_labels(parts.grant_button.as_deref()),
         width - f.px(12),
         band_top + f.px(10),
     ));
     let footer_top = band_top + band_h;
-    let footer = countdown_text(timeout);
-    let (_, fh) = measure(f.body, &footer, tw, true);
-    kids.push(Child {
-        class: w!("STATIC"),
-        text: footer,
-        style: SS_NOPREFIX,
-        ex: 0,
-        id: 0,
-        rect: rect(
-            f.px(16),
-            footer_top + (footer_h - fh) / 2,
-            width - f.px(32),
-            fh,
-        ),
-        font: f.body,
-        role: Role::Footer,
-    });
+    kids.push(footer_child(f, timeout, tw, width, footer_top, footer_h));
     Layout {
         children: kids,
         width,

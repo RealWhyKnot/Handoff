@@ -29,6 +29,7 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    #[must_use]
     pub fn new(cancel: CancellationToken) -> Ctx {
         Ctx {
             cancel,
@@ -37,6 +38,7 @@ impl Ctx {
         }
     }
 
+    #[must_use]
     pub fn with_progress(mut self, progress: Progress) -> Ctx {
         self.progress = Some(progress);
         self
@@ -48,6 +50,7 @@ impl Ctx {
         }
     }
 
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
@@ -66,6 +69,7 @@ pub struct Shown {
     pub cut: bool,
 }
 
+#[must_use]
 pub fn hidden_char(c: char) -> bool {
     matches!(
         c,
@@ -73,6 +77,7 @@ pub fn hidden_char(c: char) -> bool {
     ) || (c.is_control() && c != '\n' && c != '\t')
 }
 
+#[must_use]
 pub fn for_display(text: &str, max_chars: usize, max_lines: usize) -> Shown {
     let mut out = String::new();
     let mut chars = 0usize;
@@ -147,6 +152,7 @@ impl Drop for AbortOnDrop {
 }
 
 impl Router {
+    #[must_use]
     pub fn new() -> Router {
         Router::default()
     }
@@ -161,10 +167,12 @@ impl Router {
         self.specs.insert(spec.kind.clone(), spec);
     }
 
+    #[must_use]
     pub fn kinds(&self) -> Vec<String> {
         self.handlers.keys().cloned().collect()
     }
 
+    #[must_use]
     pub fn specs(&self) -> Vec<Spec> {
         self.handlers
             .keys()
@@ -172,6 +180,7 @@ impl Router {
             .collect()
     }
 
+    #[must_use]
     pub fn spec_for(&self, kind: &str) -> Option<&Spec> {
         self.specs.get(kind)
     }
@@ -225,7 +234,7 @@ impl Router {
         let joined = tokio::select! {
             biased;
             joined = &mut task.0 => joined,
-            _ = cancel.cancelled() => {
+            () = cancel.cancelled() => {
                 return Outcome {
                     error: "command cancelled".to_string(),
                     elapsed_ms: elapsed(t0),
@@ -422,9 +431,7 @@ mod tests {
         r.register(
             "panic",
             handler(|_, _| async {
-                if true {
-                    panic!("nil deref in a capability");
-                }
+                assert!(std::hint::black_box(false), "nil deref in a capability");
                 Ok(Value::Null)
             }),
         );

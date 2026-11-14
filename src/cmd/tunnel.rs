@@ -68,7 +68,7 @@ pub fn tunnel(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let bound_port = listener.local_addr().map_or(0, |a| a.port());
     if bound_port != opts.local_port {
         crate::outln!(
             "port {} was busy, using {} instead",
@@ -141,7 +141,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::http::HeaderValue;
 
     fn strs(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
+        items.iter().map(std::string::ToString::to_string).collect()
     }
 
     fn parse(items: &[&str]) -> Result<TunnelOptions, String> {

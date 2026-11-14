@@ -2,18 +2,18 @@ use crate::dispatch::Router;
 
 use super::pwsh_out::json_script_handler;
 
-const CPU: &str = r##"Get-CimInstance Win32_Processor -Property Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,Manufacturer | Select-Object @{n='Name';e={([string]$_.Name).Trim()}},NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,Manufacturer | ConvertTo-Json -Compress"##;
+const CPU: &str = r"Get-CimInstance Win32_Processor -Property Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,Manufacturer | Select-Object @{n='Name';e={([string]$_.Name).Trim()}},NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,Manufacturer | ConvertTo-Json -Compress";
 
-const RAM: &str = r##"Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator,@{n='SizeGB';e={[math]::Round($_.Capacity/1GB,2)}},Speed,Manufacturer,PartNumber | ConvertTo-Json -Compress"##;
+const RAM: &str = r"Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator,@{n='SizeGB';e={[math]::Round($_.Capacity/1GB,2)}},Speed,Manufacturer,PartNumber | ConvertTo-Json -Compress";
 
-const USB: &str = r##"Get-PnpDevice -PresentOnly | Where-Object {$_.InstanceId -like 'USB\*'} | Select-Object InstanceId,FriendlyName,Status,Class,Manufacturer | ConvertTo-Json -Compress"##;
+const USB: &str = r"Get-PnpDevice -PresentOnly | Where-Object {$_.InstanceId -like 'USB\*'} | Select-Object InstanceId,FriendlyName,Status,Class,Manufacturer | ConvertTo-Json -Compress";
 
-const DISKS: &str = r##"
+const DISKS: &str = r"
 $disks = Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,SerialNumber,@{n='SizeGB';e={[math]::Round($_.Size/1GB,2)}},MediaType,HealthStatus,OperationalStatus,BusType
 $disks | ConvertTo-Json -Compress
-"##;
+";
 
-const GPU: &str = r##"
+const GPU: &str = r"
 function Mem-Bytes($v) {
     if ($null -eq $v) { return $null }
     if ($v -is [byte[]]) {
@@ -50,9 +50,9 @@ Get-CimInstance Win32_VideoController | ForEach-Object {
         Status = [string]$_.Status
     }
 } | ConvertTo-Json -Compress
-"##;
+";
 
-const DISK_HEALTH: &str = r##"
+const DISK_HEALTH: &str = r"
 $disks = @(Get-PhysicalDisk -ErrorAction SilentlyContinue | Sort-Object { [int]$_.DeviceId })
 $denied = 'Only an administrator can read these counters.'
 $rows = @(foreach ($d in $disks) {
@@ -100,9 +100,9 @@ $rows = @(foreach ($d in $disks) {
     unhealthy = @($rows | Where-Object { $_.health -ne 'Healthy' }).Count
     disks = $rows
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const BATTERY: &str = r##"
+const BATTERY: &str = r"
 Add-Type -AssemblyName System.Windows.Forms
 $power = [System.Windows.Forms.SystemInformation]::PowerStatus
 $batteries = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
@@ -128,9 +128,9 @@ $rows = for ($i = 0; $i -lt $batteries.Count; $i++) {
     power_line = [string]$power.PowerLineStatus
     batteries = @($rows)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const DISPLAYS: &str = r##"
+const DISPLAYS: &str = r#"
 Add-Type -Namespace HandoffDpi -Name Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
 [void][HandoffDpi.Native]::SetProcessDPIAware()
 Add-Type -AssemblyName System.Windows.Forms
@@ -172,7 +172,7 @@ $adapters = foreach ($v in @(Get-CimInstance Win32_VideoController -ErrorAction 
     monitors = @($monitors)
     adapters = @($adapters)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+"#;
 
 pub fn register(r: &mut Router) {
     super::register_specs(

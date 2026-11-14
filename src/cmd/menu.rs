@@ -6,6 +6,7 @@ use super::tunnel::tunnel;
 use super::update::update;
 use super::version::print_version;
 
+#[must_use]
 pub fn menu(args: &[String]) -> i32 {
     if !stdin_is_terminal() {
         crate::errln!("handoff needs a terminal for the menu; run 'handoff new' to host a session");
@@ -51,6 +52,7 @@ pub fn menu(args: &[String]) -> i32 {
     }
 }
 
+#[must_use]
 pub fn menu_text() -> &'static str {
     "\nWhat would you like to do?\n  1) Host a session (let someone help me with this computer)\n  2) Connect to a tunnel (forward a port from someone else's computer)\n  3) Check for updates\n  4) Show version and file locations\n  5) Quit\nChoose [1-5]: "
 }
@@ -69,6 +71,7 @@ fn read_choice(reader: &mut dyn BufRead) -> std::io::Result<Option<String>> {
     Ok(Some(line.trim().to_lowercase()))
 }
 
+#[must_use]
 pub fn parse_port_choice(input: &str) -> Option<u16> {
     match input.trim().parse::<i64>() {
         Ok(p) if p > 0 => u16::try_from(p).ok(),

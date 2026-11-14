@@ -45,9 +45,9 @@ pub(super) fn inspect(hwnd: HWND) -> Seen {
     // SAFETY: kids and the three out values stay alive for the length of the calls.
     unsafe {
         let _ = EnumChildWindows(Some(hwnd), Some(each), LPARAM(target));
-        let _ = GetWindowRect(hwnd, &mut window);
-        let _ = GetClientRect(hwnd, &mut client);
-        let _ = ClientToScreen(hwnd, &mut origin);
+        let _ = GetWindowRect(hwnd, &raw mut window);
+        let _ = GetClientRect(hwnd, &raw mut client);
+        let _ = ClientToScreen(hwnd, &raw mut origin);
     }
     let mut parts = Vec::new();
     for kid in kids {
@@ -57,7 +57,7 @@ pub(super) fn inspect(hwnd: HWND) -> Seen {
         let class = String::from_utf16_lossy(&class[..n]);
         let mut r = RECT::default();
         // SAFETY: r is a live RECT the call fills in.
-        let _ = unsafe { GetWindowRect(kid, &mut r) };
+        let _ = unsafe { GetWindowRect(kid, &raw mut r) };
         let rect = RECT {
             left: r.left - origin.x,
             top: r.top - origin.y,
@@ -180,7 +180,7 @@ pub(super) fn gui_info(thread: u32) -> windows::Win32::UI::WindowsAndMessaging::
         ..Default::default()
     };
     // SAFETY: info is a live GUITHREADINFO with cbSize set.
-    let _ = unsafe { GetGUIThreadInfo(thread, &mut info) };
+    let _ = unsafe { GetGUIThreadInfo(thread, &raw mut info) };
     info
 }
 

@@ -42,7 +42,9 @@ impl TunnelClient {
     }
 
     fn streams(&self) -> std::sync::MutexGuard<'_, HashMap<String, StreamEntry>> {
-        self.streams.lock().unwrap_or_else(|e| e.into_inner())
+        self.streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(super) async fn accept_loop(
@@ -52,7 +54,7 @@ impl TunnelClient {
     ) {
         loop {
             let accepted = tokio::select! {
-                _ = session.cancelled() => return,
+                () = session.cancelled() => return,
                 r = listener.accept() => r,
             };
             let conn = match accepted {
@@ -93,7 +95,7 @@ impl TunnelClient {
     ) -> LoopEnd {
         loop {
             let next = tokio::select! {
-                _ = session.cancelled() => return LoopEnd::Cancelled,
+                () = session.cancelled() => return LoopEnd::Cancelled,
                 n = source.next() => n,
             };
             let msg = match next.map(|r| r.map(|m| inflate(m, unzip))) {
@@ -163,7 +165,7 @@ impl TunnelClient {
         let mut pending: Vec<u8> = Vec::new();
         loop {
             let res = tokio::select! {
-                _ = cancel.cancelled() => Err(None),
+                () = cancel.cancelled() => Err(None),
                 r = rd.read(&mut buf) => match r {
                     Ok(0) => Err(None),
                     Ok(n) => Ok(n),
@@ -265,8 +267,7 @@ pub fn new_stream_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let mut h = RandomState::new().build_hasher();
     h.write_u128(nanos);
     h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));

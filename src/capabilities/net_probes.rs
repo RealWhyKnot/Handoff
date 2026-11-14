@@ -29,6 +29,7 @@ pub fn register(r: &mut Router) {
     );
 }
 
+#[must_use]
 pub fn valid_target(s: &str) -> bool {
     s.parse::<IpAddr>().is_ok() || valid_hostname(s)
 }
@@ -52,7 +53,9 @@ fn valid_hostname(s: &str) -> bool {
 }
 
 fn take_tcp_test_slot(now: Instant) -> Result<(), HandlerError> {
-    let mut history = TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut history = TCP_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     history.retain(|t| now.saturating_duration_since(*t) < TCP_TEST_WINDOW);
     if history.len() >= TCP_TEST_LIMIT {
         return Err(HandlerError::plain(format!(
@@ -150,6 +153,8 @@ fn dial_error_text(err: &std::io::Error) -> String {
 fn fail_fast_on_loopback(socket: &TcpSocket, target: &SocketAddr) {
     use std::os::windows::io::AsRawSocket;
 
+    const SIO_TCP_INITIAL_RTO: u32 = 0x8000_0000 | 0x1800_0000 | 0x11;
+
     #[repr(C)]
     struct InitialRtoParameters {
         rtt: u16,
@@ -178,7 +183,6 @@ fn fail_fast_on_loopback(socket: &TcpSocket, target: &SocketAddr) {
     if !loopback {
         return;
     }
-    const SIO_TCP_INITIAL_RTO: u32 = 0x8000_0000 | 0x1800_0000 | 17;
     let params = InitialRtoParameters {
         rtt: u16::MAX,
         max_syn_retransmissions: 0xfe,
@@ -199,7 +203,7 @@ fn fail_fast_on_loopback(socket: &TcpSocket, target: &SocketAddr) {
             params_len,
             std::ptr::null_mut(),
             0,
-            &mut returned,
+            &raw mut returned,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
@@ -224,7 +228,7 @@ async fn dial_serial(
     timeout: Duration,
 ) -> Result<TcpStream, String> {
     let deadline = Instant::now() + timeout;
-    let first_is_v4 = addrs.first().map(|a| is_v4(*a)).unwrap_or(true);
+    let first_is_v4 = addrs.first().is_none_or(|a| is_v4(*a));
     let mut ordered: Vec<IpAddr> = addrs
         .iter()
         .copied()
@@ -249,7 +253,7 @@ async fn dial_serial(
         }
         let target = SocketAddr::new(ip, port);
         let attempt: Result<(), String> = tokio::select! {
-            _ = cancel.cancelled() => Err(format!("dial tcp {shown}: operation was canceled")),
+            () = cancel.cancelled() => Err(format!("dial tcp {shown}: operation was canceled")),
             r = tokio::time::timeout(slice, connect_one(target)) => match r {
                 Ok(Ok(stream)) => return Ok(stream),
                 Ok(Err(e)) => Err(format!("dial tcp {shown}: {}", dial_error_text(&e))),
@@ -446,7 +450,10 @@ mod tests {
     #[test]
     fn tcp_tests_are_rate_limited() {
         let _serial = LIMIT_TESTS.blocking_lock();
-        TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        TCP_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         let start = Instant::now();
         for _ in 0..TCP_TEST_LIMIT {
             take_tcp_test_slot(start).unwrap();
@@ -457,7 +464,10 @@ mod tests {
             "net.tcp-test: rate limit reached (30 per minute)"
         );
         take_tcp_test_slot(start + TCP_TEST_WINDOW).unwrap();
-        TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        TCP_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     #[tokio::test]
@@ -466,7 +476,9 @@ mod tests {
         let mut r = Router::new();
         register(&mut r);
         {
-            let mut h = TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut h = TCP_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             h.clear();
             h.extend(std::iter::repeat_n(Instant::now(), TCP_TEST_LIMIT));
         }
@@ -477,7 +489,10 @@ mod tests {
                 args(json!({"target": "127.0.0.1", "port": 9})),
             )
             .await;
-        TCP_TESTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        TCP_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         assert!(!out.ok);
         assert!(out.error.contains("rate limit"), "{}", out.error);
     }

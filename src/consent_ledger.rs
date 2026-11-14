@@ -27,6 +27,7 @@ pub struct Grant {
 }
 
 impl Grant {
+    #[must_use]
     pub fn expires(&self) -> bool {
         self.expires_at.is_some()
     }
@@ -73,6 +74,26 @@ impl Drop for AskGuard<'_> {
 
 type Gate = (Decision, Result<(), ConsentError>);
 
+fn step_for(picked: &Result<Option<Term>, ConsentError>) -> Step {
+    match picked {
+        Ok(Some(term)) => Step::Allowed(*term),
+        Ok(None) | Err(ConsentError::Denied) => Step::Denied,
+        Err(ConsentError::TimedOut) => Step::TimedOut,
+        Err(ConsentError::Cancelled) => Step::Withdrawn,
+        Err(ConsentError::Other(msg)) => Step::Failed(msg.clone()),
+    }
+}
+
+fn gate_for(picked: Result<Option<Term>, ConsentError>) -> Gate {
+    match picked {
+        Err(e) => (Decision::PromptDeny, Err(e)),
+        Ok(None) => (Decision::PromptDeny, Err(ConsentError::Denied)),
+        Ok(Some(Term::Once)) => (Decision::PromptAllowOnce, Ok(())),
+        Ok(Some(Term::Minutes(m))) => (Decision::PromptAllowFor(m), Ok(())),
+        Ok(Some(Term::Session)) => (Decision::PromptAllow, Ok(())),
+    }
+}
+
 impl Ledger {
     pub fn new(prompt: Prompt) -> Ledger {
         Ledger::with_timeout(prompt, PROMPT_TIMEOUT)
@@ -97,12 +118,12 @@ impl Ledger {
         tokio::pin!(prompt);
         tokio::select! {
             answer = &mut prompt => answer,
-            _ = tokio::time::sleep(self.timeout) => {
+            () = tokio::time::sleep(self.timeout) => {
                 ask_cancel.cancel();
                 let _ = tokio::time::timeout(PROMPT_CLOSE_WAIT, &mut prompt).await;
                 Err(ConsentError::TimedOut)
             }
-            _ = cancel.cancelled() => {
+            () = cancel.cancelled() => {
                 ask_cancel.cancel();
                 let _ = tokio::time::timeout(PROMPT_CLOSE_WAIT, &mut prompt).await;
                 Err(ConsentError::Cancelled)
@@ -111,7 +132,9 @@ impl Ledger {
     }
 
     pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn deny_everything(&self) {
@@ -125,6 +148,22 @@ impl Ledger {
     #[cfg(test)]
     pub fn advance(&self, by: Duration) {
         self.lock().offset += by;
+    }
+
+    fn record(&self, category: Category, picked: &Result<Option<Term>, ConsentError>) {
+        let mut st = self.lock();
+        st.asking.remove(&category);
+        match picked {
+            Ok(Some(Term::Once)) | Err(_) => {}
+            Ok(Some(term)) => {
+                let grant = new_grant(category, *term, st.now());
+                st.grants.insert(category, grant);
+            }
+            Ok(None) => {
+                let until = st.now() + DENY_BACKOFF;
+                st.denied.insert(category, until);
+            }
+        }
     }
 
     pub async fn require(&self, cancel: &CancellationToken, mut req: Request) -> Gate {
@@ -184,8 +223,8 @@ impl Ledger {
 
             if !ask {
                 tokio::select! {
-                    _ = &mut notified => {}
-                    _ = cancel.cancelled() => {
+                    () = &mut notified => {}
+                    () = cancel.cancelled() => {
                         return (Decision::PromptDeny, Err(ConsentError::Cancelled));
                     }
                 }
@@ -203,42 +242,12 @@ impl Ledger {
                 Answer::Once => Some(Term::Once),
                 Answer::ForGrant => Some(term),
             });
-            tell(
-                &req,
-                match &picked {
-                    Ok(Some(term)) => Step::Allowed(*term),
-                    Ok(None) => Step::Denied,
-                    Err(ConsentError::TimedOut) => Step::TimedOut,
-                    Err(ConsentError::Cancelled) => Step::Withdrawn,
-                    Err(ConsentError::Denied) => Step::Denied,
-                    Err(ConsentError::Other(msg)) => Step::Failed(msg.clone()),
-                },
-            );
-            {
-                let mut st = self.lock();
-                st.asking.remove(&category);
-                match &picked {
-                    Ok(Some(Term::Once)) | Err(_) => {}
-                    Ok(Some(term)) => {
-                        let grant = new_grant(category, *term, st.now());
-                        st.grants.insert(category, grant);
-                    }
-                    Ok(None) => {
-                        let until = st.now() + DENY_BACKOFF;
-                        st.denied.insert(category, until);
-                    }
-                }
-            }
+            tell(&req, step_for(&picked));
+            self.record(category, &picked);
             guard.armed = false;
             self.notify.notify_waiters();
 
-            return match picked {
-                Err(e) => (Decision::PromptDeny, Err(e)),
-                Ok(None) => (Decision::PromptDeny, Err(ConsentError::Denied)),
-                Ok(Some(Term::Once)) => (Decision::PromptAllowOnce, Ok(())),
-                Ok(Some(Term::Minutes(m))) => (Decision::PromptAllowFor(m), Ok(())),
-                Ok(Some(Term::Session)) => (Decision::PromptAllow, Ok(())),
-            };
+            return gate_for(picked);
         }
     }
 
@@ -268,6 +277,7 @@ impl Ledger {
     }
 }
 
+#[must_use]
 pub fn scope_text(category: Option<Category>) -> String {
     match category {
         Some(c) => term_for(c, Ask::Default).text(),

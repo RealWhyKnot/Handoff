@@ -3,9 +3,9 @@ use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 use super::proc::{bool_arg, fill};
 use super::pwsh_out::{json_script_handler, run_pwsh_json};
 
-const LIST: &str = r##"Get-CimInstance Win32_PnpSignedDriver | Select-Object DeviceName,DeviceClass,DriverVersion,DriverDate,Manufacturer,Signer,InfName | ConvertTo-Json -Compress"##;
+const LIST: &str = r"Get-CimInstance Win32_PnpSignedDriver | Select-Object DeviceName,DeviceClass,DriverVersion,DriverDate,Manufacturer,Signer,InfName | ConvertTo-Json -Compress";
 
-const PROBLEMS_TEMPLATE: &str = r##"
+const PROBLEMS_TEMPLATE: &str = r"
 $includeAbsent = @@ABSENT@@
 $meaning = @{
     1 = 'Not configured correctly'
@@ -67,7 +67,7 @@ $rows = @($devices | Where-Object { $_.Status -ne 'OK' } | Sort-Object Class, Fr
     count = $rows.Count
     devices = $rows
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
 pub fn register(r: &mut Router) {
     super::register_specs(
@@ -80,6 +80,7 @@ pub fn register(r: &mut Router) {
     );
 }
 
+#[must_use]
 pub fn problems_script(args: &Args) -> String {
     let absent = if bool_arg(args, "include_absent", false) {
         "$true"

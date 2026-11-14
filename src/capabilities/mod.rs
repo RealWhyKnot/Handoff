@@ -111,15 +111,16 @@ pub(crate) fn with_time_limit(kind: &str, ms: u32, h: Handler) -> Handler {
                 cancel: child.clone(),
                 ..ctx
             };
-            match tokio::time::timeout(Duration::from_millis(u64::from(ms)), h(inner, args)).await {
-                Ok(result) => result,
-                Err(_) => {
-                    child.cancel();
-                    Err(HandlerError::plain(format!(
-                        "{kind}: no answer within {} seconds",
-                        ms.div_ceil(1000)
-                    )))
-                }
+            if let Ok(result) =
+                tokio::time::timeout(Duration::from_millis(u64::from(ms)), h(inner, args)).await
+            {
+                result
+            } else {
+                child.cancel();
+                Err(HandlerError::plain(format!(
+                    "{kind}: no answer within {} seconds",
+                    ms.div_ceil(1000)
+                )))
             }
         }
     })

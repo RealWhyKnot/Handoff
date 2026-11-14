@@ -8,6 +8,7 @@ pub const HOST_LOOKUP_TIME: Duration = Duration::from_secs(3);
 
 pub type Lookup = fn(String) -> BoxFuture<'static, Result<Vec<IpAddr>, String>>;
 
+#[must_use]
 pub fn join_host_port(host: &str, port: i64) -> String {
     if host.contains(':') {
         format!("[{host}]:{port}")
@@ -30,7 +31,7 @@ pub(super) fn system_lookup(host: String) -> BoxFuture<'static, Result<Vec<IpAdd
             }
             Err(err) => {
                 let text = match err.raw_os_error() {
-                    Some(11001) | Some(11004) => "no such host".to_string(),
+                    Some(11001 | 11004) => "no such host".to_string(),
                     _ => go_io_error(&err),
                 };
                 Err(format!("lookup {host}: {text}"))
@@ -39,6 +40,7 @@ pub(super) fn system_lookup(host: String) -> BoxFuture<'static, Result<Vec<IpAdd
     })
 }
 
+#[must_use]
 pub fn split_host_port_ok(hostport: &str) -> bool {
     let Some(i) = hostport.rfind(':') else {
         return false;
@@ -151,6 +153,7 @@ pub async fn validate_tunnel_target_host_with(
     Ok((host.to_string(), canonical_ip(addrs[0]).to_string()))
 }
 
+#[must_use]
 pub fn is_reasonable_tunnel_hostname(host: &str) -> bool {
     if host.len() > 253 {
         return false;
@@ -188,6 +191,7 @@ fn v6_allowed(ip: Ipv6Addr) -> bool {
     ip.is_loopback() || seg[0] & 0xfe00 == 0xfc00 || seg[0] & 0xffc0 == 0xfe80
 }
 
+#[must_use]
 pub fn is_allowed_tunnel_target_ip(ip: IpAddr) -> bool {
     match canonical_ip(ip) {
         IpAddr::V4(v4) => v4_allowed(v4),
@@ -197,10 +201,10 @@ pub fn is_allowed_tunnel_target_ip(ip: IpAddr) -> bool {
 
 fn is_loopback_ip_text(host: &str) -> bool {
     host.parse::<IpAddr>()
-        .map(|ip| canonical_ip(ip).is_loopback())
-        .unwrap_or(false)
+        .is_ok_and(|ip| canonical_ip(ip).is_loopback())
 }
 
+#[must_use]
 pub fn tunnel_target_description(host_arg: &str, port: i64) -> String {
     let mut host = host_arg.trim();
     if host.is_empty() {

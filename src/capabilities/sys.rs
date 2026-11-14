@@ -6,7 +6,7 @@ use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::{json_script_handler, run_pwsh_json};
 
-const INFO: &str = r##"
+const INFO: &str = r#"
 $os = Get-CimInstance Win32_OperatingSystem
 $cs = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
@@ -89,9 +89,9 @@ $fw = switch ($env:firmware_type) { 'UEFI' { 'Uefi' } 'Legacy' { 'Bios' } defaul
     DeviceGuardVirtualizationBasedSecurityStatus = if ($dg) { Pick $vbs $dg.VirtualizationBasedSecurityStatus } else { $null }
     DeviceGuardSecurityServicesRunning = if ($dg) { ,@($dg.SecurityServicesRunning | ForEach-Object { Pick $dgSvc $_ }) } else { ,@() }
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+"#;
 
-const UPTIME: &str = r##"
+const UPTIME: &str = r#"
 $os = Get-CimInstance Win32_OperatingSystem
 $boot = $os.LastBootUpTime
 $now = Get-Date
@@ -101,16 +101,16 @@ $up = ($now - $boot).TotalSeconds
     uptime_seconds = [int64]$up
     last_boot_local = $boot.ToString("o")
 } | ConvertTo-Json -Compress
-"##;
+"#;
 
-const HOTFIXES: &str = r##"
+const HOTFIXES: &str = r#"
 Get-HotFix |
     Sort-Object InstalledOn -Descending |
     Select-Object HotFixID,Description,InstalledBy,@{n='InstalledOn';e={ if ($_.InstalledOn) { $_.InstalledOn.ToString("o") } else { $null } }} |
     ConvertTo-Json -Compress -Depth 4
-"##;
+"#;
 
-const ENV_TEMPLATE: &str = r##"
+const ENV_TEMPLATE: &str = r"
 $scope = @@SCOPE@@
 $prefix = @@PREFIX@@
 $entries = New-Object System.Collections.Generic.List[object]
@@ -134,9 +134,9 @@ if ($scope -eq 'all' -or $scope -eq 'process') { Add-Scope 'process' 'Process' }
     count   = $entries.Count
     entries = @($entries | Sort-Object scope, name)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const USERS: &str = r##"
+const USERS: &str = r#"
 $logon = Get-CimInstance Win32_LoggedOnUser -ErrorAction SilentlyContinue |
     ForEach-Object {
         $acc = $_.Antecedent
@@ -168,9 +168,9 @@ try {
     accounts = @($logon | Select-Object -First 50)
     terminal_sessions = @($sessions | Select-Object -First 50)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+"#;
 
-const TIMEZONE: &str = r##"
+const TIMEZONE: &str = r#"
 $tz = Get-TimeZone
 $now = Get-Date
 [ordered]@{
@@ -185,9 +185,9 @@ $now = Get-Date
     culture       = (Get-Culture).Name
     ui_culture    = (Get-UICulture).Name
 } | ConvertTo-Json -Compress
-"##;
+"#;
 
-const REBOOT_REQUIRED: &str = r##"
+const REBOOT_REQUIRED: &str = r"
 $reasons = @()
 if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
     $reasons += 'component_based_servicing'
@@ -205,9 +205,9 @@ $computerName = $env:COMPUTERNAME
     reasons = @($reasons)
     computer_name = $computerName
 } | ConvertTo-Json -Compress
-"##;
+";
 
-const POWER: &str = r##"
+const POWER: &str = r"
 Add-Type -AssemblyName System.Windows.Forms
 $status = [System.Windows.Forms.SystemInformation]::PowerStatus
 $plans = foreach ($line in @(powercfg.exe /list)) {
@@ -226,9 +226,9 @@ $active = @($plans | Where-Object { $_.active } | Select-Object -First 1)
     battery_percent = if ($status.BatteryChargeStatus -band 128) { $null } else { [int]($status.BatteryLifePercent * 100) }
     plans = @($plans)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const RESOURCES_TEMPLATE: &str = r##"
+const RESOURCES_TEMPLATE: &str = r#"
 $top = @@TOP@@
 $sampleMs = 1000
 $sampled = Get-Date
@@ -289,9 +289,9 @@ if ($null -ne $totalMB -and $totalMB -gt 0 -and $null -ne $freeMB) {
     top_processes_by_memory = @($topByMemory)
     top_processes_by_cpu = @($topByCpu)
 } | ConvertTo-Json -Compress -Depth 5
-"##;
+"#;
 
-const TIME_SYNC: &str = r##"
+const TIME_SYNC: &str = r"
 $lines = @(w32tm /query /status /verbose 2>&1 | ForEach-Object { [string]$_ })
 $code = $LASTEXITCODE
 $svc = Get-Service -Name W32Time -ErrorAction SilentlyContinue
@@ -304,7 +304,7 @@ $params = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services
     configured_servers = if ($params) { [string]$params.NtpServer } else { $null }
     lines = $lines
 } | ConvertTo-Json -Compress -Depth 3
-"##;
+";
 
 pub fn register(r: &mut Router) {
     super::register_specs(
@@ -388,8 +388,7 @@ fn leading_number(s: &str) -> Option<f64> {
     let end = t
         .char_indices()
         .find(|&(i, c)| !(c.is_ascii_digit() || c == '.' || (i == 0 && c == '-')))
-        .map(|(i, _)| i)
-        .unwrap_or(t.len());
+        .map_or(t.len(), |(i, _)| i);
     t[..end].parse::<f64>().ok().filter(|f| f.is_finite())
 }
 
@@ -494,13 +493,12 @@ pub fn shape_time_sync(raw: &Value, now_ms: i64) -> Value {
     let lines: Vec<String> = raw
         .get("lines")
         .and_then(Value::as_array)
-        .map(|a| {
+        .map_or_default(|a| {
             a.iter()
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     let code = raw.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
     let mut out = Map::new();
     for key in [
@@ -529,8 +527,7 @@ pub fn shape_time_sync(raw: &Value, now_ms: i64) -> Value {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(crate::util::millis_i64)
-        .unwrap_or(0)
+        .map_or(0, crate::util::millis_i64)
 }
 
 async fn sys_time_sync(ctx: Ctx, _args: Args) -> CapResult {
@@ -647,8 +644,8 @@ Time since Last Good Sync Time: 15080.9746700s
         assert_eq!(got["source"], "time.windows.com");
         assert_eq!(got["using_local_clock"], false);
         assert_eq!(got["poll_interval_seconds"], 4096);
-        assert_eq!(got["root_delay_seconds"], 0.0407987);
-        assert_eq!(got["phase_offset_seconds"], -0.0000346);
+        assert_eq!(got["root_delay_seconds"], 0.040_798_7);
+        assert_eq!(got["phase_offset_seconds"], -0.000_034_6);
         assert_eq!(got["state"], "Sync");
         assert_eq!(got["last_sync_error_code"], 2);
         assert_eq!(
@@ -667,7 +664,7 @@ Time since Last Good Sync Time: 15080.9746700s
     #[test]
     fn w32tm_failure_is_reported_as_text() {
         let raw = json!({
-            "exit_code": -2147023838,
+            "exit_code": -2_147_023_838,
             "service": "Stopped",
             "lines": ["The following error occurred: The service has not been started. (0x80070426)"],
         });

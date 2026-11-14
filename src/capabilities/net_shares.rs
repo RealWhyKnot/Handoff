@@ -3,7 +3,7 @@ use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 use super::net::{arg_bool, arg_int};
 use super::pwsh_out::run_pwsh_json;
 
-const SHARES_TEMPLATE: &str = r##"
+const SHARES_TEMPLATE: &str = r"
 $includeHidden = $@@HIDDEN@@
 $includeSessions = $@@SESSIONS@@
 $max = @@MAX@@
@@ -88,7 +88,7 @@ if ($includeSessions) {
     open_files = @($openFileEntries)
     errors = $errors
 } | ConvertTo-Json -Compress -Depth 5
-"##;
+";
 
 pub fn register(r: &mut Router) {
     super::register_specs(
@@ -105,6 +105,7 @@ pub struct NetSharesOptions {
     pub max_results: i64,
 }
 
+#[must_use]
 pub fn parse_net_shares_options(args: &Args) -> NetSharesOptions {
     let mut opts = NetSharesOptions {
         include_hidden: false,
@@ -129,6 +130,7 @@ pub fn parse_net_shares_options(args: &Args) -> NetSharesOptions {
     opts
 }
 
+#[must_use]
 pub fn shares_script(opts: &NetSharesOptions) -> String {
     SHARES_TEMPLATE
         .replace("@@HIDDEN@@", &opts.include_hidden.to_string())

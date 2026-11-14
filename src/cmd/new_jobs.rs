@@ -36,10 +36,27 @@ impl Drop for ActiveGuard {
     fn drop(&mut self) {
         self.active
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.id);
         self.token.cancel();
     }
+}
+
+fn start_timer(
+    timeout_ms: i64,
+    token: &CancellationToken,
+    timed_out: &Arc<AtomicBool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    (timeout_ms > 0).then(|| {
+        let token = token.clone();
+        let timed_out = Arc::clone(timed_out);
+        let after = Duration::from_millis(u64::try_from(timeout_ms).unwrap_or(u64::MAX));
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            timed_out.store(true, Ordering::SeqCst);
+            token.cancel();
+        })
+    })
 }
 
 impl Jobs {
@@ -64,7 +81,9 @@ impl Jobs {
     }
 
     fn active(&self) -> std::sync::MutexGuard<'_, HashMap<String, CancellationToken>> {
-        self.active.lock().unwrap_or_else(|e| e.into_inner())
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn start(&self, cmd: Command, num: usize) {
@@ -80,17 +99,7 @@ impl Jobs {
             };
 
             let timed_out = Arc::new(AtomicBool::new(false));
-            let timer = (cmd.timeout_ms > 0).then(|| {
-                let token = token.clone();
-                let timed_out = Arc::clone(&timed_out);
-                let after =
-                    Duration::from_millis(u64::try_from(cmd.timeout_ms).unwrap_or(u64::MAX));
-                tokio::spawn(async move {
-                    tokio::time::sleep(after).await;
-                    timed_out.store(true, Ordering::SeqCst);
-                    token.cancel();
-                })
-            });
+            let timer = start_timer(cmd.timeout_ms, &token, &timed_out);
 
             let (progress, mut forwarder) = progress_forwarder(jobs.bridge.clone(), cmd.id.clone());
             let mut out = jobs
@@ -111,23 +120,10 @@ impl Jobs {
                 forwarder.abort();
             }
             let stopped = token.is_cancelled() && !out.ok;
-            let why_stopped = if !stopped {
-                String::new()
-            } else if timed_out.load(Ordering::SeqCst) {
-                out.error = "command timed out".to_string();
-                format!(
-                    "It ran longer than the {} it was given.",
-                    human_duration(Duration::from_millis(
-                        u64::try_from(cmd.timeout_ms).unwrap_or(0)
-                    ))
-                )
+            let why_stopped = if stopped {
+                jobs.why_stopped(&mut out, cmd.timeout_ms, timed_out.load(Ordering::SeqCst))
             } else {
-                out.error = "command cancelled".to_string();
-                if jobs.root.is_cancelled() {
-                    "The session was ending.".to_string()
-                } else {
-                    "The helper stopped it.".to_string()
-                }
+                String::new()
             };
 
             let ending = host::ending_for(&out, stopped);
@@ -147,37 +143,58 @@ impl Jobs {
             ));
 
             jobs.write_audit(&cmd, &out, ending);
-            match jobs
-                .bridge
-                .send_command_result_or_queue(&cmd.id, &out)
-                .await
-            {
-                Ok(Delivery::Sent) => tracing::info!(
-                    "command result sent sid={} id={} ok={} elapsed_ms={}",
-                    jobs.sid,
-                    cmd.id,
-                    out.ok,
-                    out.elapsed_ms
-                ),
-                Ok(Delivery::Queued) => {
-                    tracing::info!("command result queued sid={} id={}", jobs.sid, cmd.id);
-                    console::line(&format!(
-                        "{}  The connection dropped before this result was sent. Handoff will send it when it reconnects, but the helper may need to run the command again.",
-                        tag(num)
-                    ));
-                }
-                Err(err) => {
-                    tracing::info!("send result failed sid={} id={}: {err}", jobs.sid, cmd.id);
-                    console::line(&format!(
-                        "{}  Handoff couldn't send this result to the helper: {}",
-                        tag(num),
-                        plain_error(&err)
-                    ));
-                }
-            }
+            jobs.deliver(&cmd, &out, num).await;
         });
     }
 
+    #[must_use]
+    fn why_stopped(&self, out: &mut Outcome, timeout_ms: i64, timed_out: bool) -> String {
+        if timed_out {
+            out.error = "command timed out".to_string();
+            format!(
+                "It ran longer than the {} it was given.",
+                human_duration(Duration::from_millis(
+                    u64::try_from(timeout_ms).unwrap_or(0)
+                ))
+            )
+        } else {
+            out.error = "command cancelled".to_string();
+            if self.root.is_cancelled() {
+                "The session was ending.".to_string()
+            } else {
+                "The helper stopped it.".to_string()
+            }
+        }
+    }
+
+    async fn deliver(&self, cmd: &Command, out: &Outcome, num: usize) {
+        match self.bridge.send_command_result_or_queue(&cmd.id, out).await {
+            Ok(Delivery::Sent) => tracing::info!(
+                "command result sent sid={} id={} ok={} elapsed_ms={}",
+                self.sid,
+                cmd.id,
+                out.ok,
+                out.elapsed_ms
+            ),
+            Ok(Delivery::Queued) => {
+                tracing::info!("command result queued sid={} id={}", self.sid, cmd.id);
+                console::line(&format!(
+                    "{}  The connection dropped before this result was sent. Handoff will send it when it reconnects, but the helper may need to run the command again.",
+                    tag(num)
+                ));
+            }
+            Err(err) => {
+                tracing::info!("send result failed sid={} id={}: {err}", self.sid, cmd.id);
+                console::line(&format!(
+                    "{}  Handoff couldn't send this result to the helper: {}",
+                    tag(num),
+                    plain_error(&err)
+                ));
+            }
+        }
+    }
+
+    #[must_use]
     pub fn cancel(&self, id: &str) -> bool {
         let token = self.active().get(id).cloned();
         match token {
@@ -196,6 +213,7 @@ impl Jobs {
         }
     }
 
+    #[must_use]
     pub fn active_count(&self) -> usize {
         self.active().len()
     }
@@ -219,9 +237,7 @@ impl Jobs {
             cap: cmd.kind.clone(),
             args: audit::trim_args(&cmd.extras),
             consent: decision.as_str().to_string(),
-            consent_scope: category_for(&cmd.kind)
-                .map(|c| c.as_str().to_string())
-                .unwrap_or_default(),
+            consent_scope: category_for(&cmd.kind).map_or_default(|c| c.as_str().to_string()),
             result: result.to_string(),
             elapsed_ms: out.elapsed_ms,
             detail: out.error.clone(),

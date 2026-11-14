@@ -17,6 +17,7 @@ impl ReconnectBackoff {
     const FIRST: Duration = Duration::from_millis(500);
     const CAP: Duration = Duration::from_secs(5);
 
+    #[must_use]
     pub fn new() -> ReconnectBackoff {
         ReconnectBackoff { next: Self::FIRST }
     }
@@ -43,8 +44,8 @@ impl Default for ReconnectBackoff {
 
 pub async fn sleep_cancel(cancel: &CancellationToken, d: Duration) -> bool {
     tokio::select! {
-        _ = tokio::time::sleep(d) => true,
-        _ = cancel.cancelled() => false,
+        () = tokio::time::sleep(d) => true,
+        () = cancel.cancelled() => false,
     }
 }
 
@@ -63,13 +64,13 @@ pub(super) async fn reconnect_bridge(
         }
 
         let attempt = cancel.child_token();
-        let result = match tokio::time::timeout(RECONNECT_TIMEOUT, bridge.reconnect(&attempt)).await
+        let result = if let Ok(r) =
+            tokio::time::timeout(RECONNECT_TIMEOUT, bridge.reconnect(&attempt)).await
         {
-            Ok(r) => r,
-            Err(_) => {
-                attempt.cancel();
-                Err("it took too long to answer".to_string())
-            }
+            r
+        } else {
+            attempt.cancel();
+            Err("it took too long to answer".to_string())
         };
         match result {
             Ok(()) => {

@@ -36,6 +36,7 @@ const USAGE: &str = "usage: handoff exec <view-url-or-token> <kind> [--arg k=v].
 
 pub(super) type Reply = Map<String, Value>;
 
+#[must_use]
 pub fn exec(args: &[String]) -> i32 {
     let (opts, parsed) = match parse_options("exec", args, &EXEC_FLAGS) {
         Ok(v) => v,
@@ -123,27 +124,31 @@ pub fn exec(args: &[String]) -> i32 {
         crate::outln!("{}", util::go_pretty_json(&Value::Object(reply.clone())));
     }
 
+    report(status, &reply, opts.json, timeout)
+}
+
+fn report(status: u16, reply: &Reply, json: bool, timeout: Duration) -> i32 {
     match status {
         200 => {
             let ok = reply.get("ok").and_then(Value::as_bool).unwrap_or(false);
-            if !opts.json {
-                print_exec_result(&reply, ok);
+            if !json {
+                print_exec_result(reply, ok);
             }
             if ok { 0 } else { EXIT_FAILED }
         }
         202 => {
-            if !opts.json {
+            if !json {
                 crate::errln!(
                     "Still running after {}. Fetch the result later at {}",
                     human_duration(timeout),
-                    reply_field(&reply, "result_url")
+                    reply_field(reply, "result_url")
                 );
             }
             EXIT_TIMEOUT
         }
         _ => {
-            if !opts.json {
-                crate::errln!("relay returned {status}: {}", reply_field(&reply, "error"));
+            if !json {
+                crate::errln!("relay returned {status}: {}", reply_field(reply, "error"));
             }
             1
         }
@@ -220,7 +225,7 @@ mod tests {
     }
 
     fn strs(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
+        items.iter().map(std::string::ToString::to_string).collect()
     }
 
     fn quiet_env() {

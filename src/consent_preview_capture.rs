@@ -113,7 +113,7 @@ fn find_window(thread: u32, title: &str) -> Option<HWND> {
 fn grab(hwnd: HWND, flags: u32) -> Option<(u32, u32, Vec<u8>)> {
     let mut rect = RECT::default();
     // SAFETY: rect is a live RECT the call fills in.
-    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    unsafe { GetWindowRect(hwnd, &raw mut rect) }.ok()?;
     let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
     if w <= 0 || h <= 0 {
         return None;
@@ -141,7 +141,15 @@ fn grab(hwnd: HWND, flags: u32) -> Option<(u32, u32, Vec<u8>)> {
             clr_important: 0,
         };
         let mut bgra = vec![0u8; crate::util::to_usize(width) * crate::util::to_usize(height) * 4];
-        let lines = GetDIBits(mem, bmp, 0, height, bgra.as_mut_ptr().cast(), &mut info, 0);
+        let lines = GetDIBits(
+            mem,
+            bmp,
+            0,
+            height,
+            bgra.as_mut_ptr().cast(),
+            &raw mut info,
+            0,
+        );
         SelectObject(mem, old);
         DeleteObject(bmp);
         DeleteDC(mem);
@@ -201,7 +209,12 @@ where
     let desk_addr = desk.expose_provenance();
     let thread = Arc::new(AtomicU32::new(0));
     let seen = Arc::clone(&thread);
-    let shower = std::thread::spawn(move || {
+    let dialog_thread = std::thread::spawn(move || {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
+
         let desk = std::ptr::with_exposed_provenance_mut::<c_void>(desk_addr);
         // SAFETY: desk is the desktop created above, closed only after both threads finish.
         if unsafe { SetThreadDesktop(desk) } == 0 {
@@ -210,10 +223,6 @@ where
                 std::io::Error::last_os_error()
             ));
         }
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetCurrentThreadId() -> u32;
-        }
         // SAFETY: GetCurrentThreadId takes no arguments and cannot fail.
         seen.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
         show();
@@ -221,7 +230,7 @@ where
     });
     let path = out_dir().join(name);
     let title = title.to_string();
-    let grabber = std::thread::spawn(move || -> Result<Shot, String> {
+    let capture_thread = std::thread::spawn(move || -> Result<Shot, String> {
         let desk = std::ptr::with_exposed_provenance_mut::<c_void>(desk_addr);
         // SAFETY: desk is the desktop created above, closed only after both threads finish.
         if unsafe { SetThreadDesktop(desk) } == 0 {
@@ -259,14 +268,14 @@ where
         close(hwnd);
         result
     });
-    let shot = grabber
+    let captured = capture_thread
         .join()
         .map_err(|_panic| "capture thread panicked".to_string())?;
-    let shown = shower
+    let dialog_result = dialog_thread
         .join()
         .map_err(|_panic| "dialog thread panicked".to_string())?;
     // SAFETY: both threads that used the desktop have been joined.
     unsafe { CloseDesktop(desk) };
-    shown?;
-    shot
+    dialog_result?;
+    captured
 }

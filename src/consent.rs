@@ -28,8 +28,8 @@ pub use super::consent_prompt::system_prompt;
 pub use super::consent_prompt::typed_answer;
 pub use super::consent_prompt::typed_question;
 
-pub const EXEC_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
-pub const FILES_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
+pub const EXEC_GRANT_TTL: Duration = Duration::from_mins(15);
+pub const FILES_GRANT_TTL: Duration = Duration::from_mins(15);
 pub const DENY_BACKOFF: Duration = Duration::from_secs(60);
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const PROMPT_CLOSE_WAIT: Duration = Duration::from_secs(3);
@@ -76,6 +76,7 @@ pub struct Request {
 }
 
 impl Request {
+    #[must_use]
     pub fn for_kind(kind: &str, summary: &str) -> Request {
         Request {
             kind: kind.to_string(),
@@ -84,16 +85,19 @@ impl Request {
         }
     }
 
+    #[must_use]
     pub fn asking(mut self, ask: Ask) -> Request {
         self.ask = ask;
         self
     }
 
+    #[must_use]
     pub fn showing(mut self, detail: Option<&str>) -> Request {
         self.detail = detail.map(str::to_string);
         self
     }
 
+    #[must_use]
     pub fn term(&self) -> Term {
         match self.category.or_else(|| category_for(&self.kind)) {
             Some(c) => term_for(c, self.ask),
@@ -176,6 +180,7 @@ mod tests {
     use crate::consent_prompt::DETAIL_LINES;
     use serde_json::Map;
     use serde_json::Value;
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
@@ -286,7 +291,7 @@ mod tests {
         let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         assert!(l.require(&tok(), req("ps.exec")).await.1.is_ok());
-        l.advance(EXEC_GRANT_TTL - Duration::from_secs(60));
+        l.advance(EXEC_GRANT_TTL.checked_sub(Duration::from_secs(60)).unwrap());
         assert!(l.require(&tok(), req("ps.exec")).await.1.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -458,13 +463,21 @@ mod tests {
             l.require(&tok(), req("fs.delete")).await.0,
             Decision::PromptAllowFor(15)
         );
-        l.advance(FILES_GRANT_TTL - Duration::from_secs(60));
+        l.advance(
+            FILES_GRANT_TTL
+                .checked_sub(Duration::from_secs(60))
+                .unwrap(),
+        );
         assert_eq!(
             l.require(&tok(), req("fs.mkdir")).await.0,
             Decision::GrantCached
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(l.grants().iter().all(|g| g.expires()));
+        assert!(
+            l.grants()
+                .iter()
+                .all(super::super::consent_ledger::Grant::expires)
+        );
 
         l.advance(Duration::from_secs(120));
         assert!(l.grants().is_empty());
@@ -684,12 +697,12 @@ mod tests {
                 .0,
             Decision::PromptAllowFor(30)
         );
-        l.advance(Duration::from_secs(29 * 60));
+        l.advance(Duration::from_mins(29));
         assert_eq!(
             l.require(&tok(), req("ps.exec")).await.0,
             Decision::GrantCached
         );
-        l.advance(Duration::from_secs(2 * 60));
+        l.advance(Duration::from_mins(2));
         assert!(l.grants().is_empty());
         assert_eq!(
             l.require(&tok(), req("ps.exec")).await.0,
@@ -705,8 +718,12 @@ mod tests {
                 .0,
             Decision::PromptAllowFor(5)
         );
-        assert!(l.grants().iter().all(|g| g.expires()));
-        l.advance(Duration::from_secs(5 * 60));
+        assert!(
+            l.grants()
+                .iter()
+                .all(super::super::consent_ledger::Grant::expires)
+        );
+        l.advance(Duration::from_mins(5));
         assert!(l.grants().is_empty());
     }
 
@@ -715,7 +732,7 @@ mod tests {
         let (p, calls) = counting(Answer::ForGrant, 0);
         let l = Ledger::new(p);
         assert!(l.require(&tok(), req("ps.exec")).await.1.is_ok());
-        l.advance(Duration::from_secs(10 * 60));
+        l.advance(Duration::from_mins(10));
 
         for ask in [Ask::Default, Ask::Once, Ask::Minutes(3)] {
             assert_eq!(
@@ -733,7 +750,7 @@ mod tests {
             Decision::PromptAllowFor(10)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        l.advance(Duration::from_secs(9 * 60));
+        l.advance(Duration::from_mins(9));
         assert_eq!(
             l.require(&tok(), req("ps.exec")).await.0,
             Decision::GrantCached
@@ -895,7 +912,10 @@ mod tests {
         assert!(parts.command.unwrap().chars().count() < 2_100);
         assert!(parts.summary.starts_with("Runs this PowerShell script"));
 
-        let lines: String = (1..=2000).map(|i| format!("Write-Output {i}\n")).collect();
+        let lines: String = (1..=2000).fold(String::new(), |mut out, i| {
+            writeln!(out, "Write-Output {i}").expect("writing to a String cannot fail");
+            out
+        });
         let parts = prompt_parts(
             &exec_request(
                 crate::capabilities::ps::consent_summary(&lines),

@@ -9,6 +9,7 @@ pub const LEVEL: i32 = 9;
 
 const CHUNK: usize = 64 << 10;
 
+#[must_use]
 pub fn offers_zstd(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(ZSTD)))
 }

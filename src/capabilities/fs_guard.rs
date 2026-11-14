@@ -319,7 +319,10 @@ struct Rules {
 }
 
 fn rules(env: Env) -> Rules {
-    let mut system: Vec<String> = SYSTEM_TREES.iter().map(|t| t.to_string()).collect();
+    let mut system: Vec<String> = SYSTEM_TREES
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     for key in ["SystemRoot", "windir"] {
         if let Some(base) = env_base(env, key) {
             system.extend(SYSTEM_ROOT_SUBTREES.iter().map(|t| format!("{base}{t}")));
@@ -366,7 +369,7 @@ fn check_mutable(
             "{kind}: won't change {shown} because SSH keys and settings live there"
         )));
     }
-    if norm.contains(STARTUP_TREE) && !(deleting && !norm.ends_with(STARTUP_TREE)) {
+    if norm.contains(STARTUP_TREE) && (!deleting || norm.ends_with(STARTUP_TREE)) {
         return Err(err(format!(
             "{kind}: won't change {shown} because Windows runs what's in the Startup folder at sign-in"
         )));
@@ -454,7 +457,10 @@ const PROTECTED_ROOTS: &[&str] = &[
 ];
 
 fn protected_roots(env: Env) -> Vec<String> {
-    let mut roots: Vec<String> = PROTECTED_ROOTS.iter().map(|r| r.to_string()).collect();
+    let mut roots: Vec<String> = PROTECTED_ROOTS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     for key in [
         "SystemRoot",
         "windir",
@@ -505,8 +511,7 @@ mod tests {
     fn refusal(rules: &Rules, kind: &str, path: &str, deleting: bool) -> String {
         check_mutable(rules, kind, path, path, deleting)
             .err()
-            .map(|e| e.message)
-            .unwrap_or_default()
+            .map_or_default(|e| e.message)
     }
 
     #[test]
@@ -854,8 +859,7 @@ mod tests {
         ] {
             let msg = guard_write_path("fs.write", path)
                 .err()
-                .map(|e| e.message)
-                .unwrap_or_default();
+                .map_or_default(|e| e.message);
             assert_eq!(
                 msg,
                 format!("fs.write: won't change {path} because it can hold passwords or keys")

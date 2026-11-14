@@ -9,6 +9,7 @@ mod tests {
     use super::*;
     use crate::capabilities::fs_lines_grep::grep;
     use serde_json::Value;
+    use std::fmt::Write as _;
     use tokio_util::sync::CancellationToken;
 
     use crate::capabilities::fs_lines_range::range;
@@ -338,7 +339,10 @@ mod tests {
     #[tokio::test]
     async fn match_cap_still_counts_every_match() {
         let dir = tempfile::tempdir().unwrap();
-        let body: String = (1..=50).map(|i| format!("hit {i}\nmiss\n")).collect();
+        let body: String = (1..=50).fold(String::new(), |mut out, i| {
+            write!(out, "hit {i}\nmiss\n").expect("writing to a String cannot fail");
+            out
+        });
         let path = write(dir.path(), "hits.txt", body.as_bytes());
         let out = run(
             "fs.grep",

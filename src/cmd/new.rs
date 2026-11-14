@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use tokio_util::sync::CancellationToken;
 
-use super::flags::{Def, FlagError, Options, parse_options};
+use super::flags::{Def, FlagError, Options, Verbosity, parse_options};
 use super::host::{self, Board, tag};
 use super::keys::{ENDING, start_keyboard_control};
 pub use super::new_jobs::Jobs;
@@ -44,6 +44,7 @@ pub const LOST: &str = "The connection to the Handoff server dropped. Handoff is
 pub const STILL_TRYING: &str = "Still trying to reconnect. Check that this computer is online. The helper's link will work again once Handoff is back.";
 pub const RECONNECTED: &str = "Reconnected. The helper can carry on with the same link.";
 
+#[must_use]
 pub fn new(args: &[String]) -> i32 {
     let (opts, parsed) = match parse_options("new", args, &NEW_FLAGS) {
         Ok(v) => v,
@@ -83,6 +84,7 @@ pub fn new(args: &[String]) -> i32 {
     code
 }
 
+#[must_use]
 pub fn short_sid(token: &str) -> String {
     token.get(..11).unwrap_or(token).to_string()
 }
@@ -130,6 +132,48 @@ fn print_welcome(board: &Board, welcome: Welcome) {
     crate::outln!();
 }
 
+fn open_audit_log(dir: &str) -> Option<Arc<Logger>> {
+    match Logger::new_in_dir(dir) {
+        Ok(l) => Some(Arc::new(l)),
+        Err(err) => {
+            tracing::info!("audit log unavailable: {err}");
+            console::eline(&format!(
+                "Handoff can't keep a record of this session: {}",
+                plain_error(&err.to_string())
+            ));
+            None
+        }
+    }
+}
+
+fn print_paths(relay_base: &str, log: Option<&Logger>) {
+    let log_path = supportlog::path().map_or_default(|p| p.display().to_string());
+    crate::outln!("Server:          {relay_base}");
+    crate::outln!("Support log:     {log_path}");
+    if let Some(log) = log {
+        crate::outln!("Activity record: {}", log.dir().display());
+    }
+}
+
+async fn stop_jobs(jobs: &Jobs) {
+    jobs.cancel_all();
+    let drain_until = tokio::time::Instant::now() + SHUTDOWN_DRAIN;
+    while jobs.active_count() > 0 && tokio::time::Instant::now() < drain_until {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn stop_on_ctrl_c(root: CancellationToken) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("shutdown requested by signal");
+            crate::outln!();
+            console::line(ENDING);
+            root.cancel();
+        }
+    });
+}
+
 pub(super) async fn session(opts: Options, mode: SessionMode) -> i32 {
     let SessionMode {
         read_only,
@@ -141,17 +185,7 @@ pub(super) async fn session(opts: Options, mode: SessionMode) -> i32 {
 
     let root = CancellationToken::new();
 
-    let log = match Logger::new_in_dir(&opts.audit_dir) {
-        Ok(l) => Some(Arc::new(l)),
-        Err(err) => {
-            tracing::info!("audit log unavailable: {err}");
-            console::eline(&format!(
-                "Handoff can't keep a record of this session: {}",
-                plain_error(&err.to_string())
-            ));
-            None
-        }
-    };
+    let log = open_audit_log(&opts.audit_dir);
 
     let mint = match tokio::time::timeout(MINT_TIMEOUT, relay::mint(&relay_base)).await {
         Ok(Ok(m)) => m,
@@ -162,15 +196,8 @@ pub(super) async fn session(opts: Options, mode: SessionMode) -> i32 {
     tracing::info!("mint ok sid={sid}");
 
     let board = Arc::new(Board::new(&mint.view_url, read_only));
-    if opts.verbose {
-        let log_path = supportlog::path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        crate::outln!("Server:          {relay_base}");
-        crate::outln!("Support log:     {log_path}");
-        if let Some(log) = &log {
-            crate::outln!("Activity record: {}", log.dir().display());
-        }
+    if opts.verbosity == Verbosity::Verbose {
+        print_paths(&relay_base, log.as_deref());
     }
     let keep_awake = !no_keep_awake && opts.keep_awake;
     let copied = std::io::stdout().is_terminal() && host::copy_to_clipboard(board.link());
@@ -184,17 +211,7 @@ pub(super) async fn session(opts: Options, mode: SessionMode) -> i32 {
         },
     );
 
-    {
-        let root = root.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                tracing::info!("shutdown requested by signal");
-                crate::outln!();
-                console::line(ENDING);
-                root.cancel();
-            }
-        });
-    }
+    stop_on_ctrl_c(root.clone());
 
     if keep_awake {
         stayawake::start(root.clone());
@@ -241,7 +258,7 @@ pub(super) async fn session(opts: Options, mode: SessionMode) -> i32 {
     tracing::info!("hello sent sid={sid} hostname={hostname}");
     bridge.start_heartbeat(root.clone());
     console::line("Connected. Waiting for the helper to open the link.");
-    if opts.verbose {
+    if opts.verbosity == Verbosity::Verbose {
         console::line(&format!("{} commands are available.", kinds.len()));
     }
 
@@ -257,11 +274,7 @@ pub(super) async fn session(opts: Options, mode: SessionMode) -> i32 {
     let mut backoff = ReconnectBackoff::new();
     while recv_iteration(&root, &sid, &bridge, &mut backoff, &jobs).await {}
 
-    jobs.cancel_all();
-    let drain_until = tokio::time::Instant::now() + SHUTDOWN_DRAIN;
-    while jobs.active_count() > 0 && tokio::time::Instant::now() < drain_until {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    stop_jobs(&jobs).await;
     root.cancel();
     bridge.close().await;
     consent::set_observer(None);
@@ -347,7 +360,7 @@ async fn recv_step(
         let viewers = cmd
             .extras
             .get("viewers")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(0);
         tracing::info!("presence sid={sid} viewers={viewers}");
@@ -375,7 +388,7 @@ async fn recv_step(
         if jobs.cancel(&target) {
             match jobs.board.number_of(&target) {
                 Some(num) => {
-                    console::line(&format!("{}  The helper asked to stop this.", tag(num)))
+                    console::line(&format!("{}  The helper asked to stop this.", tag(num)));
                 }
                 None => console::line("The helper asked to stop a command."),
             }
@@ -462,20 +475,26 @@ mod tests {
     fn bad_consent_mode_is_a_usage_error() {
         let args: Vec<String> = ["--relay", "http://127.0.0.1:9", "--consent", "maybe"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(new(&args), 2);
     }
 
     #[test]
     fn unknown_flag_is_a_usage_error() {
-        let args: Vec<String> = ["--bogus"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["--bogus"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert_eq!(new(&args), 2);
     }
 
     #[test]
     fn help_exits_with_two() {
-        let args: Vec<String> = ["-h"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["-h"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert_eq!(new(&args), 2);
     }
 

@@ -24,6 +24,14 @@ pub(super) fn fs_search(args: &Args, cancel: &tokio_util::sync::CancellationToke
     search(args, cancel, SEARCH_VISIT_CAP)
 }
 
+fn skip(is_dir: bool) -> Flow {
+    if is_dir {
+        Flow::SkipDir
+    } else {
+        Flow::Continue
+    }
+}
+
 pub(super) fn search(
     args: &Args,
     cancel: &tokio_util::sync::CancellationToken,
@@ -40,15 +48,11 @@ pub(super) fn search(
         return Err(err(format!("fs.search: bad pattern: {e}")));
     }
 
-    let mut max_results = int_arg(args, "max_results").unwrap_or(200);
-    if max_results <= 0 {
-        max_results = 200;
-    }
-    if max_results > 2000 {
-        max_results = 2000;
-    }
-    let mut max_depth = int_arg(args, "max_depth").unwrap_or(4);
-    max_depth = max_depth.clamp(0, 20);
+    let max_results = match int_arg(args, "max_results").unwrap_or(200) {
+        limit if limit <= 0 => 200,
+        limit => limit.min(2000),
+    };
+    let max_depth = int_arg(args, "max_depth").unwrap_or(4).clamp(0, 20);
     let include_dirs = bool_arg(args, "include_dirs").unwrap_or(false);
     let include_hidden = bool_arg(args, "include_hidden").unwrap_or(false);
 
@@ -79,19 +83,11 @@ pub(super) fn search(
         }
         let is_dir = node.is_dir;
         if is_hidden_name(name) && !include_hidden {
-            return if is_dir {
-                Flow::SkipDir
-            } else {
-                Flow::Continue
-            };
+            return skip(is_dir);
         }
         let depth = slash_depth(&node.path) - root_depth;
         if depth > max_depth {
-            return if is_dir {
-                Flow::SkipDir
-            } else {
-                Flow::Continue
-            };
+            return skip(is_dir);
         }
         if depth == 0 && !include_dirs {
             return Flow::Continue;

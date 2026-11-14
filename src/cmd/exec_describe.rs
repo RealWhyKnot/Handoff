@@ -21,34 +21,31 @@ pub(super) fn local_specs() -> Vec<Spec> {
 
 pub(super) fn describe_command(kind: &str) -> i32 {
     let specs = local_specs();
-    match specs.iter().find(|s| s.kind == kind) {
-        Some(spec) => {
-            crate::outln!("{}", describe_spec(spec));
-            0
+    if let Some(spec) = specs.iter().find(|s| s.kind == kind) {
+        crate::outln!("{}", describe_spec(spec));
+        0
+    } else {
+        let close: Vec<&str> = specs
+            .iter()
+            .map(|s| s.kind.as_str())
+            .filter(|k| {
+                let group = kind.split('.').next().unwrap_or(kind);
+                k.starts_with(&format!("{group}."))
+            })
+            .collect();
+        if close.is_empty() {
+            crate::errln!("There's no command called {kind}.");
+        } else {
+            crate::errln!(
+                "There's no command called {kind}. Similar ones: {}",
+                close.join(", ")
+            );
         }
-        None => {
-            let close: Vec<&str> = specs
-                .iter()
-                .map(|s| s.kind.as_str())
-                .filter(|k| {
-                    let group = kind.split('.').next().unwrap_or(kind);
-                    k.starts_with(&format!("{group}."))
-                })
-                .collect();
-            if close.is_empty() {
-                crate::errln!("There's no command called {kind}.");
-            } else {
-                crate::errln!(
-                    "There's no command called {kind}. Similar ones: {}",
-                    close.join(", ")
-                );
-            }
-            EXIT_USAGE
-        }
+        EXIT_USAGE
     }
 }
 
-fn param_type(kind: &ParamType) -> &'static str {
+fn param_type(kind: ParamType) -> &'static str {
     match kind {
         ParamType::String => "text",
         ParamType::Int => "number",
@@ -58,6 +55,7 @@ fn param_type(kind: &ParamType) -> &'static str {
     }
 }
 
+#[must_use]
 pub fn describe_spec(spec: &Spec) -> String {
     let mut out = Vec::new();
     let title = if spec.label.is_empty() {
@@ -95,27 +93,27 @@ pub fn describe_spec(spec: &Spec) -> String {
         "Argument", "Type", "Required", "Default", "Allowed", "About",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(std::string::ToString::to_string)
     .collect();
     let rows: Vec<Vec<String>> = spec
         .params
         .iter()
         .map(|p| {
-            let allowed = if !p.enum_values.is_empty() {
-                p.enum_values.join(", ")
-            } else {
+            let allowed = if p.enum_values.is_empty() {
                 match (p.min, p.max) {
                     (Some(lo), Some(hi)) => format!("{lo} to {hi}"),
                     (Some(lo), None) => format!("{lo} or more"),
                     (None, Some(hi)) => format!("up to {hi}"),
                     (None, None) => String::new(),
                 }
+            } else {
+                p.enum_values.join(", ")
             };
             vec![
                 p.name.clone(),
-                param_type(&p.kind).to_string(),
+                param_type(p.kind).to_string(),
                 if p.required { "yes" } else { "no" }.to_string(),
-                p.default.as_ref().map(cell).unwrap_or_default(),
+                p.default.as_ref().map_or_default(cell),
                 allowed,
                 p.description.clone(),
             ]

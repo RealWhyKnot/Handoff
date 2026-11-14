@@ -204,17 +204,13 @@ impl<'a> LineReader<'a> {
                 last_cr = enc.is_char(&chunk[take - unit..take], b'\r');
                 seen = true;
             }
-            match nl {
-                Some(i) => {
-                    self.pos += i + unit;
-                    return Ok(Some(finish(out, total, last_cr, unit, keep)));
-                }
-                None => {
-                    self.pos += usable;
-                    if !self.eof {
-                        self.fill()?;
-                    }
-                }
+            if let Some(i) = nl {
+                self.pos += i + unit;
+                return Ok(Some(finish(out, total, last_cr, unit, keep)));
+            }
+            self.pos += usable;
+            if !self.eof {
+                self.fill()?;
             }
         }
     }

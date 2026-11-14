@@ -28,6 +28,7 @@ pub fn register(r: &mut Router) {
     );
 }
 
+#[must_use]
 pub fn is_public_unicast(ip: IpAddr) -> bool {
     match go_ip(ip) {
         IpAddr::V4(a) => {
@@ -291,6 +292,70 @@ fn is_redirect(code: u16) -> bool {
     matches!(code, 301 | 302 | 303 | 307 | 308)
 }
 
+async fn first_lookup(
+    cancel: &CancellationToken,
+    host: &str,
+    allow_private: bool,
+) -> Result<Vec<IpAddr>, HandlerError> {
+    guard_lookup(cancel, host, None, allow_private)
+        .await
+        .map_err(|err| match err {
+            GuardError::Lookup(e) => {
+                HandlerError::plain(format!("net.curl: resolve {}: {e}", go_quote(host)))
+            }
+            GuardError::Private(ip) => HandlerError::plain(format!(
+                "net.curl: refusing private/loopback destination {ip}"
+            )),
+        })
+}
+
+fn check_scheme(op: &str, next: &Url) -> Result<(), HandlerError> {
+    if next.scheme() == "http" || next.scheme() == "https" {
+        return Ok(());
+    }
+    Err(HandlerError::plain(format!(
+        "{op} {}: unsupported protocol scheme {}",
+        go_quote(&shown_url(next, None)),
+        go_quote(next.scheme())
+    )))
+}
+
+fn referer_for(cur: &Url, next: &Url) -> Option<String> {
+    if cur.scheme() == "https" && next.scheme() == "http" {
+        return None;
+    }
+    let mut r = cur.clone();
+    let _ = r.set_username("");
+    let _ = r.set_password(None);
+    Some(r.to_string())
+}
+
+async fn read_body(
+    resp: &mut reqwest::Response,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> (Vec<u8>, bool) {
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            () = cancel.cancelled() => break,
+            r = tokio::time::timeout_at(deadline, resp.chunk()) => r,
+        };
+        match chunk {
+            Ok(Ok(Some(c))) => {
+                body.extend_from_slice(&c);
+                if body.len() > BODY_CAP {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    let truncated = body.len() > BODY_CAP;
+    body.truncate(BODY_CAP);
+    (body, truncated)
+}
+
 pub async fn run_curl(
     cancel: &CancellationToken,
     url_str: &str,
@@ -307,20 +372,7 @@ pub async fn run_curl(
 
     let mut cur = parse_go_url(url_str).map_err(HandlerError::plain)?;
     let host = hostname(&cur);
-    let mut addrs = match guard_lookup(cancel, &host, None, allow_private).await {
-        Ok(a) => a,
-        Err(GuardError::Lookup(e)) => {
-            return Err(HandlerError::plain(format!(
-                "net.curl: resolve {}: {e}",
-                go_quote(&host)
-            )));
-        }
-        Err(GuardError::Private(ip)) => {
-            return Err(HandlerError::plain(format!(
-                "net.curl: refusing private/loopback destination {ip}"
-            )));
-        }
-    };
+    let mut addrs = first_lookup(cancel, &host, allow_private).await?;
 
     let deadline = Instant::now() + timeout;
     let mut hops = 0usize;
@@ -341,7 +393,7 @@ pub async fn run_curl(
         }
         hops += 1;
         let sent = tokio::select! {
-            _ = cancel.cancelled() => return Err(fail("context canceled".to_string())),
+            () = cancel.cancelled() => return Err(fail("context canceled".to_string())),
             r = tokio::time::timeout_at(deadline, req.send()) => r,
         };
         let resp =
@@ -358,8 +410,7 @@ pub async fn run_curl(
         let loc = resp
             .headers()
             .get(LOCATION)
-            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
-            .unwrap_or_default();
+            .map_or_default(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
         if !is_redirect(code) || loc.is_empty() {
             break resp;
         }
@@ -384,22 +435,8 @@ pub async fn run_curl(
                 return Err(fail(format!("redirect to private dest {ip}")));
             }
         }
-        if next.scheme() != "http" && next.scheme() != "https" {
-            let next_shown = shown_url(&next, None);
-            return Err(HandlerError::plain(format!(
-                "{op} {}: unsupported protocol scheme {}",
-                go_quote(&next_shown),
-                go_quote(next.scheme())
-            )));
-        }
-        referer = if cur.scheme() == "https" && next.scheme() == "http" {
-            None
-        } else {
-            let mut r = cur.clone();
-            let _ = r.set_username("");
-            let _ = r.set_password(None);
-            Some(r.to_string())
-        };
+        check_scheme(op, &next)?;
+        referer = referer_for(&cur, &next);
         cur = next;
         first = false;
     };
@@ -407,29 +444,11 @@ pub async fn run_curl(
     let status = resp.status().as_u16();
     let headers = header_map(resp.headers());
 
-    let mut body: Vec<u8> = Vec::new();
-    if http_method == Method::GET {
-        loop {
-            let chunk = tokio::select! {
-                _ = cancel.cancelled() => break,
-                r = tokio::time::timeout_at(deadline, resp.chunk()) => r,
-            };
-            match chunk {
-                Ok(Ok(Some(c))) => {
-                    body.extend_from_slice(&c);
-                    if body.len() > BODY_CAP {
-                        break;
-                    }
-                }
-                _ => break,
-            }
-        }
-    }
-    let mut truncated = false;
-    if body.len() > BODY_CAP {
-        body.truncate(BODY_CAP);
-        truncated = true;
-    }
+    let (body, truncated) = if http_method == Method::GET {
+        read_body(&mut resp, cancel, deadline).await
+    } else {
+        (Vec::new(), false)
+    };
 
     let mut out = Map::new();
     out.insert("status".into(), json!(status));

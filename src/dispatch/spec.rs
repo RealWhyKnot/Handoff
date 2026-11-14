@@ -16,16 +16,8 @@ pub enum ParamType {
     BytesBase64,
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
-
-fn is_zero(n: &usize) -> bool {
-    *n == 0
-}
-
-fn is_zero_u32(n: &u32) -> bool {
-    *n == 0
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 fn is_empty_vec<T>(v: &[T]) -> bool {
@@ -41,7 +33,7 @@ pub struct Param {
     pub name: String,
     #[serde(rename = "type")]
     pub kind: ParamType,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
@@ -53,13 +45,14 @@ pub struct Param {
     pub enum_values: Vec<String>,
     #[serde(default, skip_serializing_if = "is_empty_vec")]
     pub aliases: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub max_bytes: usize,
     #[serde(default, skip_serializing_if = "is_empty_str")]
     pub description: String,
 }
 
 impl Param {
+    #[must_use]
     pub fn new(name: &str, kind: ParamType) -> Param {
         Param {
             name: name.to_string(),
@@ -68,42 +61,56 @@ impl Param {
         }
     }
 
+    #[must_use]
     pub fn required(mut self) -> Param {
         self.required = true;
         self
     }
 
+    #[must_use]
     pub fn default_value(mut self, value: Value) -> Param {
         self.default = Some(value);
         self
     }
 
+    #[must_use]
     pub fn range(mut self, min: i64, max: i64) -> Param {
         self.min = Some(min);
         self.max = Some(max);
         self
     }
 
+    #[must_use]
     pub fn enum_of(mut self, values: &[&str]) -> Param {
-        self.enum_values = values.iter().map(|v| v.to_string()).collect();
+        self.enum_values = values
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         self
     }
 
+    #[must_use]
     pub fn aliases(mut self, aliases: &[&str]) -> Param {
-        self.aliases = aliases.iter().map(|v| v.to_string()).collect();
+        self.aliases = aliases
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         self
     }
 
+    #[must_use]
     pub fn max_bytes(mut self, max_bytes: usize) -> Param {
         self.max_bytes = max_bytes;
         self
     }
 
+    #[must_use]
     pub fn describe(mut self, description: &str) -> Param {
         self.description = description.to_string();
         self
     }
 
+    #[must_use]
     pub fn effective_max_bytes(&self) -> usize {
         match (self.max_bytes, self.kind) {
             (0, ParamType::String) => DEFAULT_STRING_MAX_BYTES,
@@ -119,9 +126,9 @@ pub struct Spec {
     pub label: String,
     #[serde(default, skip_serializing_if = "is_empty_str")]
     pub description: String,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub risky: bool,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub default_timeout_ms: u32,
     #[serde(default, skip_serializing_if = "is_empty_vec")]
     pub params: Vec<Param>,
@@ -141,6 +148,7 @@ pub struct Bound {
 }
 
 impl Spec {
+    #[must_use]
     pub fn plain(kind: &str) -> Spec {
         Spec {
             kind: kind.to_string(),

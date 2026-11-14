@@ -66,6 +66,9 @@ unreachable_pub = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"

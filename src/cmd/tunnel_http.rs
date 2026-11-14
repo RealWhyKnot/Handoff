@@ -14,6 +14,7 @@ const HTTP_METHOD_PREFIXES: [&[u8]; 8] = [
     b"TRACE ",
 ];
 
+#[must_use]
 pub fn default_tunnel_http_host(host: &str, port: i64) -> String {
     let host = host.trim();
     if host.is_empty() || is_loopback_tunnel_host(host) {
@@ -43,6 +44,7 @@ fn is_loopback_tunnel_host(host: &str) -> bool {
     }
 }
 
+#[must_use]
 pub fn rewrite_http_host_header(data: &[u8], host: &str) -> Option<Vec<u8>> {
     if host.is_empty() {
         return Some(data.to_vec());

@@ -3,7 +3,7 @@ use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 use super::proc::{fill, int_arg, load_specs};
 use super::pwsh_out::run_pwsh_json;
 
-const TEMPLATE: &str = r##"
+const TEMPLATE: &str = r"
 $max = @@MAX@@
 $entries = Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue |
     Sort-Object Location, Name |
@@ -24,7 +24,7 @@ $entries = Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue |
     count = @($entries).Count
     entries = @($entries)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
 pub fn register(r: &mut Router) {
     for spec in load_specs(include_str!("specs/startup.json")) {
@@ -32,6 +32,7 @@ pub fn register(r: &mut Router) {
     }
 }
 
+#[must_use]
 pub fn max_results_arg(args: &Args) -> i64 {
     let mut max = int_arg(args, "limit", 300);
     if max <= 0 {

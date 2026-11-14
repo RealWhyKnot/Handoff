@@ -51,7 +51,7 @@ pub fn init() -> io::Result<PathBuf> {
 }
 
 pub fn path() -> Result<PathBuf, String> {
-    let override_dir = DIR_OVERRIDE.lock().map(|g| g.clone()).unwrap_or_default();
+    let override_dir = DIR_OVERRIDE.lock().map_or_default(|g| g.clone());
     if !override_dir.is_empty() {
         return Ok(Path::new(&override_dir).join("handoff.log"));
     }
@@ -68,12 +68,12 @@ pub fn path() -> Result<PathBuf, String> {
     }
 }
 
+#[must_use]
 pub fn path_for_executable(exe: &Path) -> PathBuf {
     let dir = exe.parent().unwrap_or_else(|| Path::new(""));
     let base = exe
         .file_name()
-        .map(|b| b.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .map_or_default(|b| b.to_string_lossy().into_owned());
     let name = match base.rfind('.') {
         Some(i) => &base[..i],
         None => &base[..],
@@ -117,10 +117,7 @@ pub fn write(args: fmt::Arguments<'_>) {
     if logger.lines % 256 != 0 {
         return;
     }
-    let too_big = file
-        .metadata()
-        .map(|m| m.len() >= MAX_BYTES)
-        .unwrap_or(false);
+    let too_big = file.metadata().is_ok_and(|m| m.len() >= MAX_BYTES);
     if too_big {
         logger.file = None;
         rotate(&logger.path);
@@ -158,9 +155,7 @@ pub fn close() {
 }
 
 fn current_exe_string() -> String {
-    std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
+    std::env::current_exe().map_or_default(|p| p.display().to_string())
 }
 
 #[cfg(test)]

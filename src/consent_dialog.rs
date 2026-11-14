@@ -65,6 +65,28 @@ impl Default for Options {
     }
 }
 
+fn pump(hwnd: HWND, st: *const State) {
+    let mut msg = MSG::default();
+    loop {
+        // SAFETY: st is still allocated, and the window procedure only runs on this thread.
+        if unsafe { (*st).done } {
+            break;
+        }
+        // SAFETY: msg is a live MSG the call fills in.
+        let got = unsafe { GetMessageW(&raw mut msg, None, 0, 0) };
+        if got.0 <= 0 {
+            break;
+        }
+        // SAFETY: msg was just filled in by GetMessageW and hwnd is the dialog window.
+        unsafe {
+            if !IsDialogMessageW(hwnd, &raw const msg).as_bool() {
+                let _ = TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
+            }
+        }
+    }
+}
+
 pub fn show(req: &Request, opts: &Options) -> Result<Answer, ConsentError> {
     let f = Fonts::new(opts.dpi);
     let area = opts.area.unwrap_or_else(work_area);
@@ -108,7 +130,7 @@ pub fn show(req: &Request, opts: &Options) -> Result<Answer, ConsentError> {
         ..Default::default()
     };
     // SAFETY: wc is a live WNDCLASSEXW whose class name is a static string.
-    unsafe { RegisterClassExW(&wc) };
+    unsafe { RegisterClassExW(&raw const wc) };
     let ex = if opts.steal_focus {
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST
     } else {
@@ -116,7 +138,7 @@ pub fn show(req: &Request, opts: &Options) -> Result<Answer, ConsentError> {
     };
     let mut r = rect(0, 0, lay.width, lay.height);
     // SAFETY: r is a live RECT the call adjusts in place.
-    let _ = unsafe { AdjustWindowRectEx(&mut r, STYLE, false, ex) };
+    let _ = unsafe { AdjustWindowRectEx(&raw mut r, STYLE, false, ex) };
     let (ow, oh) = (r.right - r.left, r.bottom - r.top);
     let x = area.left + (area.width - ow).max(0) / 2;
     let y = area.top + (area.height - oh).max(0) / 2;
@@ -138,13 +160,10 @@ pub fn show(req: &Request, opts: &Options) -> Result<Answer, ConsentError> {
             Some(st.cast_const().cast()),
         )
     };
-    let hwnd = match created {
-        Ok(h) => h,
-        Err(_) => {
-            // SAFETY: st came from Box::into_raw above and no window holds it.
-            drop(unsafe { Box::from_raw(st) });
-            return message_box(req, opts);
-        }
+    let Ok(hwnd) = created else {
+        // SAFETY: st came from Box::into_raw above and no window holds it.
+        drop(unsafe { Box::from_raw(st) });
+        return message_box(req, opts);
     };
     if opts.steal_focus {
         // SAFETY: hwnd is the window created above.
@@ -152,25 +171,7 @@ pub fn show(req: &Request, opts: &Options) -> Result<Answer, ConsentError> {
             let _ = SetForegroundWindow(hwnd);
         }
     }
-    let mut msg = MSG::default();
-    loop {
-        // SAFETY: st is still allocated, and the window procedure only runs on this thread.
-        if unsafe { (*st).done } {
-            break;
-        }
-        // SAFETY: msg is a live MSG the call fills in.
-        let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-        if got.0 <= 0 {
-            break;
-        }
-        // SAFETY: msg was just filled in by GetMessageW and hwnd is the dialog window.
-        unsafe {
-            if !IsDialogMessageW(hwnd, &msg).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-    }
+    pump(hwnd, st);
     // SAFETY: st is still allocated, and the window procedure only runs on this thread.
     if !unsafe { (*st).done } {
         // SAFETY: st is still allocated and hwnd is still open, since done was false.

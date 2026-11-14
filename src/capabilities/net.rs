@@ -5,7 +5,7 @@ use crate::dispatch::{Args, CapResult, Ctx, HandlerError, Router, handler};
 use super::pwsh::ps_single_quote;
 use super::pwsh_out::{json_script_handler, run_pwsh_json};
 
-const ADAPTERS: &str = r##"
+const ADAPTERS: &str = r"
 Get-NetAdapter | ForEach-Object {
     $cfg = Get-NetIPConfiguration -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue
     [ordered]@{
@@ -20,13 +20,13 @@ Get-NetAdapter | ForEach-Object {
         dns_servers = @($cfg.DNSServer.ServerAddresses)
     }
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const ROUTES: &str = r##"Get-NetRoute | Select-Object DestinationPrefix,NextHop,InterfaceAlias,RouteMetric,InterfaceMetric | ConvertTo-Json -Compress"##;
+const ROUTES: &str = r"Get-NetRoute | Select-Object DestinationPrefix,NextHop,InterfaceAlias,RouteMetric,InterfaceMetric | ConvertTo-Json -Compress";
 
-const ARP: &str = r##"Get-NetNeighbor | Where-Object {$_.State -ne 'Permanent'} | Select-Object IPAddress,LinkLayerAddress,@{n='State';e={[string]$_.State}},InterfaceAlias | ConvertTo-Json -Compress"##;
+const ARP: &str = r"Get-NetNeighbor | Where-Object {$_.State -ne 'Permanent'} | Select-Object IPAddress,LinkLayerAddress,@{n='State';e={[string]$_.State}},InterfaceAlias | ConvertTo-Json -Compress";
 
-const DNS_CACHE: &str = r##"
+const DNS_CACHE: &str = r"
 $types = @{ 1 = 'A'; 2 = 'NS'; 5 = 'CNAME'; 6 = 'SOA'; 12 = 'PTR'; 15 = 'MX'; 16 = 'TXT'; 28 = 'AAAA'; 33 = 'SRV'; 64 = 'SVCB'; 65 = 'HTTPS' }
 $statuses = @{ 0 = 'Success'; 9003 = 'NameError'; 9501 = 'NoRecords'; 9701 = 'RecordDoesNotExist' }
 $sections = @{ 1 = 'Answer'; 2 = 'Authority'; 3 = 'Additional' }
@@ -36,9 +36,9 @@ Get-DnsClientCache | Select-Object Entry,Name,
     @{n='Status';e={Name-Of $statuses $_.Status}},
     @{n='Section';e={Name-Of $sections $_.Section}},
     TimeToLive,DataLength,Data | ConvertTo-Json -Compress
-"##;
+";
 
-const LISTENERS: &str = r##"
+const LISTENERS: &str = r"
 $tcp = @()
 try {
     $tcp = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
@@ -93,9 +93,9 @@ try {
     tcp = @($tcp)
     udp = @($udp)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const CONNECTIONS_TEMPLATE: &str = r##"
+const CONNECTIONS_TEMPLATE: &str = r#"
 $max_results = @@MAX@@
 Get-NetTCPConnection@@STATE@@@@PID@@ -ErrorAction SilentlyContinue |
     Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,CreationTime |
@@ -122,9 +122,9 @@ Get-NetTCPConnection@@STATE@@@@PID@@ -ErrorAction SilentlyContinue |
     Sort-Object state, local_address, local_port |
     Select-Object -First $max_results |
     ConvertTo-Json -Compress
- "##;
+ "#;
 
-const FIREWALL: &str = r##"
+const FIREWALL: &str = r"
 $profiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue |
     Select-Object @{n='profile';e={[string]$_.Name}},
                   @{n='enabled';e={[bool]$_.Enabled}},
@@ -148,9 +148,9 @@ $rules = Get-NetFirewallRule -ErrorAction SilentlyContinue |
     profiles = @($profiles)
     enabled_rules_sample = @($rules)
 } | ConvertTo-Json -Compress -Depth 5
-"##;
+";
 
-const WLAN: &str = r##"
+const WLAN: &str = r"
 $adapters = @()
 $intRaw = (netsh wlan show interfaces) 2>$null
 if ($LASTEXITCODE -ne 0 -or -not $intRaw) {
@@ -187,9 +187,9 @@ if ($profRaw) {
     adapters  = @($adapters)
     profiles  = @($profiles)
 } | ConvertTo-Json -Compress -Depth 4
-"##;
+";
 
-const TLS_TEMPLATE: &str = r##"
+const TLS_TEMPLATE: &str = r#"
 $host_target = @@HOST@@
 $port_target = @@PORT@@
 $timeoutMs = @@TIMEOUT@@
@@ -240,7 +240,7 @@ try {
     $out.elapsed_ms = [int]((Get-Date) - $start).TotalMilliseconds
 }
 $out | ConvertTo-Json -Compress -Depth 5
-"##;
+"#;
 
 pub fn register(r: &mut Router) {
     super::register_specs(
@@ -260,6 +260,7 @@ pub fn register(r: &mut Router) {
     );
 }
 
+#[must_use]
 pub fn arg_string(args: &Args, name: &str) -> Option<String> {
     match args.get(name) {
         Some(Value::String(s)) => Some(s.clone()),
@@ -275,10 +276,12 @@ pub fn arg_bool(args: &Args, name: &str) -> Option<bool> {
     args.get(name).and_then(Value::as_bool)
 }
 
+#[must_use]
 pub fn normalize_connection_state(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
+#[must_use]
 pub fn is_allowed_connection_state(state: &str) -> bool {
     matches!(
         state,
@@ -333,10 +336,10 @@ pub fn connections_script(args: &Args) -> Result<String, HandlerError> {
         max_results = 1000;
     }
 
-    let state_filter = if state != "all" {
-        format!(" -State {}", ps_single_quote(&state))
-    } else {
+    let state_filter = if state == "all" {
         String::new()
+    } else {
+        format!(" -State {}", ps_single_quote(&state))
     };
 
     Ok(CONNECTIONS_TEMPLATE

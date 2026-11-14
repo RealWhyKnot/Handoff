@@ -44,7 +44,7 @@ fn walk_node(node: &Node, f: &mut dyn FnMut(&Node) -> Flow) -> bool {
     let Ok(rd) = fs::read_dir(&node.path) else {
         return true;
     };
-    let mut items: Vec<fs::DirEntry> = rd.filter_map(|e| e.ok()).collect();
+    let mut items: Vec<fs::DirEntry> = rd.filter_map(std::result::Result::ok).collect();
     items.sort_by_key(|e| e.file_name().to_string_lossy().into_owned());
     for ent in items {
         let name = ent.file_name().to_string_lossy().into_owned();
@@ -52,7 +52,7 @@ fn walk_node(node: &Node, f: &mut dyn FnMut(&Node) -> Flow) -> bool {
         let info = ent.metadata().ok().map(|md| info_of(&md, &ent.path()));
         let is_dir = match &info {
             Some(i) => i.dir,
-            None => ent.file_type().map(|t| t.is_dir()).unwrap_or(false),
+            None => ent.file_type().is_ok_and(|t| t.is_dir()),
         };
         let child = Node {
             path,

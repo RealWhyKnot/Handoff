@@ -2,6 +2,7 @@ use std::process::Command;
 
 pub const USAGE: &str = "usage: handoff connect <view-url-or-token>";
 
+#[must_use]
 pub fn connect_url(arg: &str, relay: &str) -> String {
     if arg.starts_with("http://") || arg.starts_with("https://") {
         return arg.to_string();
@@ -9,6 +10,7 @@ pub fn connect_url(arg: &str, relay: &str) -> String {
     format!("{}/v/{}", relay.trim_end_matches('/'), arg)
 }
 
+#[must_use]
 pub fn default_relay() -> String {
     let relay = crate::util::env_var("HANDOFF_RELAY");
     if relay.is_empty() {
@@ -25,6 +27,7 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+#[must_use]
 pub fn connect(args: &[String]) -> i32 {
     let Some(arg) = args.first() else {
         crate::errln!("{USAGE}");

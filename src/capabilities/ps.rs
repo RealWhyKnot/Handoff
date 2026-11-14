@@ -25,7 +25,9 @@ pub fn register(r: &mut Router) {
 }
 
 fn take_slot(now: Instant) -> Result<(), HandlerError> {
-    let mut history = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let mut history = HISTORY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     history.retain(|t| now.saturating_duration_since(*t) < WINDOW);
     if history.len() >= LIMIT {
         return Err(HandlerError::plain(format!(
@@ -52,6 +54,7 @@ pub fn exec_script(args: &Args) -> Result<String, HandlerError> {
     Ok(script)
 }
 
+#[must_use]
 pub fn consent_summary(script: &str) -> String {
     let shown = for_display(script, PROMPT_CHARS, PROMPT_LINES);
     let mut text = format!(
@@ -113,7 +116,10 @@ mod tests {
     }
 
     fn reset_history() {
-        HISTORY.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        HISTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     fn counting_prompt(allow: bool) -> (Prompt, Arc<AtomicUsize>) {
@@ -277,7 +283,12 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.message, "the host declined this request");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(HISTORY.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        assert!(
+            HISTORY
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
     }
 
     #[test]

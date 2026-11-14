@@ -72,6 +72,7 @@ pub fn init() -> bool {
     on
 }
 
+#[must_use]
 pub fn color_wanted(no_color: &str, stdout_is_terminal: bool) -> bool {
     no_color.is_empty() && stdout_is_terminal
 }
@@ -97,7 +98,7 @@ fn enable_vt() -> bool {
             return false;
         };
         let mut mode = CONSOLE_MODE(0);
-        if GetConsoleMode(handle, &mut mode).is_err() {
+        if GetConsoleMode(handle, &raw mut mode).is_err() {
             return false;
         }
         if mode.0 & ENABLE_VIRTUAL_TERMINAL_PROCESSING.0 != 0 {
@@ -116,6 +117,7 @@ fn enable_vt() -> bool {
     true
 }
 
+#[must_use]
 pub fn paint(tone: Tone, text: &str) -> String {
     if !color_on() || text.is_empty() {
         return text.to_string();
@@ -131,6 +133,7 @@ pub fn paint(tone: Tone, text: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+#[must_use]
 pub fn clock() -> String {
     let (h, m, s) = local_hms();
     format!("{h:02}:{m:02}:{s:02}")
@@ -156,7 +159,7 @@ fn local_hms() -> (u16, u16, u16) {
     }
     let mut t = SystemTime::default();
     // SAFETY: t is a live SystemTime with the layout GetLocalTime writes.
-    unsafe { GetLocalTime(&mut t) };
+    unsafe { GetLocalTime(&raw mut t) };
     (t.hour, t.minute, t.second)
 }
 
@@ -167,6 +170,7 @@ fn local_hms() -> (u16, u16, u16) {
     (part(secs / 3600), part((secs % 3600) / 60), part(secs % 60))
 }
 
+#[must_use]
 pub fn stamp(text: &str) -> String {
     format!("{}  {}", paint(Tone::Dim, &clock()), text)
 }
@@ -179,6 +183,7 @@ pub fn eline(text: &str) {
     crate::errln!("{}", stamp(text));
 }
 
+#[must_use]
 pub fn human_duration(d: Duration) -> String {
     let ms = d.as_millis();
     if ms < 100 {
@@ -208,10 +213,12 @@ pub fn human_duration(d: Duration) -> String {
     }
 }
 
+#[must_use]
 pub fn human_ms(ms: i64) -> String {
     human_duration(Duration::from_millis(u64::try_from(ms).unwrap_or(0)))
 }
 
+#[must_use]
 pub fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if n < 1024 {
@@ -234,6 +241,7 @@ pub fn human_bytes(n: u64) -> String {
     }
 }
 
+#[must_use]
 pub fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
@@ -253,6 +261,7 @@ const PLAIN_ERRORS: [(&str, &str); 5] = [
     ("signal: killed", "the program was stopped"),
 ];
 
+#[must_use]
 pub fn plain_error(text: &str) -> String {
     let mut out = text.replace(['\r', '\n'], " ");
     for (from, to) in PLAIN_ERRORS {
@@ -293,6 +302,7 @@ fn go_duration_word(word: &str) -> Option<Duration> {
     util::parse_go_duration(word)
 }
 
+#[must_use]
 pub fn first_sentence(text: &str) -> &str {
     let text = text.trim();
     match text.find(". ") {
@@ -301,6 +311,7 @@ pub fn first_sentence(text: &str) -> &str {
     }
 }
 
+#[must_use]
 pub fn display_width(s: &str) -> usize {
     let mut width = 0;
     let mut chars = s.chars().peekable();
@@ -318,6 +329,7 @@ pub fn display_width(s: &str) -> usize {
     width
 }
 
+#[must_use]
 pub fn char_width(c: char) -> usize {
     let cp = u32::from(c);
     if c.is_control() || zero_width(cp) {
@@ -381,16 +393,19 @@ const DEFAULT_COLUMNS: usize = 100;
 const MIN_COLUMNS: usize = 40;
 const MAX_COLUMNS: usize = 400;
 
+#[must_use]
 pub fn columns() -> usize {
     terminal_columns()
         .unwrap_or(DEFAULT_COLUMNS)
         .clamp(MIN_COLUMNS, MAX_COLUMNS)
 }
 
+#[must_use]
 pub fn body_width() -> usize {
     body_width_for(columns())
 }
 
+#[must_use]
 pub fn body_width_for(columns: usize) -> usize {
     columns.max(MIN_COLUMNS) - 1 - STAMP_WIDTH
 }
@@ -407,7 +422,7 @@ fn terminal_columns() -> Option<usize> {
     unsafe {
         let handle = GetStdHandle(STD_OUTPUT_HANDLE).ok()?;
         let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
-        GetConsoleScreenBufferInfo(handle, &mut info).ok()?;
+        GetConsoleScreenBufferInfo(handle, &raw mut info).ok()?;
         let cols = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
         usize::try_from(cols).ok().filter(|c| *c > 0)
     }
@@ -421,6 +436,7 @@ fn terminal_columns() -> Option<usize> {
     util::env_var("COLUMNS").trim().parse().ok()
 }
 
+#[must_use]
 pub fn stamp_lines(lines: &[String]) -> String {
     let indent = " ".repeat(STAMP_WIDTH);
     let mut out = String::new();
@@ -440,6 +456,7 @@ pub fn lines(lines: &[String]) {
     crate::outln!("{}", stamp_lines(lines));
 }
 
+#[must_use]
 pub fn pad(s: &str, width: usize) -> String {
     let w = display_width(s);
     if w >= width {
@@ -448,6 +465,7 @@ pub fn pad(s: &str, width: usize) -> String {
     format!("{s}{}", " ".repeat(width - w))
 }
 
+#[must_use]
 pub fn table(headers: &[String], rows: &[Vec<String>], max_cell: usize) -> String {
     let cut = |s: &str| -> String {
         let s = s.replace(['\r', '\n', '\t'], " ");

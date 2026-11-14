@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
@@ -78,9 +79,10 @@ fn failed(ms: i64, error: &str) -> Outcome {
 }
 
 pub(crate) fn samples() -> Vec<Sample> {
-    let huge: String = (1..=2000)
-        .map(|i| format!("Write-Output \"line {i}\"\n"))
-        .collect();
+    let huge: String = (1..=2000).fold(String::new(), |mut out, i| {
+        writeln!(out, "Write-Output \"line {i}\"").expect("writing to a String cannot fail");
+        out
+    });
     let long_line = format!(
         "$x = '{}'; Write-Output $x.Length",
         "abcdefghij".repeat(1000)
@@ -231,7 +233,7 @@ fn render(colour: bool, columns: usize) -> String {
 }
 
 #[test]
-#[ignore]
+#[ignore = "writes preview files to look at by hand"]
 fn write_after_preview() {
     let dir = out_dir();
     for columns in [80, 120] {
