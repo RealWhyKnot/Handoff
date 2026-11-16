@@ -3,7 +3,7 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-unmaintained = "all"
+unmaintained = "workspace"
 unsound = "all"
 
 [licenses]

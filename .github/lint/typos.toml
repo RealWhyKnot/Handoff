@@ -9,3 +9,8 @@ extend-exclude = [
   "node_modules/",
   ".yarn/",
 ]
+
+[default.extend-words]
+rto = "rto"
+caf = "caf"
+syncd = "syncd"
