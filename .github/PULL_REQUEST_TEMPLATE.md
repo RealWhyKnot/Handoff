@@ -1,3 +1,9 @@
+## Linked issue
+
+<!-- Link the issue where we agreed on this change. PRs without a prior issue may be closed. -->
+
+Closes #
+
 ## Summary
 
 <!-- Why this change? The diff shows what. -->

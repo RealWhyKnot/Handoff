@@ -25,7 +25,7 @@ Your PC only makes an outgoing connection to the relay at handoff.whyknot.dev, s
 
 ## What the helper can do
 
-There are 57 commands. They cover system and hardware info, network checks (ping, traceroute, DNS, HTTP, TLS, Wi-Fi, firewall), processes and services, event logs and drivers, the registry, Windows Update and Defender status, installed apps, files, Raspberry Pi Pico boards and PowerShell. A helper can also open a tunnel to a port on your PC or to a device on your network, such as a router's admin page. The [command reference](https://handoff.whyknot.dev/docs#commands) lists each one with its options.
+Handoff has dozens of commands. They cover system and hardware info, network checks (ping, traceroute, DNS, HTTP, TLS, Wi-Fi, firewall), processes and services, event logs and drivers, the registry, Windows Update and Defender status, installed apps, startup items, scheduled tasks, printers, files, Raspberry Pi Pico boards and PowerShell. A helper can also open a tunnel to a port on your PC or to a device on your network, such as a router's admin page. The [command reference](https://handoff.whyknot.dev/docs#commands) lists each one with its options, and the same list is in the [OpenAPI description](https://handoff.whyknot.dev/openapi.json).
 
 ## What needs your OK
 
@@ -88,7 +88,7 @@ The exe ends up at `target/release/handoff.exe`. `rust-toolchain.toml` pins the 
 cargo build --release --features embed_picotool
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the checks a pull request has to pass.
+Found a bug or want a change? Open an [issue](https://github.com/RealWhyKnot/Handoff/issues/new/choose) first. [CONTRIBUTING.md](CONTRIBUTING.md) explains why and lists the checks that apply if we agree on a pull request.
 
 ## License
 
