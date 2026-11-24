@@ -15,7 +15,7 @@
   <a href="https://github.com/RealWhyKnot/Handoff/releases/latest">Download</a> ·
   <a href="https://handoff.whyknot.dev">Website</a> ·
   <a href="https://handoff.whyknot.dev/docs">API docs</a> ·
-  <a href="https://github.com/RealWhyKnot/Handoff/issues/new?template=bug_report.yml">Report a bug</a> ·
+  <a href="https://github.com/RealWhyKnot/Handoff/issues/new">Report a bug</a> ·
   <a href=".github/SECURITY.md">Security</a>
 </p>
 
@@ -88,7 +88,7 @@ The exe ends up at `target/release/handoff.exe`. `rust-toolchain.toml` pins the 
 cargo build --release --features embed_picotool
 ```
 
-Found a bug or want a change? Open an [issue](https://github.com/RealWhyKnot/Handoff/issues/new/choose) first. [CONTRIBUTING.md](CONTRIBUTING.md) explains why and lists the checks that apply if we agree on a pull request.
+Found a bug or want a change? Open an [issue](https://github.com/RealWhyKnot/Handoff/issues/new) first. [CONTRIBUTING.md](CONTRIBUTING.md) explains why and lists the checks that apply if we agree on a pull request.
 
 ## License
 
