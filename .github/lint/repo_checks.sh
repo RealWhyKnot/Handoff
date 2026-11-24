@@ -4,9 +4,11 @@ shopt -s inherit_errexit
 
 root=$(git rev-parse --show-toplevel)
 cd "${root}"
-if [[ ${OSTYPE} == msys* || ${OSTYPE} == cygwin* ]]; then
+tools=(typos gitleaks actionlint zizmor)
+[[ ! -f Cargo.toml ]] || tools+=(cargo cargo-deny)
+if [[ ${OSTYPE} == msys* || ${OSTYPE} == cygwin* ]] && ! hash "${tools[@]}" 2>/dev/null; then
   windows_root=$(pwd -W)
-  MSYS_NO_PATHCONV=1 exec timeout 600 wsl --distribution "${LINT_WSL_DISTRO:?Set LINT_WSL_DISTRO to your lint distro}" \
+  MSYS_NO_PATHCONV=1 exec timeout 600 wsl --distribution "${LINT_WSL_DISTRO:?Set LINT_WSL_DISTRO}" \
     --cd "${windows_root}" -- bash .github/lint/repo_checks.sh
 fi
 
@@ -42,9 +44,7 @@ while IFS= read -r entry || [[ -n ${entry} ]]; do
   entry=${entry%$'\r'}
   [[ -z ${entry} ]] || vendored+=("${entry}")
 done <.github/lint/vendored-paths.txt
-workflows=()
-actions=()
-manifests=()
+workflows=() actions=() manifests=()
 files=$(mktemp)
 scan_directory=''
 trap 'rm -f -- "${files}"; if [[ -n ${scan_directory} ]]; then rm -rf -- "${scan_directory}"; fi' EXIT
