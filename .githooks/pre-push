@@ -11,10 +11,4 @@ timeout 1200 cargo clippy --workspace --all-targets --locked -- -D warnings
 timeout 1200 cargo test --workspace --all-targets --locked
 git ls-files -z -- '*.rs' | xargs -0 -r awk -f .github/lint/rust-style.awk
 timeout 600 pwsh -NoProfile -File .github/lint/Invoke-PSLint.ps1
-if [[ ${OSTYPE} == msys* || ${OSTYPE} == cygwin* ]] && ! hash shellcheck shfmt 2>/dev/null; then
-  windows_root=$(pwd -W)
-  MSYS_NO_PATHCONV=1 timeout 180 wsl --distribution "${LINT_WSL_DISTRO:?Set LINT_WSL_DISTRO to your lint distro}" \
-    --cd "${windows_root}" -- bash .githooks/check-shell
-else
-  bash .githooks/check-shell
-fi
+bash .github/lint/check-shell

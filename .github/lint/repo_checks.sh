@@ -4,13 +4,6 @@ shopt -s inherit_errexit
 
 root=$(git rev-parse --show-toplevel)
 cd "${root}"
-tools=(typos gitleaks actionlint zizmor)
-[[ ! -f Cargo.toml ]] || tools+=(cargo cargo-deny)
-if [[ ${OSTYPE} == msys* || ${OSTYPE} == cygwin* ]] && ! hash "${tools[@]}" 2>/dev/null; then
-  windows_root=$(pwd -W)
-  MSYS_NO_PATHCONV=1 exec timeout 600 wsl --distribution "${LINT_WSL_DISTRO:?Set LINT_WSL_DISTRO}" \
-    --cd "${windows_root}" -- bash .github/lint/repo_checks.sh
-fi
 
 require_tool() {
   if ! command -v "${1}" >/dev/null; then
