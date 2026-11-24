@@ -23,7 +23,7 @@ cargo build --release
 
 Keep the change small. A cleanup you noticed on the way goes in its own PR.
 
-Run `./.github/lint/lint.ps1`. It runs the style check, `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` and the PowerShell and shell lint, the same checks CI runs. On Windows the shell lint runs in WSL: set `LINT_WSL_DISTRO` to a distro that has shellcheck and shfmt, or it is skipped.
+Run `./.github/lint/lint.ps1`. It runs the style check, `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` and the PowerShell and shell lint, the same checks CI runs. The shell lint needs shellcheck and shfmt on your PATH, and on Windows it runs through Git Bash.
 
 ### Commits
 
